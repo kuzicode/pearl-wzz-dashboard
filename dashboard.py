@@ -2084,7 +2084,7 @@ summary:hover{color:var(--acc)}
 .divider{border:0;border-top:1px solid var(--bd);margin:11px 0}
 .toast{position:fixed;bottom:22px;right:22px;background:var(--card);border:1px solid var(--g2);color:var(--acc);padding:12px 17px;border-radius:11px;font-size:12px;z-index:30;display:none;box-shadow:0 18px 50px -20px rgba(63,224,197,.4)}
 /* ===== Pearl Login v2 · 纯海洋浪花 + 玻璃拟态 ===== */
-#login{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;padding:48px 32px;overflow:hidden;font-family:"Noto Sans SC",system-ui,-apple-system,"PingFang SC",sans-serif;color:#1d2c3a;-webkit-font-smoothing:antialiased;--lblue:#2f6fe4;--lteal:#34b6a0;--lcyan:#56d4d8}
+#login{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:48px 32px;overflow:hidden;font-family:"Noto Sans SC",system-ui,-apple-system,"PingFang SC",sans-serif;color:#1d2c3a;-webkit-font-smoothing:antialiased;--lblue:#2f6fe4;--lteal:#34b6a0;--lcyan:#56d4d8}
 #login .scene{position:absolute;inset:0;z-index:0;overflow:hidden}
 #login .sky{position:absolute;inset:0;background:linear-gradient(180deg,#dfeaf3 0%,#cfe1ee 12%,#a9cfe0 30%,#76b6cf 48%,#4f9fc2 63%,#3f93bb 80%,#2f7da6 100%)}
 #login .sun{position:absolute;top:6%;left:50%;transform:translateX(-50%);width:520px;height:300px;background:radial-gradient(ellipse at 50% 30%,rgba(255,255,255,.85),rgba(255,255,255,0) 62%);filter:blur(6px)}
@@ -2200,6 +2200,54 @@ main{flex:1;min-width:0;margin-left:210px;padding:26px 32px;display:flex;justify
 .logbox{background:#060a11;border:1px solid var(--bd);border-radius:9px;padding:12px 14px;font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#9fb8cc;max-height:400px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin-top:9px}
 .logbox::-webkit-scrollbar{width:9px;height:9px}.logbox::-webkit-scrollbar-thumb{background:var(--bd2);border-radius:6px}
 select{background:#0c1320;border:1px solid var(--bd2);color:var(--tx);border-radius:9px;padding:7px 9px;font-family:inherit;font-size:12px;cursor:pointer}
+/* ===== 移动端组件(桌面默认隐藏) ===== */
+.tscroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.mtopbar,.mtoggle,.mbackdrop{display:none}
+/* ===== 手机端适配 ===== */
+@media (max-width:760px){
+  body{font-size:13px}
+  .mtopbar{display:flex;align-items:center;gap:12px;position:fixed;top:0;left:0;right:0;height:52px;z-index:35;padding:0 14px;background:rgba(15,22,35,.86);backdrop-filter:blur(10px);border-bottom:1px solid var(--bd)}
+  :root[data-theme=light] .mtopbar{background:rgba(255,255,255,.9)}
+  .mtopbar .mbrand{font-weight:800;font-size:15px;letter-spacing:.3px;background:linear-gradient(92deg,var(--g1),var(--g2));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .mtoggle{display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:9px;border:1px solid var(--bd);background:rgba(127,127,127,.08);color:var(--hi);font-size:18px;line-height:1;cursor:pointer;flex-shrink:0}
+  .side{transform:translateX(-100%);transition:transform .25s ease;z-index:45;width:264px;box-shadow:0 0 60px rgba(0,0,0,.5)}
+  .side.open{transform:none}
+  .mbackdrop{display:block;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:44;opacity:0;pointer-events:none;transition:opacity .25s ease}
+  .mbackdrop.open{opacity:1;pointer-events:auto}
+  .app{display:block}
+  main{margin-left:0;padding:14px 12px 30px}
+  .app main{padding-top:64px}
+  .inner{max-width:none}
+  .wrap{padding:0 12px;margin:14px auto}
+  .cards{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .card{padding:13px 14px}.card .v{font-size:21px}.card .k{font-size:10px}
+  .wallet{flex-direction:column;align-items:stretch;gap:12px}
+  .wallet .addr{font-size:13px}.wallet .row{flex-wrap:wrap}
+  .platbox,.lcard,.kpanel{padding-left:13px;padding-right:13px}
+  .platbox .top{flex-wrap:wrap;gap:7px}
+  .bal{margin-left:0}
+  .sec{margin-top:20px}
+  .khead{flex-wrap:wrap;gap:7px}.kpers{margin-left:0}
+  .tscroll table{min-width:560px}
+  .grid2{grid-template-columns:1fr;gap:4px 0}.grid2 .fld{margin-top:7px}
+  .gpurow{grid-template-columns:1fr 1fr 1fr 30px;gap:6px}
+  .lgrid{grid-template-columns:1fr}
+  input,textarea,select,#login .field input{font-size:16px}
+}
+@media (max-width:480px){
+  .cards{grid-template-columns:1fr 1fr}
+  #login{padding:26px 16px;align-items:flex-start;overflow-y:auto}
+  #login .stage{gap:4px}
+  #login .pearl-scene{min-height:188px}
+  #login .pearl{width:138px;height:138px}
+  #login .ring.r1{width:206px;height:206px}#login .ring.r2{width:236px;height:236px}#login .ring.r3{width:266px;height:266px}
+  #login .orbit{width:186px;height:186px}#login .orbit.o2{width:242px;height:242px}
+  #login .dot.d1{transform:translate(93px,0)}#login .dot.d2{transform:translate(-93px,0)}#login .dot.d3{transform:translate(0,93px)}
+  #login .orbit.o2 .dot.d1{transform:translate(121px,0)}#login .orbit.o2 .dot.d2{transform:translate(-85px,85px)}#login .orbit.o2 .dot.d3{transform:translate(85px,-85px)}
+  #login .sweep,#login .ripple{display:none}
+  #login .pcard{max-width:340px;padding:20px 20px 16px}
+  #login .ltitle{font-size:23px}
+}
 </style></head><body>
 <script>try{if(localStorage.getItem('pearl_theme')!='dark')document.documentElement.setAttribute('data-theme','light');}catch(e){document.documentElement.setAttribute('data-theme','light');}</script>
 <div id=login style=display:none>
@@ -2224,6 +2272,8 @@ select{background:#0c1320;border:1px solid var(--bd2);color:var(--tx);border-rad
 <div class=foot onclick=guestLogin()><span class=eye>👁</span><span>偷窥模式 · 仅看仪表盘</span><span class=lmono>/ PEEK MODE</span></div>
 </section></main></div>
 
+<div class=mtopbar><button class=mtoggle onclick=toggleSide() aria-label="菜单">☰</button><span class=mbrand>今晚挖珍珠</span></div>
+<div class=mbackdrop id=mbackdrop onclick=closeSide()></div>
 <div class=app>
 <aside class=side>
 <div class=sbrand><span class=orb style="width:26px;height:26px"></span><span class=bt>今晚挖<i class=pg>珍珠</i><small>PEARL SNIPER v1</small></span></div>
@@ -2253,12 +2303,14 @@ let u=document.getElementById('uname');if(u)u.textContent=adm?'admin':'访客 GU
 let dot=document.querySelector('.suser .dot');if(dot)dot.style.background=adm?'var(--g2)':'var(--warn)';
 if(!adm&&view=='cf'){nav('ov');}}
 function toast(m){let t=document.getElementById('toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',2600);}
+function toggleSide(){const s=document.querySelector('.side');const b=document.getElementById('mbackdrop');if(!s)return;const open=s.classList.toggle('open');if(b)b.classList.toggle('open',open);}
+function closeSide(){const s=document.querySelector('.side');const b=document.getElementById('mbackdrop');if(s)s.classList.remove('open');if(b)b.classList.remove('open');}
 function nav(t){if(t=='ov'){view='ov';}else if(t=='lk'){view='lk';}else if(t.indexOf('doc:')==0){view='doc';docsub=t.split(':')[1];}else{view='cf';subtab=t.split(':')[1];}
 document.querySelectorAll('.ni').forEach(e=>e.classList.toggle('on',e.dataset.nav==t));
 document.getElementById('ov').style.display=view=='ov'?'':'none';
 document.getElementById('lk').style.display=view=='lk'?'':'none';
 document.getElementById('doc').style.display=view=='doc'?'':'none';
-document.getElementById('cf').style.display=view=='cf'?'':'none';refresh();}
+document.getElementById('cf').style.display=view=='cf'?'':'none';refresh();closeSide();}
 function copyAddr(a){(navigator.clipboard?navigator.clipboard.writeText(a):Promise.reject()).then(()=>toast('钱包地址已复制')).catch(()=>toast('复制失败, 请手动选中'));}
 async function api(p,opt){const r=await fetch(p,opt);if(r.status==401){document.getElementById('login').style.display='flex';throw 'auth';}document.getElementById('login').style.display='none';return r.json();}
 function afterAuth(role){ROLE=role||'admin';document.getElementById('login').style.display='none';if(ROLE!='admin'&&view=='cf')view='ov';applyRole();refresh();}
@@ -2321,7 +2373,7 @@ let price=m.price_label?esc(m.price_label):(m.price==null?'-':'$'+fnum(m.price,3
 let gpu=(m.gpu&&m.gpu!='?')?esc(m.gpu):'<span class=muted>—</span>';
 return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}<td>${esc(m.id)}</td><td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?8:7} class=muted>无符合机器</td></tr>`;
 plat+=`<div class=platbox><div class=top><b>${esc(v.label||aid)}</b>${badges}${bh}<span class=muted style="font-size:11px;margin-left:8px">$${fnum(acctBurn,3)}/h${pv!='merged'?' ('+poolName(pv)+')':''}</span></div>${sstat}
-<table><tr>${p=='salad'?'<th>组</th>':''}<th>实例</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th>矿池</th><th></th></tr>${rows}</table></div>`;}
+<div class=tscroll><table><tr>${p=='salad'?'<th>组</th>':''}<th>实例</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
 <div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addr>${esc(d.wallet)}</div></div>
@@ -2362,7 +2414,7 @@ ${ssl?`<span class=muted style="font-size:12px">统计自 ${ssl} 起算</span>`:
 </div>
 </div>
 ${hrPanel}
-<div class=sec><div class=lbl>矿池在挖 WORKER</div><table><tr><th>Worker</th><th>GPU</th><th>算力</th><th>IP</th></tr>${wk}</table></div>
+<div class=sec><div class=lbl>矿池在挖 WORKER</div><div class=tscroll><table><tr><th>Worker</th><th>GPU</th><th>算力</th><th>IP</th></tr>${wk}</table></div></div>
 <div class=sec><div class=lbl>各平台租用情况</div>${plat}</div>`;
 let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=localStorage.getItem('pool_view')||'merged';
 // renderOverview 每次重建 DOM 后恢复 K线展开状态
