@@ -2,6 +2,175 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Salad scid 健康检测 + 半自动弹窗重登] — 2026-06-17
+
+dashboard 启动/运行时检测 salad portal 会话(scid)缺失或过期,自动弹有头浏览器引导人工重登,登录完成自动续上抓取——不再需要手动盯着重跑 salad_login.py。
+
+### Added — 新增
+- **scid 健康检测**:`should_relogin`(纯函数)判定——会话文件**缺失**或**连续 2 轮抓取全空**(scid 过期)且距上次重登尝试满冷却(默认 30min)→ 触发重登。启动时(缺失账号)+ 运行中(连续空)都检测。
+- **半自动重登 `auto_login`**:弹有头 Chromium 到 portal,**自动轮询 portal-api 检测登录完成**(替代旧的 `input()` 等回车,后台 nohup 进程也能用);你人工过完 Turnstile/OTP、scid 生效后自动存会话、关窗、续上抓取;超时(默认 10min)放弃。
+- run_manager 每账号维护 `consecutive_empty` 计数 + `last_relogin` 冷却,过期/缺失触发 auto_login 并用新会话重建 context。
+
+### Changed — 变更
+- `start_portal_manager` 不再因 session 文件缺失而跳过账号(改按 `salad.enabled`),缺失的账号交给 run_manager 引导登录。
+
+### Notes — 注意
+- **优雅降级**:playwright 缺失 / 无 GUI 环境(ssh/服务器)弹窗失败 → 回退现状(log 提示手动 `salad_login.py`),不崩。
+
+---
+
+## [Salad 逐实例低效判定加固] — 2026-06-12
+
+修复多卡弹性组下低效判定的两个边界 bug,让死机/掉队机器被可靠清理。
+
+### Fixed — 修复
+- **死机(无容器日志 + 不在矿池)被漏判**:原逻辑两数据源都没有时直接跳过判定,致 0 算力死机不被清理。改为矿池 API 正常(能确认真离线)时视为 0 算力判低效,且双无 running 实例**绕过新实例长宽限**——首次观测后满 `low_efficiency_stop_seconds`(默认 5min)即 reallocate;矿池 API 也挂时仍跳过不杀(防抖动误杀)。
+- **多卡组逗号串误归一**:salad 弹性组的 gpu 字段(`RTX 4090,RTX 5090,...`)被 `normalize_gpu` 拼串后命中首个 "5090" → 误取最严阈值(300)。改为含逗号即返回空,回退组级阈值。
+- tests: `test_salad_pool_authoritative.py` 加 missing/绕宽限 case + 新增 `test_normalize_gpu_multi.py`。
+
+---
+
+## [挖矿成本指标 + 产出口径自重置] — 2026-06-11
+
+新增「挖矿成本」量化每个 $PRL 的电租成本并对比币价提示盈亏;产出口径改为自重置,重置统计后真正归零。
+
+### Added — 新增
+- **挖矿成本卡(两指标)**:
+  - 累计挖矿成本 `cost_cumulative_usd` = 累计租金 ÷ 累计产出(按当前矿池视图)。
+  - 最近 3 小时实时成本 `cost_recent3h_usd` = (当前每小时租金 × 3) ÷ 最近 3h 产出(全局口径,不随视图变)。
+  - 卡片两行各与实时币价对比:低于币价绿(盈利)/ 高于红(应关机);无数据显 —。
+- **产出滚动快照**:每 5 分钟记一次、裁剪保留 4h,用于算「最近 3h 产出」(运行不足 3h 显 —)。
+
+### Changed — 变更
+- **产出口径改为「自重置」**:非 PearlHash 池产出 = 自重置增量(全期值 − 重置基线,基线含 pending),口径统一为 `since_reset`,消除合并视图「口径不一」警示。**重置统计后累计产出真正归零**(此前用全期值,重置不归零)。平均每小时产出、利润口径随之统一。
+
+### Fixed — 修复
+- **salad RTX 4080 SUPER 成本显示成价格区间**(如 `$0.090–0.250/h`):salad 组为 batch 优先级且 gpu-classes 无 4080 SUPER class,定价两路都查不到 → 回退组级区间。改为别名复用 salad RTX 4080 class 的实时(batch)价,显示真实单价。
+
+---
+
+## [herominers + pearlfortune 双矿池 + 算力趋势图 + 池详情] — 2026-06-10
+
+新增 herominers、pearlfortune 两个矿池(共支持 4 池),默认切到 pearlfortune;池卡片加详情条与算力趋势图。
+
+### Added — 新增
+- **两个新矿池**:herominers、pearlfortune 注册接入(POOLS 驱动,共 PearlHash / TW Pool / herominers / pearlfortune 4 池),配置页可切换/一键迁移。
+- **默认矿池改为 pearlfortune**(active_pool 兜底)。
+- **池卡片详情条**:待结算、累计收益、份额(good/invalid/stale)、网络信息(高度/爆块)、worker 离线标记。
+  - pearlfortune 接 ledger(已付/收益)+ pending/费率;herominers 接 shares + pool_info。
+- **可折叠算力趋势图**:每池每小时算力折线(canvas);pf/twpool/herominers 显示,pearlhash/合并视图隐藏。
+- 待结算余额计入累计产出;每小时产出改用「总产出 ÷ 周期」口径。
+
+### Changed — 变更
+- pearlfortune 默认镜像 v1.1.1 → **v1.1.2**(修复 Salad 加壳 miner PID1 崩溃无限重启)。
+- salad 低效判定按机器所在池路由:pearlfortune 池权威 TH 门槛 / herominers 退容器日志。
+- `parse_latest_hashrate` 支持 pearlfortune `proof_per_sec` 日志算力。
+
+### Fixed — 修复
+- herominers 余额改读 `stats.balance`(真实数据证实,修此前取不到余额)。
+
+---
+
+## [Salad portal 真实 GPU/余额 + 池权威逐实例低效] — 2026-06-09
+
+通过浏览器会话从 Salad portal 抓真实单卡型号/单价/余额;salad 低效判定改为「矿池权威、逐实例」。
+
+### Added — 新增
+- **Salad portal 抓取**(常驻 headless Playwright,持登录会话):
+  - 每实例**真实单卡 GPU 型号 + 单价**(公共 API 不返回 GPU,portal 是唯一来源)。
+  - **账号真实余额**(前端显示「实时余额」,优先于手填估算)。
+  - 一次性有头登录 `salad_login.py` 存会话,之后 headless 静默续期。
+- **salad 累计租金改用 portal 真实余额下降量**(实测扣费;非-salad 仍 price×time)。
+- **累计产出卡加「平均每小时产出」**(自重置口径)。
+- 多矿池框架雏形:POOL_MONITORS 注册表 + build_summary/pool_view 跨池 POOLS 驱动。
+
+### Changed — 变更
+- **salad 低效判定改为「矿池权威、逐实例」**:矿池在线算力 ≥ 门槛=健康;曾在池出现却离线(即使容器日志在挖)即 reallocate;矿池 API 挂 / 无 machine_id / 新实例宽限期则退容器日志判定(防误杀)。
+- salad twpool 镜像换成 `mrkidbk/pearl-miner-twpool:v1.9.1`(每实例唯一 worker;runpod/vast 向后兼容)。
+- 日志算力↔实例改按 `machine_id` 关联(salad API instance_id 偶发 None,此前致算力显示 0)。
+- 项目改用 **uv** 管理(pyproject + uv.lock + Python 3.14)。
+
+### Fixed — 修复
+- `_twpool_view` 剔除矿池上报的损坏算力(单 worker > 2000 TH/s)。
+- `parse_latest_hashrate` 支持 twpool 镜像日志格式。
+
+### Notes — 注意
+- 新增 `scripts/restart-dashboard.sh` 安全重启看板(杀旧 → 等端口释放 → 起新 → 验证监听)。
+
+---
+
+## [机器分池可视化 + 全面分池计算] — 2026-06-08
+
+总览所有指标可按矿池分别查看,机器表显示每台在哪个池并可按池筛选。
+
+### Added — 新增
+- **每台机器矿池判定**:镜像优先(conishc/twpool→TW Pool;kuzigmgm/mrkidbk/其它→PearlHash)→ 取不到镜像用「该 worker 在哪个池报算力」兜底 → 仍判不出=未知。
+  - 镜像来源:salad 从 `salad_live` 组信息透出;runpod/vast 用 `account_machine_images` live 抓取 + serve-stale 缓存 + 后台刷新(迁移后镜像即时准确)。
+- **机器表加「矿池」列** + 按顶部矿池下拉筛选:合并=全部;单池=只显示该池机器;未知机器只在合并显示。各账号当前 $/h 跟随筛选(只算该池机器)。
+- **在跑台数按池**:合并显示 `PearlHash N / TW Pool M / 未知 K`;单池显示该池台数。
+- **成本/利润/性价比按池**(随矿池下拉切换):
+  - 当前 $/h:按每台机器的池拆分(精确)。
+  - 累计租金:`tick_spend` 按池累计(`cumulative_usd_by_pool`,**自本次更新部署起**;历史混合段仅进总额;unknown 仅进总额不入单池)。
+  - 累计折合利润:该池产出 − 该池租金(保留口径警示,twpool 全期产出 vs 自更新租金不完全对齐)。
+  - **新增「算力性价比」卡**:TH/($·h) = 该池总算力 / 该池当前 $/h。
+
+### Notes — 注意
+- 不影响 PRL/USDT 币价与 K 线、各账号平台账单余额(账号级)、hours_left。
+- 镜像/缓存均后台 30s 刷新;build_summary/tick_spend 读缓存不额外打 API。
+
+---
+
+## [配置页矿池澄清 + 迁移下拉] — 2026-06-08
+
+消除多矿池相关的配置困惑,迁移目标改下拉选择。
+
+### Added / Changed
+- **COMMON 全局配置加只读「矿池参考」区**:列出每个池用的镜像 + 是否读 PRL_HOST(PearlHash → kuzigmgm 读 PRL_HOST;TW Pool → conishc 不读 host)。说明「镜像由所选矿池自动决定,切池/迁移无需改 image/prl_host」。
+- **image / prl_host 字段加灰字标注**:image「仅未选矿池时兜底」、prl_host「仅 PearlHash 读, TW Pool 不读」——澄清这俩是 pearlhash 兜底值,换池不用改。
+- **一键全部账号迁移改池下拉**:按钮旁加矿池下拉(PearlHash / TW Pool),不再手填池名;MIGRATE 确认保留。
+- `build_full_config` 的 `pools` 列表补 `image`/`reads_prl_host` 字段(供前端矿池参考区用)。
+
+---
+
+## [总览矿池显示切换] — 2026-06-08
+
+总览页加矿池显示切换下拉,迁移期间混合机群可按池查看。纯显示,不影响挖矿/配置/迁移。
+
+### Added — 新增
+- **总览矿池切换下拉**(钱包卡内):`合并 / PearlHash / TW Pool` 三选一,默认**合并**,`localStorage` 记忆(键 `pool_view`)。切换即时重渲染总览。
+- **后端 `twpool_data()`**:查 `api.tw-pool.com/api/worker_stats`,serve-stale 缓存 + 后台 30s 刷新(与 pearlhash `pool_data` 并列)。
+- **`pool_view(which)`**:pearlhash/twpool/merged 三视图统一映射(在挖 worker 表 / 总算力 / 矿池 PRL 余额 / error);合并按 worker 名取最大、总算力与余额相加、单池故障容错。
+- **`/api/summary?pool=`**:按所选池返回 总算力 / worker 表 / 矿池余额 / 累计产出。
+- **产出口径标注**(累计产出卡):PearlHash =「自重置起算(统计自 …)」、TW Pool =「全期(已付+未付)」、合并 =「PearlHash 自重置 + TW Pool 全期」。`tick_output` 始终调用,pearlhash 自重置累加不中断。
+- **矿池余额卡**:显示所选池的 PRL 钱包余额(twpool 直接来自 API;无数据显示 —)。
+
+### Notes — 注意
+- 各账号**平台账单余额**(vast/runpod 充值)不随池切换变;随池变的是**矿池钱包 PRL 余额**。
+- 不影响 PRL/USDT 币价与 K 线行情(与矿池无关)、不影响在跑机器表每实例算力(来自 sniper 双池合并)。
+
+---
+
+## [多矿池可切换 + 一键迁移] — 2026-06-08
+
+支持 PearlHash / TW Pool 多矿池:双池监控避免混合机群误杀、可配置默认抢哪个池、UI 一键把现有 vast/runpod/salad 机器迁移到目标池。架构可扩展到更多池。所有第三方迁移接口均经真机/官方源码实测确认后才实现。
+
+### Added — 新增
+- **矿池注册表 `POOLS`**(sniper.py):pearlhash(`kuzigmgm/pearl-miner:v11`,读 PRL_HOST)/ twpool(`conishc/pearl-miner:twpool-v1.9.0-auto`,池写死、读 PRL_ADDRESS/PRL_WORKER)。加新池 = 加一条 registry + 一个 `*_worker_hashrates` adapter。`active_pool()` / `effective_image()` 决定新抢机器用的镜像。
+- **双池监控(安全层)**:`twpool_worker_hashrates`(实测 `api.tw-pool.com/api/worker_stats`)+ `merged_worker_hashrates`(按 worker 名合并取最大、单池故障跳过)。runpod/vast/salad reconcile 改用合并算力 → 混合机群(部分在 pearlhash、部分在 twpool)算力都查得到,**不误杀**。
+- **新抢矿池可切换**:每账号配置 `pool`(顶层),create 用 `effective_image`;配置页每账号矿池下拉(`/api/set-pool`,只改新抢、不迁移)。
+- **一键迁移**(`/api/migrate`,确认词 `MIGRATE` 严格校验):
+  - **runpod**:`POST /v1/pods/{id}/update` 原地换 imageName+env 触发 reset(实测确认 env 整体替换)。
+  - **vast**:`DELETE` 销毁,扫描循环用新池镜像重租。
+  - **salad**:`PATCH containers/{group}`(merge-patch+json)改 image+env(整体替换)→ Salad 自动重建实例 + 保守显式 recreate(实测 group gpu10 迁移成功)。
+  - UI:每账号「迁移现有机器到所选池」按钮 + 全局「一键全部账号迁移」按钮,均经 `MIGRATE` 确认 prompt。
+- **host 兜底池感知**:twpool 不读 PRL_HOST → 切 host 无意义,迁移到 twpool 后自动禁用 host 兜底。
+
+### Notes — 注意
+- 迁移只改现有机器 + 落盘 pool;**新抢用新池需重启对应账号监控才生效**。
+- salad 现役镜像为 `mrkidbk/pearl-miner:latest`(用 `WORKER_NAME`),迁移取 `salad_group_worker_name` 沿用 worker 名。
+
+---
+
 ## [登录页改版 · 海洋玻璃主视觉(v2)] — 2026-06-05
 
 ### Changed
@@ -10,6 +179,7 @@
 - Noto Sans SC + JetBrains Mono;精确还原尺寸/色值/阴影/动画;`@media(prefers-reduced-motion)` 关闭全部动画;820px 以下单列堆叠。
 - 全部样式 `#login` 作用域隔离(避免与看板 `.card/.sub` 等冲突),登录逻辑(`login()`/`guestLogin()`/`#pw`/`#lerr`)不变;登录页固定海洋浅色,不随看板亮/暗主题切换。(上一版纯浅蓝背景 + 白卡 v1 已被本版取代。)
 - 微调:珍珠左移(`translateX(-72px)`,移动端复位);登录卡缩小(max-width 296px + 收紧 padding);登录按钮半透明渐变(rgba .82,海面透出);**背景去掉沙滩,改纯海洋 + 双层浪花**(海延伸到底加深海色,浪花泡沫线移到底部 + 上方加一条反向慢摇的波线)。
+---
 
 ## [行情图表 + 实时币价] — 2026-06-05
 

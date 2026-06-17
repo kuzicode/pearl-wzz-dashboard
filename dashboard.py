@@ -47,7 +47,7 @@ SPECIFIC = {
               ("balance_usd", "num")],
 }
 HAS_CREATE = {"runpod", "tensordock"}
-NO_BALANCE_API = {"salad", "tensordock"}  # 无余额查询 API → 余额可在看板手填(总览内联编辑)
+NO_BALANCE_API = {"salad", "tensordock"}  # 无公共余额 API → 看板手填(总览内联编辑); salad 另有 portal 实时余额(salad_portal), 有则优先并隐藏手填
 
 def platform_of(account_id):
     """salad-2 → salad ; salad → salad"""
@@ -245,11 +245,253 @@ def pool_data(force=False):
     return data
 
 
+_twpool = {"data": None, "ts": 0.0}
+TWPOOL_API = "https://api.tw-pool.com/api/worker_stats"
+
+def twpool_data(force=False):
+    """查 twpool per-worker 算力 + 余额, serve-stale 缓存(同 pool_data)。
+    返回 {"reported": {...}, "balance": <PRL>, "paid": <PRL>, ...} 或 {"_error": ...}。"""
+    now = time.time()
+    if _twpool["data"] is not None and not force and (now - _twpool["ts"] < POOL_STALE_MAX):
+        return _twpool["data"]
+    addr = prl_address()
+    data = {}
+    if addr:
+        try:
+            url = f"{TWPOOL_API}?address={urllib.parse.quote(addr)}&mode=realtime&excludeWorker=false&selectPool=pearl"
+            req = urllib.request.Request(url, headers={"User-Agent": "sniper-dashboard/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            data = {"_error": f"{type(e).__name__}: {e}"}
+    _twpool["data"] = data
+    _twpool["ts"] = now
+    return data
+
+
+_herominers = {"data": None, "ts": 0.0}
+HEROMINERS_API = "https://pearl.herominers.com/api/stats_address"
+
+def herominers_data(force=False):
+    """herominers per-address 统计(余额/已付/算力/worker), serve-stale 缓存(同 twpool_data)。
+    返回 stats_address JSON; 无记录时 {"error":"Not found"}(视为空非错); 网络失败 {"_error":...}。"""
+    now = time.time()
+    if _herominers["data"] is not None and not force and (now - _herominers["ts"] < POOL_STALE_MAX):
+        return _herominers["data"]
+    addr = prl_address()
+    data = {}
+    if addr:
+        try:
+            url = f"{HEROMINERS_API}?address={urllib.parse.quote(addr)}"
+            req = urllib.request.Request(url, headers={"User-Agent": "sniper-dashboard/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            data = {"_error": f"{type(e).__name__}: {e}"}
+    _herominers["data"] = data
+    _herominers["ts"] = now
+    return data
+
+
+_pearlfortune = {"data": None, "ts": 0.0}
+PEARLFORTUNE_API = "https://pearlfortune.org/api/v1"
+
+def pearlfortune_data(force=False):
+    """pearlfortune per-address 统计, serve-stale 缓存。合并两端点:
+    {"miner": <GET /miners/<addr>?hours=24&tz_offset_min=480>, "connections": <GET /miners/<addr>/connections>}
+    或 {"_error":...}。金额原子单位 1e8。"""
+    now = time.time()
+    if _pearlfortune["data"] is not None and not force and (now - _pearlfortune["ts"] < POOL_STALE_MAX):
+        return _pearlfortune["data"]
+    addr = prl_address()
+    data = {}
+    if addr:
+        try:
+            a = urllib.parse.quote(addr)
+            req1 = urllib.request.Request(
+                f"{PEARLFORTUNE_API}/miners/{a}?hours=24&tz_offset_min=480",
+                headers={"User-Agent": "sniper-dashboard/1.0"})
+            with urllib.request.urlopen(req1, timeout=15) as r:
+                miner = json.loads(r.read().decode("utf-8"))
+            req2 = urllib.request.Request(
+                f"{PEARLFORTUNE_API}/miners/{a}/connections",
+                headers={"User-Agent": "sniper-dashboard/1.0"})
+            with urllib.request.urlopen(req2, timeout=15) as r:
+                conns = json.loads(r.read().decode("utf-8"))
+            req3 = urllib.request.Request(
+                f"{PEARLFORTUNE_API}/miners/{a}/ledger?page=1&page_size=20",
+                headers={"User-Agent": "sniper-dashboard/1.0"})
+            with urllib.request.urlopen(req3, timeout=15) as r:
+                ledger = json.loads(r.read().decode("utf-8"))
+            data = {"miner": miner, "connections": conns, "ledger": ledger}
+        except Exception as e:
+            data = {"_error": f"{type(e).__name__}: {e}"}
+    _pearlfortune["data"] = data
+    _pearlfortune["ts"] = now
+    return data
+
+
+_pf_fee = {"data": None, "ts": 0.0}
+
+def pearlfortune_pool_fee(force=False):
+    """pearlfortune 矿池费率(全局, 非 per-miner), serve-stale 缓存。失败/无值 → None。"""
+    now = time.time()
+    if _pf_fee["data"] is not None and not force and (now - _pf_fee["ts"] < POOL_STALE_MAX):
+        return _pf_fee["data"]
+    val = None
+    try:
+        req = urllib.request.Request(f"{PEARLFORTUNE_API}/stats/pool-fee-rate",
+                                     headers={"User-Agent": "sniper-dashboard/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            val = (json.loads(r.read().decode("utf-8")).get("data") or {}).get("pool_fee_rate")
+    except Exception:
+        val = None
+    _pf_fee["data"] = val
+    _pf_fee["ts"] = now
+    return val
+
+
+_machine_images = {}  # account -> {"data": {machine_id: image}, "ts": ts}
+
+def account_machine_images(acct, force=False):
+    """runpod/vast 账号: live 拉每台机器当前镜像 {machine_id(str): image}。serve-stale 缓存; 失败返回 {}。
+    注入该账号 key(同 do_terminate)。salad 不走这里(镜像由 salad_live 组信息提供)。"""
+    import sniper as S
+    now = time.time()
+    slot = _machine_images.get(acct)
+    if slot and not force and (now - slot["ts"] < POOL_STALE_MAX):
+        return slot["data"]
+    plat = platform_of(acct)
+    data = {}
+    try:
+        kv = read_env().get(key_var_for(acct), "")
+        std = KEYNAME.get(plat, "")
+        if kv and std:
+            os.environ[std] = kv
+        if plat == "runpod":
+            for p in (S.list_runpod_pods() or []):
+                pid = str(p.get("id") or "")
+                if pid:
+                    data[pid] = p.get("imageName")
+        elif plat == "vast":
+            for i in (S.list_vast_instances() or []):
+                iid = str(i.get("id") or "")
+                if iid:
+                    data[iid] = i.get("image")
+    except Exception:
+        data = {}
+    _machine_images[acct] = {"data": data, "ts": now}
+    return data
+
+
+def pool_of_image(image):
+    """按镜像判定矿池: 先认 herominers/pearlfortune; twpool 镜像→'twpool'; 其它非空→'pearlhash'; 空→None(交兜底)。"""
+    s = str(image or "").lower()
+    if not s:
+        return None
+    if "herominers" in s:
+        return "herominers"
+    if "pearlfortune" in s:
+        return "pearlfortune"
+    if "twpool" in s or "conishc" in s:
+        return "twpool"
+    return "pearlhash"
+
+
+def _worker_in(pool_workers, worker):
+    """精确或前缀(worker+'-')匹配(矿机会给 worker 追加 -hash 后缀)。"""
+    w = str(worker or "")
+    if not w:
+        return False
+    pre = w + "-"
+    return any(str(n or "") == w or str(n or "").startswith(pre) for n in pool_workers)
+
+
+def pool_of_worker(worker):
+    """兜底: 该 worker 当前在哪个池报算力。twpool reported / pearlhash connected_workers, 前缀匹配。都无→None。"""
+    w = str(worker or "")
+    if not w:
+        return None
+    addr = prl_address() or ""
+    prefix = addr + "."
+    tw = twpool_data()
+    rep = (tw or {}).get("reported") or {} if isinstance(tw, dict) else {}
+    tw_workers = [(k[len(prefix):] if k.startswith(prefix) else k) for k in rep.keys()]
+    if _worker_in(tw_workers, w):
+        return "twpool"
+    ph = pool_data()
+    ph_workers = [x.get("worker_name") for x in (ph.get("connected_workers") or [])] if isinstance(ph, dict) else []
+    if _worker_in(ph_workers, w):
+        return "pearlhash"
+    return None
+
+
+def machine_pool(image, worker):
+    """镜像优先, 无镜像走 worker 兜底, 仍无→'unknown'。"""
+    p = pool_of_image(image)
+    if p:
+        return p
+    p = pool_of_worker(worker)
+    if p:
+        return p
+    return "unknown"
+
+
 # ---------- Salad 实时 ----------
 _salad = {}  # account_id -> {"data", "ts"}
 SALAD_STALE_MAX = 90.0   # 后台每 REFRESH_INTERVAL 强制刷新; 仅缓存超此值(后台异常)才在请求线程同步兜底重算
 SALAD_WORKERS = 8        # 每账号容器组并发拉取的线程数
 REFRESH_INTERVAL = 30.0  # 后台刷新所有缓存(salad/余额/矿池)的周期(秒); 循环为 refresh→sleep, 轮次不重叠
+
+# ---------- Salad portal-api 会话抓取(GPU/余额, 由 salad_portal 常驻线程填充) ----------
+_salad_gpu = {}        # account -> {"data": {instance_id: gpu_class}, "ts"}
+_salad_balance = {}    # account -> {"data": usd, "ts"}
+_portal_lock = threading.Lock()
+PORTAL_STALE_MAX = 1800.0     # 超此值认为管理器已停/会话过期 → 回退(GPU 退区间、余额退估算)
+PORTAL_REFRESH_INTERVAL = 120.0  # 常驻浏览器刷新周期(< cf_clearance ~30min)
+
+def salad_gpu_for(account_id):
+    """该账号 {instance_id: gpu_class}(新鲜则返回, 否则 {})。"""
+    slot = _salad_gpu.get(account_id)
+    if slot and (time.time() - slot["ts"] < PORTAL_STALE_MAX):
+        return slot.get("data") or {}
+    return {}
+
+def salad_real_balance(account_id):
+    """该账号 portal 真实余额 USD(新鲜且非空则返回, 否则 None → 回退手填估算)。"""
+    slot = _salad_balance.get(account_id)
+    if slot and slot.get("data") is not None and (time.time() - slot["ts"] < PORTAL_STALE_MAX):
+        return slot["data"]
+    return None
+
+def _portal_update(account_id, gpu_map, balance_usd):
+    """salad_portal 常驻线程回调: 写缓存(加锁)。None 表示该轮没拿到 → 不覆盖旧值(留待过期回退)。"""
+    now = time.time()
+    with _portal_lock:
+        if gpu_map is not None:
+            _salad_gpu[account_id] = {"data": gpu_map, "ts": now}
+        if balance_usd is not None:
+            _salad_balance[account_id] = {"data": balance_usd, "ts": now}
+
+def salad_group_names(account_id):
+    """salad 容器组名: config include_container_groups 优先; 为空则公共 API 列出。供 portal 抓取按组取实例。"""
+    plat = platform_of(account_id)
+    scfg = read_config(account_id).get(plat, {}) or {}
+    names = scfg.get("include_container_groups") or []
+    if names:
+        return list(names)
+    kv = key_var_for(account_id)
+    key = read_env().get(kv) or os.environ.get(kv, "")
+    org = scfg.get("organization_name")
+    proj = scfg.get("project_name") or "default"  # 与 start_portal_manager 一致: 空 project 回退 default
+    base = str(scfg.get("base_url", "https://api.salad.com/api/public")).rstrip("/")
+    if not (key and org and proj):
+        return []
+    try:
+        d = salad_get(f"{base}/organizations/{org}/projects/{proj}/containers", key)
+        return [g.get("name") for g in (d.get("items") or []) if g.get("name")]
+    except Exception:
+        return []
 
 def salad_get(url, key):
     req = urllib.request.Request(url, headers={"Salad-Api-Key": key, "User-Agent": "sniper-dashboard/1.0"})
@@ -278,6 +520,7 @@ SALAD_GPU_PRICES = {
     "rtx 5060 ti":       {"low": 0.107, "medium": 0.143, "high": 0.18},
     "rtx 4090":          {"low": 0.207, "medium": 0.253, "high": 0.30},
     "rtx 4080":          {"low": 0.167, "medium": 0.223, "high": 0.28},
+    "rtx 4080 super":    {"low": 0.167, "medium": 0.223, "high": 0.28},  # salad 无 4080 SUPER class, 按 RTX 4080 计费
     "rtx 4070 ti super": {"low": 0.147, "medium": 0.203, "high": 0.26},
     "rtx 4070 ti":       {"low": 0.133, "medium": 0.187, "high": 0.24},
     "rtx 4070":          {"low": 0.12,  "medium": 0.17,  "high": 0.22},
@@ -289,6 +532,22 @@ SALAD_GPU_PRICES = {
     "rtx 2080 ti":       {"low": 0.073, "medium": 0.087, "high": 0.10},
     "rtx a5000":         {"low": 0.143, "medium": 0.197, "high": 0.25},
 }
+
+# salad 无独立 class、按基础型号同 class 计费的卡 → 价格 key 别名(gpu_key 归一后再解析)。
+# 例: salad 无 'RTX 4080 SUPER' class, 它按 'RTX 4080 (16 GB)' class 计费 → 复用 RTX 4080 的实时价。
+SALAD_PRICE_ALIAS = {"rtx 4080 super": "rtx 4080"}
+
+def salad_inst_price_num(gname, classprice, prio):
+    """实例时价(USD/h): salad gpu-classes 实时价(classprice, 先解析别名)优先 → SALAD_GPU_PRICES 兜底 → None。
+    classprice = {gpu_key: 该组 prio 的实时价}; prio = 组优先级(high/medium/low/batch)。
+    salad 组多为 batch 优先级, 而兜底表只有 low/medium/high → 无 salad class 的卡(如 4080 SUPER)
+    必须靠别名命中 classprice 才有价, 否则上层回退组级区间 label。"""
+    k = gpu_key(gname)
+    k = SALAD_PRICE_ALIAS.get(k, k)
+    if k in classprice:
+        return classprice[k]
+    fb = SALAD_GPU_PRICES.get(k, {}).get(prio)
+    return float(fb) if fb is not None else None
 
 _gpucls = {}  # org -> {"data", "ts"}
 
@@ -340,6 +599,7 @@ def _salad_compute(account_id):
             d = salad_get(pre, key)
             names = [g.get("name") for g in (d.get("items") or [])]
         watch = read_state(account_id).get("salad_instance_watch") or {}
+        gpu_cache = salad_gpu_for(account_id)  # portal gpu_class: {instance_id: gpu_class}(优先源)
         # 矿池侧: salad worker 名 = <prefix>-salad-<machine_id>, gpu_info 带真实卡型
         pool = pool_data()
         pool_workers = (pool.get("connected_workers") or []) if isinstance(pool, dict) else []
@@ -389,11 +649,7 @@ def _salad_compute(account_id):
                 if info.get("name") and pr is not None:
                     classprice[gpu_key(info.get("name"))] = float(pr)
             def inst_price_num(gname):
-                k = gpu_key(gname)
-                if k in classprice:
-                    return classprice[k]
-                fb = SALAD_GPU_PRICES.get(k, {}).get(prio)
-                return float(fb) if fb is not None else None
+                return salad_inst_price_num(gname, classprice, prio)
             def inst_price(gname):
                 n = inst_price_num(gname)
                 return f"${n:.3f}/h" if n is not None else label
@@ -406,9 +662,10 @@ def _salad_compute(account_id):
             for inst in insts:
                 iid = str(inst.get("instance_id") or inst.get("id") or "")
                 mid = str(inst.get("machine_id") or "")
-                w = watch.get(f"{nm}:{iid}") or {}
+                w = watch.get(f"{nm}:{iid or mid}") or watch.get(f"{nm}:{iid}") or {}  # key 用 instance_id 或 machine_id(与 sniper 一致; salad instance_id 偶发 None)
                 pw = pool_match(mid) or pool_worker(nm)
-                gpu = pgpu(pw) or (w.get("gpu") or "").strip() or "?"
+                gc = str(gpu_cache.get(iid) or "").replace("NVIDIA GeForce ", "").strip()
+                gpu = gc or pgpu(pw) or (w.get("gpu") or "").strip() or "?"
                 hr = w.get("last_hashrate_th")
                 if hr is None:
                     hr = phr(pw)
@@ -416,7 +673,8 @@ def _salad_compute(account_id):
                                          "state": inst.get("state"),
                                          "started_epoch": iso_to_epoch(inst.get("update_time")),
                                          "price": inst_price_num(gpu),
-                                         "price_label": inst_price(gpu), "hashrate_th": hr})
+                                         "price_label": inst_price(gpu), "hashrate_th": hr,
+                                         "image": (g.get("container") or {}).get("image")})
             if not insts:  # /instances 失败/为空时, 用矿池 salad worker 兜底显示
                 for w in pool_workers:
                     wn = str(w.get("worker_name") or "")
@@ -510,34 +768,82 @@ def active_rentals(account_id):
                         "price_label": i.get("price_label"),
                         "hashrate_th": i.get("hashrate_th"),
                         "created_epoch": i.get("started_epoch"),
-                        "group": i.get("group")})
+                        "state": i.get("state"),  # running/creating/downloading… 仅 running 才算"在跑"
+                        "group": i.get("group"),
+                        "image": i.get("image")})
         return out
     for r in st.get("rented", []):
         if not r.get("active"):
             continue
         out.append({"id": r.get("contract_id") or r.get("external_id"), "gpu": r.get("gpu"),
                     "price": r.get("price"), "hashrate_th": r.get("last_hashrate_th"),
-                    "created_epoch": r.get("created_epoch")})
+                    "created_epoch": r.get("created_epoch"),
+                    "worker": (r.get("last_hashrate_lookup") or {}).get("worker")})
     return out
 
 
 # ---------- 累计租金 ----------
 def tick_spend():
+    """累计租金 tick(spend_loop 每 60s 调)。口径:
+    current_hourly_usd = 所有机器单价估算(含 salad 名义报价, 平滑即时速率);
+    cumulative_usd = 非-salad price×time + salad portal 真实余额下降量(实际扣费)。
+    current_hourly_by_pool/hbp 仅含非-salad(salad 不走 price×time); UI 当前 $/h 由 build_summary 从 build_rentals 重算。"""
     with _lock:
         s = read_json(STATS_PATH, {"cumulative_usd": 0.0, "last_epoch": time.time()})
         now = time.time()
         hourly = 0.0
-        for plat in list_accounts():
-            for r in active_rentals(plat):
+        non_salad_hourly = 0.0  # 非-salad 所有机器(含 unknown 池)→ 累计总额(salad 改用真实余额下降, 不计 price×time)
+        import sniper as S
+        hbp = {k: 0.0 for k in S.POOLS}  # 非-salad 已知池 → 按池累计(POOLS 驱动)
+        salad_pool_of = {}  # salad 账号 -> 其机器占多数的池(归 drop 用)
+        for acct, info in build_rentals().items():
+            is_salad = platform_of(acct) == "salad"
+            if is_salad:
+                _cnt = {}
+                for m in info.get("machines", []):
+                    pk = m.get("pool") or "unknown"
+                    _cnt[pk] = _cnt.get(pk, 0) + 1
+                if _cnt:
+                    salad_pool_of[acct] = max(_cnt, key=_cnt.get)
+            for m in info.get("machines", []):
                 try:
-                    hourly += float(r.get("price") or 0)
+                    pr = float(m.get("price") or 0)
                 except Exception:
-                    pass
+                    pr = 0.0
+                hourly += pr  # 当前 $/h 显示(含 salad 估算)
+                if not is_salad:
+                    non_salad_hourly += pr
+                    pool = m.get("pool")
+                    if pool in hbp:
+                        hbp[pool] += pr
         dt = max(0.0, now - float(s.get("last_epoch", now)))
-        if dt < 3600:
-            s["cumulative_usd"] = float(s.get("cumulative_usd", 0.0)) + hourly * dt / 3600.0
+        cbp = s.get("cumulative_usd_by_pool") or {}
+        if dt < 3600:  # 非-salad: price×time(防抖不变; 总额含所有非-salad 机器, 含 unknown 池)
+            s["cumulative_usd"] = float(s.get("cumulative_usd", 0.0)) + non_salad_hourly * dt / 3600.0
+            for pool, h in hbp.items():
+                cbp[pool] = float(cbp.get(pool, 0.0)) + h * dt / 3600.0
+        # salad: portal 真实余额下降量(实测花费, 不受 dt 守卫; 归该账号机器实际所在池, 未知则回退 twpool)
+        prev = s.get("salad_balance_prev") or {}
+        for acct in list_accounts():
+            if platform_of(acct) != "salad":
+                continue
+            bal = salad_real_balance(acct)
+            if bal is None:  # portal 拿不到 → 跳过(prev 不更新, 下次有效读数补这段缺口)
+                continue
+            p = prev.get(acct)
+            if p is not None and float(bal) < float(p):  # 仅下降计入; 充值上升不计负
+                drop = float(p) - float(bal)
+                s["cumulative_usd"] = float(s.get("cumulative_usd", 0.0)) + drop
+                dest = salad_pool_of.get(acct) or "twpool"
+                if dest == "unknown":
+                    dest = "twpool"
+                cbp[dest] = float(cbp.get(dest, 0.0)) + drop
+            prev[acct] = bal
+        s["salad_balance_prev"] = prev
+        s["cumulative_usd_by_pool"] = cbp
         s["last_epoch"] = now
         s["current_hourly_usd"] = hourly
+        s["current_hourly_by_pool"] = hbp
         try:
             json.dump(s, open(STATS_PATH, "w"))
         except Exception:
@@ -564,10 +870,24 @@ def _refresh_once():
     except Exception:
         pass
     pool_data(force=True)
+    try:
+        twpool_data(force=True)
+    except Exception:
+        pass
+    try:
+        herominers_data(force=True)
+    except Exception:
+        pass
+    try:
+        pearlfortune_data(force=True)
+    except Exception:
+        pass
     for acct in list_accounts():
         try:
             if platform_of(acct) == "salad":
                 salad_live(acct, force=True)
+            elif platform_of(acct) in ("runpod", "vast"):
+                account_machine_images(acct, force=True)
             platform_balance(acct, force=True)
         except Exception:
             pass
@@ -581,10 +901,51 @@ def _refresh_loop():
         time.sleep(REFRESH_INTERVAL)
 
 
+_portal_thread = None
+
+def start_portal_manager():
+    """启动常驻 headless Playwright 线程抓 salad portal gpu_class + 余额。
+    无 salad 会话文件 / playwright 缺失 → 静默跳过(salad 走回退)。"""
+    global _portal_thread
+    try:
+        import salad_portal
+    except Exception:
+        return
+    accounts = []
+    for acct in list_accounts():
+        if platform_of(acct) != "salad":
+            continue
+        scfg = read_config(acct).get("salad", {}) or {}
+        if not scfg.get("enabled"):
+            continue
+        # 注: 不再因 session 文件缺失而跳过 —— 缺失/过期由 run_manager 检测并 auto_login 半自动重登引导。
+        sp = salad_portal.session_path(acct)
+        accounts.append({"account": acct,
+                         "org": scfg.get("organization_name"),
+                         "project": scfg.get("project_name") or "default",
+                         "session_path": str(sp)})
+    if not accounts:
+        return
+    stop = threading.Event()  # daemon 线程随进程退出; 保留以满足 run_manager 接口
+    def _loop():
+        try:
+            salad_portal.run_manager(accounts, PORTAL_REFRESH_INTERVAL,
+                                     salad_group_names, _portal_update, stop)
+        except Exception:
+            pass
+    _portal_thread = threading.Thread(target=_loop, daemon=True)
+    _portal_thread.start()
+
+
 # ---------- 累计产出(自看板起算) ----------
 # 产出 = 矿池 balance_transactions 里的正向 epoch credit(负向 Auto Payment 是提现, 不算产出)
 # + 当前待结算 pending。首次观测时把已有 credit 标记为基线、记录起始 pending,
 # 之后只累加新出现的 credit; 显示值 = 新增已结算 + 当前 pending - 起始 pending(从 0 起涨)。
+def _baseline_key(pool_id):
+    """产出基线 stats 键名。twpool 沿用历史键 output_tw_baseline(向后兼容); 其它池 output_<pool>_baseline。"""
+    return "output_tw_baseline" if pool_id == "twpool" else f"output_{pool_id}_baseline"
+
+
 def tick_output(pool=None):
     if pool is None:
         pool = pool_data()
@@ -596,6 +957,19 @@ def tick_output(pool=None):
                if float(t.get("amount") or 0) > 0]
     with _lock:
         s = read_json(STATS_PATH, {"cumulative_usd": 0.0, "last_epoch": time.time()})
+        import sniper as S                          # 局部 import(同 build_full_config 风格)
+        for _pk in S.POOLS:                          # 非-pearlhash 池: 设产出基线(全期 balance+paid); 仅在数据有效时设, error 不设(留待重试避免基线=0 致 avg 高估)
+            if _pk == "pearlhash":
+                continue
+            _bk = _baseline_key(_pk)
+            if _bk in s:
+                continue
+            _v = POOL_MONITORS[_pk]["view"]()        # 归一化视图(含 pool_balance/pool_paid); error 不设(留待重试)
+            if not _v.get("pool_error"):
+                _b = _v.get("pool_balance") or 0.0
+                _p = _v.get("pool_paid") or 0.0
+                _pend = _v.get("pending_balance") or 0.0
+                s[_bk] = round(float(_b) + float(_p) + float(_pend), 4)
         if not s.get("output_init"):
             s["output_init"] = True
             s["output_last_credit_ts"] = max([ts for ts, _ in credits], default=0)
@@ -620,6 +994,28 @@ def tick_output(pool=None):
         except Exception:
             pass
         return cumulative
+
+
+def update_output_snapshot(merged_out):
+    """维护 output 滚动快照(节流 5min / 裁剪 4h), 返回最近3h产出(无 ≥3h 前快照或差≤0 → None)。"""
+    now = int(time.time())
+    with _lock:
+        s = read_json(STATS_PATH, {})
+        snaps = [x for x in (s.get("output_snapshots") or [])
+                 if isinstance(x, dict) and (x.get("ts") or 0) >= now - 4*3600]   # 裁剪 >4h
+        if (not snaps) or (now - int(snaps[-1]["ts"]) >= 300):                      # 节流 5min
+            snaps.append({"ts": now, "out": round(float(merged_out), 4)})
+        s["output_snapshots"] = snaps
+        try:
+            json.dump(s, open(STATS_PATH, "w"))
+        except Exception:
+            pass
+    cutoff = now - 3*3600
+    prior = [x for x in snaps if int(x["ts"]) <= cutoff]
+    if not prior:
+        return None
+    diff = round(float(merged_out) - float(prior[-1]["out"]), 4)
+    return diff if diff > 0 else None
 
 
 # ---------- 实时币价(SafeTrade REST) / 重置统计 ----------
@@ -676,6 +1072,7 @@ def reset_stats():
         old = read_json(STATS_PATH, {})
         now = time.time()
         s = {"cumulative_usd": 0.0, "current_hourly_usd": 0.0,
+             "cumulative_usd_by_pool": {}, "current_hourly_by_pool": {},
              "last_epoch": now, "reset_epoch": now}
         if old.get("coin_price_usd") is not None:
             s["coin_price_usd"] = old["coin_price_usd"]
@@ -691,42 +1088,379 @@ def reset_stats():
     return {"ok": True}
 
 
-# ---------- 总览数据 ----------
-def build_summary():
+# ---------- 矿池视图映射 ----------
+def _pearlhash_view():
+    """pearlhash 矿池视图: {workers, total_hashrate_th, pool_balance, pool_error}。"""
     pool = pool_data()
+    err = pool.get("_error") if isinstance(pool, dict) else None
     workers = pool.get("connected_workers", []) if isinstance(pool, dict) else []
-    total_th, wlist = 0.0, []
+    wlist, total = [], 0.0
     for w in workers:
         wth = sum(hashrate_th(g.get("hashrate")) for g in (w.get("gpu_info") or []))
-        total_th += wth
+        total += wth
         wlist.append({"name": w.get("worker_name"), "th": round(wth, 2), "ip": w.get("ip"),
                       "gpus": [g.get("name") for g in (w.get("gpu_info") or [])]})
+    bal = pool.get("balance") if isinstance(pool, dict) else None
+    return {"workers": wlist, "total_hashrate_th": round(total, 2),
+            "pool_balance": (float(bal) if bal is not None else None),
+            "pool_paid": None,  # pearlhash 产出走 tick_output(自重置), 不用 balance+paid 全期口径
+            "pool_error": err}
+
+MAX_PLAUSIBLE_WORKER_TH = 2000.0  # 单 worker 合理算力上限(远超任何真实单机/组); 超出视为矿池上报损坏值, 剔除防污染总算力
+
+def _twpool_view():
+    """twpool 矿池视图: {workers, total_hashrate_th, pool_balance, pool_error}。"""
+    data = twpool_data()
+    err = data.get("_error") if isinstance(data, dict) else None
+    reported = (data.get("reported") or {}) if isinstance(data, dict) else {}
+    addr = prl_address() or ""
+    prefix = addr + "."
+    wlist, total = [], 0.0
+    for key, info in reported.items():
+        worker = key[len(prefix):] if key.startswith(prefix) else key
+        try:
+            th = round(float((info or {}).get("hs") or 0) / 1e12, 2)
+        except (TypeError, ValueError):
+            th = 0.0
+        if th > MAX_PLAUSIBLE_WORKER_TH:  # 矿池上报损坏(如 274056 TH/s)→ 剔除, 不计入总算力/列表
+            continue
+        total += th
+        wlist.append({"name": worker, "th": th, "ip": None, "gpus": []})
+    bal = data.get("balance") if isinstance(data, dict) else None
+    paid = data.get("paid") if isinstance(data, dict) else None
+    def _hr_series_tw(d):
+        hist = d.get("history") if isinstance(d, dict) else None
+        if not isinstance(hist, dict):
+            return None
+        bytime = {}
+        for _wk, pts in hist.items():
+            if not isinstance(pts, list):
+                continue
+            for p in pts:
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    t = int(p.get("time"))
+                    hr = float(p.get("hashrate") or 0)
+                except (TypeError, ValueError):
+                    continue
+                bytime[t] = bytime.get(t, 0.0) + hr
+        if not bytime:
+            return None
+        return {"unit": "TH", "points": [[t, round(v / 1e12, 4)] for t, v in sorted(bytime.items())]}
+    return {"workers": wlist, "total_hashrate_th": round(total, 2),
+            "pool_balance": (float(bal) if bal is not None else None),
+            "pool_paid": (float(paid) if paid is not None else None),
+            "hashrate_series": _hr_series_tw(data), "pool_error": err}
+
+def _herominers_view():
+    """herominers 矿池视图: {workers, total_hashrate_th, pool_balance, pool_paid, pool_error}。
+    余额=顶层 unconfirmed(未确认)+unlocked(已成熟), 已付=顶层 payments(原子 1e8);
+    迁移测试真数据确认这些为顶层键(无 stats.balance/paid), 但其元素结构因测试时列表为空而未经
+    非零数据确认 → _sum_atomic 防御性兼容多形态。逐-worker 与 stats.hashrate 格式防御性解析(不崩)。"""
+    data = herominers_data()
+    if not isinstance(data, dict):
+        return {"workers": [], "total_hashrate_th": 0.0, "pool_balance": 0.0, "pool_paid": 0.0,
+                "shares": None, "pool_info": None, "pending_balance": None, "credited_total": None, "hashrate_series": None, "pool_error": None}
+    if data.get("_error"):
+        return {"workers": [], "total_hashrate_th": 0.0, "pool_balance": None, "pool_paid": None,
+                "shares": None, "pool_info": None, "pending_balance": None, "credited_total": None, "hashrate_series": None, "pool_error": data["_error"]}
+    # Not-found / 空记录 → 空(非错误)
+    if data.get("error") or "stats" not in data:
+        return {"workers": [], "total_hashrate_th": 0.0, "pool_balance": 0.0, "pool_paid": 0.0,
+                "shares": None, "pool_info": None, "pending_balance": None, "credited_total": None, "hashrate_series": None, "pool_error": None}
+    def _sum_atomic(lst):
+        # 防御: herominers unconfirmed/unlocked/payments 结构未经非零数据确认,
+        # 兼容 标量数字 / 列表[数字|{"amount":..}|[..,amount]]; 取不到记 0、不崩。
+        if isinstance(lst, (int, float)):
+            lst = [lst]
+        elif not isinstance(lst, (list, tuple)):
+            lst = lst or []
+        total = 0.0
+        for e in lst:
+            v = None
+            if isinstance(e, (int, float)):
+                v = e
+            elif isinstance(e, dict):
+                v = e.get("amount") if "amount" in e else e.get("value")   # 不用 or, 避免 amount=0 误回退
+            elif isinstance(e, (list, tuple)) and e:
+                for x in reversed(e):
+                    if isinstance(x, (int, float)): v = x; break
+            try: total += float(v) / 1e8
+            except (TypeError, ValueError): pass
+        return total
+    # 余额: 实测真数据确认在 stats.balance(字符串原子/1e8); 顶层 unconfirmed=[]、
+    # unlocked 是冒号分隔的区块明细串(非金额列表), 此前读它们恒取 0 = bug。
+    try:
+        bal = round(float((data.get("stats") or {}).get("balance") or 0) / 1e8, 6)
+    except (TypeError, ValueError):
+        bal = 0.0
+    paid = round(_sum_atomic(data.get("payments")), 6)                                          # 已付=payments 历史和(空时 0; 非空元素格式待真实支付确认)
+    # 逐-worker: herominers workers 可能是 dict{name: {...}} 或 list[{...}](待迁移测试确认)。
+    # 防御性: 两种都尝试, 取 hashrate(H/s)→ TH; 取不到记 0、不崩。
+    wlist, total = [], 0.0
+    workers = data.get("workers")
+    items = []
+    if isinstance(workers, dict):
+        items = [(str(k), v) for k, v in workers.items()]
+    elif isinstance(workers, list):
+        items = [(((w.get("name") or w.get("worker") or "") if isinstance(w, dict) else ""), w) for w in workers]
+    for name, w in items:
+        w = w or {}
+        raw = w.get("hashrate") if isinstance(w, dict) else None
+        try:
+            th = round(float(raw) / 1e12, 2) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            th = 0.0
+        if th > MAX_PLAUSIBLE_WORKER_TH:
+            continue
+        total += th
+        wlist.append({"name": name, "th": th, "ip": None, "gpus": [], "stale": None})
+    st = data.get("stats") or {}
+    def _int(x):
+        try: return int(x)
+        except (TypeError, ValueError): return 0
+    shares = {"good": _int(st.get("shares_good")), "invalid": _int(st.get("shares_invalid")), "stale": _int(st.get("shares_stale"))}
+    pool_info = {"network_height": (_int(st.get("networkHeight")) or None),
+                 "fee_rate": None,
+                 "blocks_found": (_int(st.get("blocksFoundPool")) or None)}
+    def _hr_series_hm(d):
+        ch = (d.get("charts") or {}).get("hashrate") if isinstance(d, dict) else None
+        if not isinstance(ch, list):
+            return None
+        pts = []
+        for p in ch:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                try:
+                    pts.append([int(p[0]), float(p[1])])
+                except (TypeError, ValueError):
+                    continue
+        return {"unit": "share", "points": sorted(pts)} if pts else None
+    return {"workers": wlist, "total_hashrate_th": round(total, 2),
+            "pool_balance": round(bal, 6), "pool_paid": round(paid, 6),
+            "shares": shares, "pool_info": pool_info,
+            "pending_balance": None, "credited_total": None,
+            "hashrate_series": _hr_series_hm(data), "pool_error": None}
+
+def _pearlfortune_view():
+    """pearlfortune 视图: 余额=balances.balance_atomic; 已付=ledger sum_payout_amount_atomic(权威);
+    累计收益=ledger sum_credit_amount_atomic; 待结算=miner.pending_shares.pending_estimate_amount_atomic;
+    worker(connections): worker/reported_hashrate/stale/client_info.gpus[0].model; 费率=pearlfortune_pool_fee()。原子 1e8。"""
+    data = pearlfortune_data()
+    base = {"workers": [], "total_hashrate_th": 0.0, "pool_balance": 0.0, "pool_paid": 0.0,
+            "pending_balance": None, "credited_total": None, "shares": None, "pool_info": None,
+            "hashrate_series": None, "pool_error": None}
+    if not isinstance(data, dict):
+        return base
+    if data.get("_error"):
+        return {**base, "pool_balance": None, "pool_paid": None, "pool_error": data["_error"]}
+    def _atom(x):
+        try: return float(x) / 1e8
+        except (TypeError, ValueError): return 0.0
+    md = ((data.get("miner") or {}).get("data")) or {}
+    # 余额: balances 可能为 null / 单对象 / 列表(各含 balance_atomic)
+    balances = md.get("balances")
+    bal = 0.0
+    if isinstance(balances, list):
+        bal = sum(_atom((b or {}).get("balance_atomic")) for b in balances if isinstance(b, dict))
+    elif isinstance(balances, dict):
+        bal = _atom(balances.get("balance_atomic"))
+    # 已付权威: ledger sum_payout_amount_atomic(字符串原子); 累计收益: sum_credit_amount_atomic
+    ld = ((data.get("ledger") or {}).get("data")) or {}
+    paid = _atom(ld.get("sum_payout_amount_atomic"))
+    credited = _atom(ld.get("sum_credit_amount_atomic"))
+    # 待结算: pending_shares.pending_estimate_amount_atomic(数字原子)
+    pending = _atom((md.get("pending_shares") or {}).get("pending_estimate_amount_atomic"))
+    # 逐-worker(connections): worker/reported_hashrate(H/s→TH)/stale/client_info.gpus[0].model
+    cd = ((data.get("connections") or {}).get("data")) or {}
+    wlist, total = [], 0.0
+    for w in (cd.get("workers") or []):
+        if not isinstance(w, dict):
+            continue
+        name = w.get("worker") or w.get("name") or ""
+        raw = w.get("reported_hashrate")
+        try:
+            th = round(float(raw) / 1e12, 2) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            th = 0.0
+        if th > MAX_PLAUSIBLE_WORKER_TH:
+            continue
+        gi = (w.get("client_info") or {}).get("gpus") or []
+        gpu_model = gi[0].get("model") if (gi and isinstance(gi[0], dict)) else None
+        total += th
+        wlist.append({"name": name, "th": th, "ip": None,
+                      "gpus": ([gpu_model] if gpu_model else []), "stale": bool(w.get("stale"))})
+    fee = pearlfortune_pool_fee()
+    pool_info = {"network_height": None, "fee_rate": fee, "blocks_found": None} if fee is not None else None
+    def _hr_series_pf(md):
+        series = (md.get("hourly_shares") or {}).get("series")
+        if not isinstance(series, list):
+            return None
+        pts = []
+        for s in series:
+            if not isinstance(s, dict):
+                continue
+            try:
+                tss = int(s.get("hour"))
+                tot = float(s.get("total_share_sum") or 0)
+                ssum = float(s.get("share_sum") or 0)
+                ph = float(s.get("pool_hashrate") or 0)
+                val = round((ssum / tot) * ph / 1e12, 4) if (tot > 0 and ssum > 0) else 0.0
+                pts.append([tss, val])
+            except (TypeError, ValueError):
+                continue
+        return {"unit": "TH", "points": sorted(pts)} if pts else None
+    return {"workers": wlist, "total_hashrate_th": round(total, 2),
+            "pool_balance": round(bal, 6), "pool_paid": round(paid, 6),
+            "pending_balance": round(pending, 6), "credited_total": round(credited, 6),
+            "shares": None, "pool_info": pool_info, "hashrate_series": _hr_series_pf(md), "pool_error": None}
+
+# 池监控适配器注册表(方案 B): pool_id → {fetch, view}。新增矿池只在此登记 + POOLS 即可。
+POOL_MONITORS = {
+    "pearlhash":    {"fetch": pool_data,         "view": _pearlhash_view},
+    "twpool":       {"fetch": twpool_data,       "view": _twpool_view},
+    "herominers":   {"fetch": herominers_data,   "view": _herominers_view},
+    "pearlfortune": {"fetch": pearlfortune_data, "view": _pearlfortune_view},
+}
+
+def pool_view(which):
+    """按 which 返回显示映射: {workers, total_hashrate_th, pool_balance, pool_paid, pool_error}。
+    which ∈ POOL_MONITORS → 单池; 否则(含 'merged'/未知)→ 跨所有池合并。无状态(产出在 build_summary 另算)。"""
+    if which in POOL_MONITORS:
+        return POOL_MONITORS[which]["view"]()
+    views = [m["view"]() for m in POOL_MONITORS.values()]
+    by_name = {}
+    for v in views:
+        for w in v.get("workers", []):
+            cur = by_name.get(w["name"])
+            if cur is None or (w.get("th") or 0) > (cur.get("th") or 0):
+                by_name[w["name"]] = w
+    bals = [v["pool_balance"] for v in views if v.get("pool_balance") is not None]
+    errs = [v["pool_error"] for v in views if v.get("pool_error")]
+    def _sum_opt(key):
+        vals = [v[key] for v in views if v.get(key) is not None]
+        return round(sum(vals), 6) if vals else None
+    shares_list = [v.get("shares") for v in views if isinstance(v.get("shares"), dict)]
+    shares_merged = None
+    if shares_list:
+        shares_merged = {k: sum(int(s.get(k) or 0) for s in shares_list) for k in ("good", "invalid", "stale")}
+    return {"workers": sorted(by_name.values(), key=lambda w: w.get("name") or ""),
+            "total_hashrate_th": round(sum(v.get("total_hashrate_th") or 0 for v in views), 2),
+            "pool_balance": (round(sum(bals), 4) if bals else None),
+            "pool_paid": (round(sum(v["pool_paid"] for v in views if v.get("pool_paid") is not None), 4)
+                          if any(v.get("pool_paid") is not None for v in views) else None),
+            "pending_balance": _sum_opt("pending_balance"),
+            "credited_total": _sum_opt("credited_total"),
+            "shares": shares_merged,
+            "pool_info": None,   # 多池不合并网络信息(单池视图才显示)
+            "hashrate_series": None,   # 多池刻度混合(TH/share), 不叠加; 单池才显示
+            "pool_error": (errs[0] if errs else None)}
+
+
+# ---------- 总览数据 ----------
+def _is_running(machine):
+    """是否算"在跑": 非 salad 的活跃租约无 state(None)直接算; salad 按实例 state,
+    仅 'running' 算(排除 creating/downloading/allocating/stopping —— 这些已分配但还没在挖)。"""
+    return machine.get("state") in (None, "running")
+
+def build_summary(pool_key="merged"):
+    import sniper as S
+    valid = set(S.POOLS) | {"merged"}
+    pool_key = pool_key if pool_key in valid else "merged"
+    pv = pool_view(pool_key)
+    rentals = build_rentals()
     per_plat, running = {}, 0
-    for acct in list_accounts():
-        n = len(active_rentals(acct))
+    rbp = {k: 0 for k in S.POOLS}; rbp["unknown"] = 0       # 每池在跑机器数(POOLS 驱动)
+    for acct, info in rentals.items():
         plat = platform_of(acct)
-        per_plat[plat] = per_plat.get(plat, 0) + n
-        running += n
-    stats = read_json(STATS_PATH, {})
+        for m in info.get("machines", []):
+            if not _is_running(m):
+                continue
+            running += 1
+            per_plat[plat] = per_plat.get(plat, 0) + 1
+            key = m.get("pool") or "unknown"
+            rbp[key] = rbp.get(key, 0) + 1
+    running_machines = running if pool_key == "merged" else rbp.get(pool_key, 0)
     cp = coin_price()
-    rent_usd = round(float(stats.get("cumulative_usd", 0.0)), 4)
-    output = round(tick_output(pool), 4)     # 累计产出 pearl(自重置起算)
-    output_usd = round(output * cp, 2)       # 折合 USD
+    ph_output = round(tick_output(pool_data()), 4)     # pearlhash 自重置累加 + 惰性写各池 output_<pool>_baseline
+    stats = read_json(STATS_PATH, {})                  # 在 tick_output 之后读, 拿到刚写入的基线
+    # 每个非-pearlhash 池的全期 output(balance+paid)与自重置增量
+    non_ph = [k for k in S.POOLS if k != "pearlhash"]
+    alltime = {}     # pool -> balance+paid(全期)
+    sincere = {}     # pool -> 自重置增量
+    for pk in non_ph:
+        v = POOL_MONITORS[pk]["view"]()
+        tot = round(float(v.get("pool_balance") or 0) + float(v.get("pool_paid") or 0)
+                    + float(v.get("pending_balance") or 0), 4)
+        alltime[pk] = tot
+        base = float(stats.get(_baseline_key(pk)) or 0.0)
+        sincere[pk] = max(0.0, round(tot - base, 4))
+    if pool_key == "pearlhash":
+        output, basis = ph_output, "since_reset"
+        sr_output = ph_output
+    elif pool_key in non_ph:
+        output, basis = sincere[pool_key], "since_reset"
+        sr_output = sincere[pool_key]
+    else:  # merged
+        output, basis = round(ph_output + sum(sincere.values()), 4), "since_reset"
+        sr_output = round(ph_output + sum(sincere.values()), 4)
+    output_usd = round(output * cp, 2)
+    # 按池当前 burn(POOLS 驱动)
+    burn_total = 0.0
+    bbp = {k: 0.0 for k in S.POOLS}
+    for acct, info in rentals.items():
+        for m in info.get("machines", []):
+            try:
+                pr = float(m.get("price") or 0)
+            except Exception:
+                pr = 0.0
+            burn_total += pr
+            if m.get("pool") in bbp:
+                bbp[m["pool"]] += pr
+    cbp = stats.get("cumulative_usd_by_pool") or {}
+    if pool_key in S.POOLS:
+        cur_hourly = round(bbp.get(pool_key, 0.0), 4)
+        rent = round(float(cbp.get(pool_key, 0.0)), 4)
+    else:  # merged
+        cur_hourly = round(burn_total, 4)
+        rent = round(float(stats.get("cumulative_usd", 0.0)), 4)
+    eff = round(pv["total_hashrate_th"] / cur_hourly, 1) if cur_hourly > 0 else None
+    reset_ep = float(stats.get("reset_epoch") or 0)   # 仅 reset_epoch; 未重置过则 None
+    hours = (time.time() - reset_ep) / 3600.0 if reset_ep else 0.0
+    avg_output_per_hour = round(output / hours, 4) if hours > 0 else None  # 总产出(含 pending)/ 统计周期小时
+    merged_out = round(ph_output + sum(sincere.values()), 4)   # 全局自重置总产出(无论当前 pool_key), 供快照
+    recent3h_output = update_output_snapshot(merged_out)
+    cost_cumulative_usd = round(rent / output, 4) if (output and output > 0) else None              # 累计成本(自重置租金/产出, 视图)
+    cost_recent3h_usd = round((burn_total * 3) / recent3h_output, 4) if (recent3h_output and recent3h_output > 0) else None  # 最近3h实时(全局: 全局每小时租金×3 / 最近3h产出)
     return {
         "wallet": prl_address(),
-        "running_machines": running,
+        "running_machines": running_machines,
+        "running_by_pool": rbp,
         "running_by_platform": per_plat,
-        "total_hashrate_th": round(total_th, 2),
-        "workers": wlist,
-        "cumulative_rent_usd": rent_usd,
-        "current_hourly_usd": round(float(stats.get("current_hourly_usd", 0.0)), 4),
+        "total_hashrate_th": pv["total_hashrate_th"],
+        "workers": pv["workers"],
+        "cumulative_rent_usd": rent,
+        "current_hourly_usd": cur_hourly,
         "coin_price_usd": cp,
         "coin_price_live": _price_cache.get("prl") is not None,  # True=实时拉取, False=fallback
         "cumulative_output": output,
+        "avg_output_per_hour": avg_output_per_hour,
         "cumulative_output_usd": output_usd,
-        "cumulative_profit_usd": round(output_usd - rent_usd, 2),
+        "cumulative_profit_usd": round(output_usd - rent, 2),
+        "efficiency_th_per_usd": eff,
+        "cost_cumulative_usd": cost_cumulative_usd,
+        "cost_recent3h_usd": cost_recent3h_usd,
+        "produced_basis": basis,
+        "pool_balance": pv["pool_balance"],
+        "pending_balance": pv.get("pending_balance"),
+        "credited_total": pv.get("credited_total"),
+        "shares": pv.get("shares"),
+        "pool_info": pv.get("pool_info"),
+        "hashrate_series": pv.get("hashrate_series"),
+        "pool_view": pool_key,
+        "pools": [{"id": k, "label": v["label"]} for k, v in S.POOLS.items()],
         "stats_since": int(float(stats.get("reset_epoch") or stats.get("last_epoch") or 0)),
-        "pool_error": pool.get("_error") if isinstance(pool, dict) else None,
+        "pool_error": pv["pool_error"],
         "ts": int(time.time()),
     }
 
@@ -737,10 +1471,13 @@ def build_rentals():
         plat = platform_of(acct)
         cfg = read_config(acct).get(plat, {})
         items = []
+        imgs = account_machine_images(acct) if plat in ("runpod", "vast") else {}
         for r in active_rentals(acct):
             dur = int(now - float(r["created_epoch"])) if r.get("created_epoch") else None
             d = dict(r)
             d["duration_seconds"] = dur
+            img = d.get("image") or (imgs.get(str(d.get("id"))) if plat in ("runpod", "vast") else None)
+            d["pool"] = machine_pool(img, d.get("worker"))
             items.append(d)
         res[acct] = {
             "platform": plat,
@@ -757,6 +1494,11 @@ def build_rentals():
         bal = platform_balance(acct)
         burn = sum(float(m.get("price") or 0) for m in items)
         estimated = False
+        real = False
+        if plat == "salad":                      # salad: portal 真实余额优先于手填估算
+            rb = salad_real_balance(acct)
+            if rb is not None:
+                bal, real = rb, True
         if bal is None and cfg.get("balance_usd") is not None:  # 无 API 余额时用手填值按消耗估算
             try:
                 asof = iso_to_epoch(cfg.get("balance_asof")) or now
@@ -766,7 +1508,8 @@ def build_rentals():
                 bal = None
         res[acct]["balance"] = bal
         res[acct]["balance_estimated"] = estimated
-        res[acct]["balance_editable"] = plat in NO_BALANCE_API  # 无 API 的平台允许总览内联手填
+        res[acct]["balance_real"] = real          # True=portal 实时余额(salad), 前端标「实时余额」
+        res[acct]["balance_editable"] = (plat in NO_BALANCE_API) and not real  # 无 API 平台手填; salad 有 portal 实时余额时隐藏手填(手填仅 portal 断连/未登录时回退)
         res[acct]["balance_usd"] = cfg.get("balance_usd")        # 原始手填值, 供编辑框预填
         res[acct]["burn_hourly"] = round(burn, 4)
         res[acct]["hours_left"] = round(bal / burn, 1) if (bal is not None and burn > 0) else None
@@ -822,6 +1565,7 @@ def gpu_rows(sub):
 def build_full_config():
     env = read_env()
     accts = list_accounts()
+    import sniper as S
     all_cfgs = {acct: read_config(acct) for acct in accts}
     base = all_cfgs[accts[0]] if accts else {}
     common = {k: base.get(k) for k in COMMON_KEYS}
@@ -857,8 +1601,11 @@ def build_full_config():
             "process_running": pid_for(acct) is not None,
             "rent_paused": rent_paused(acct),
             "raw": json.dumps(cfg, ensure_ascii=False, indent=2),
+            "pool": S.active_pool(cfg),
         }
-    return {"common": common, "common_diff": common_diff, "platforms": plats}
+    return {"common": common, "common_diff": common_diff, "platforms": plats,
+            "pools": [{"id": k, "label": v["label"], "image": v["image"], "reads_prl_host": v["reads_prl_host"]}
+                      for k, v in S.POOLS.items()]}
 
 def backup_and_write(path, obj):
     try:
@@ -887,6 +1634,20 @@ def save_platform_cfg(acct, patch):
     cfg[plat] = sub
     backup_and_write(p, cfg)
     return {"ok": True, "platform": acct}
+
+def save_pool_cfg(acct, pool):
+    """切换某账号'新抢机器用哪个矿池'(顶层 config['pool'], 只影响新 create, 不迁移老机器)。"""
+    import sniper as S
+    if acct not in list_accounts():
+        return {"error": "账号无效"}
+    pool = str(pool or "").strip()
+    if pool not in S.POOLS:
+        return {"error": f"未知矿池: {pool}"}
+    p = cfg_path(acct)
+    cfg = read_json(p, {})
+    cfg["pool"] = pool          # 顶层! 不是 cfg[plat]
+    backup_and_write(p, cfg)
+    return {"ok": True, "platform": acct, "pool": pool}
 
 def save_common_cfg(data):
     if not isinstance(data, dict):
@@ -988,6 +1749,57 @@ def do_terminate(acct, mid, group=None):
         return {"error": f"{type(e).__name__}: {e}"}
 
 
+def do_migrate(data):
+    """一键迁移到 target_pool。confirm 必须 == 'MIGRATE'。platform 为账号 id 或 'all'。
+    逐账号: 注入该账号 key → 持久化 pool(save_pool_cfg)→ 调 sniper.migrate_account 实际迁移现有机器。
+    state 传 {}(运行中的监控自管 state, 双池监控保护迁移机器, 避免写 state 竞争)。
+    注: 新抢机器用新池需重启该账号监控才生效(migrate 只改现有机器 + 落盘 pool)。"""
+    import sniper as S
+    if str(data.get("confirm", "")) != "MIGRATE":
+        return {"error": "需输入确认词 MIGRATE"}
+    target = str(data.get("target_pool", "")).strip()
+    if target not in S.POOLS:
+        return {"error": f"未知矿池: {target}"}
+    platform = str(data.get("platform", ""))
+    if platform == "all":
+        accts = list_accounts()
+    elif platform in list_accounts():
+        accts = [platform]
+    else:
+        return {"error": "账号无效"}
+    results = []
+    for acct in accts:
+        try:
+            plat = platform_of(acct)
+            kv = read_env().get(key_var_for(acct), "")
+            std = KEYNAME.get(plat, "")
+            if kv and std:
+                os.environ[std] = kv
+            sp = save_pool_cfg(acct, target)            # 先落盘 pool
+            if isinstance(sp, dict) and sp.get("error"):
+                # 落盘失败则不迁移该账号(避免配置与实际不一致), 但不中断其它账号
+                results.append({"account": acct, "result": {"error": f"落盘 pool 失败: {sp.get('error')}"}})
+                continue
+            # vast 迁移特殊: 镜像创建时烧死, 迁移=销毁重租, 靠监控用新池镜像重租。
+            # 监控只在启动时读 config → 必须先重启监控加载新池, 否则销毁后用旧池镜像重租(白干)。
+            # 重启成功才销毁; 监控没起来则取消(避免销毁后无监控重租导致机器丢失)。runpod/salad 直接换镜像, 无需重启。
+            restarted = False
+            if plat == "vast":
+                rp = restart_platform(acct)
+                if not (isinstance(rp, dict) and rp.get("process_running")):
+                    results.append({"account": acct, "result": {"error": "vast 监控重启失败, 已取消迁移(避免销毁后无监控重租)"}})
+                    continue
+                restarted = True
+            cfg = read_config(acct)
+            r = S.migrate_account(cfg, {}, acct, target, live=True)
+            if isinstance(r, dict):
+                r["monitor_restarted"] = restarted
+        except Exception as e:
+            r = {"error": f"{type(e).__name__}: {e}"}
+        results.append({"account": acct, "result": r})
+    return {"ok": True, "target_pool": target, "accounts": results}
+
+
 # ---------- HTTP ----------
 def _secret():
     return hashlib.sha256(("pearl-dash::" + str(CONF.get("password", ""))).encode()).digest()
@@ -1068,7 +1880,9 @@ class H(BaseHTTPRequestHandler):
                     p = 15
                 return self._send(200, kline_data(p))
             if path == "/api/summary":
-                return self._send(200, build_summary())
+                qs = urllib.parse.parse_qs(self.path.split("?",1)[1] if "?" in self.path else "")
+                pk = (qs.get("pool") or ["merged"])[0]
+                return self._send(200, build_summary(pk))
             if path == "/api/rentals":
                 return self._send(200, build_rentals())
             # ↓ 以下仅管理员;访客(guest)只能看总览数据与工具集
@@ -1124,6 +1938,10 @@ class H(BaseHTTPRequestHandler):
             if plat not in list_accounts():
                 return self._send(400, {"error": "账号无效"})
             return self._send(200, do_terminate(plat, str(data.get("id", "")), str(data.get("group", "")) or None))
+        if path == "/api/migrate":
+            return self._send(200, do_migrate(data))
+        if path == "/api/set-pool":
+            return self._send(200, save_pool_cfg(str(data.get("platform", "")), data.get("pool")))
         if path == "/api/save-platform":
             return self._send(200, save_platform_cfg(str(data.get("platform", "")), data.get("data")))
         if path == "/api/save-common":
@@ -1459,37 +2277,68 @@ function dur(s){if(s==null)return '-';let h=Math.floor(s/3600),m=Math.floor(s%36
 function fnum(n,d){if(n==null)return '-';n=Number(n);if(Math.abs(n)<1e-9)n=0;return n.toLocaleString(undefined,{maximumFractionDigits:d==null?2:d});}
 async function resetStats(){if(!confirm('确认重置统计? 累计租金 / 产出 / 利润都会清零, 从现在重新起算(币价保留)。'))return;try{let r=await api('/api/reset-stats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});if(r&&r.ok){toast('统计已重置, 从现在起算');refresh();}else toast((r&&r.error)||'重置失败');}catch(e){}}
 
-async function renderOverview(){if(EDITING)return;let d,r;try{d=await api('/api/summary');r=await api('/api/rentals')}catch(e){return}
+async function renderOverview(){if(EDITING)return;let d,r,pv;try{pv=localStorage.getItem('pool_view')||'merged';d=await api('/api/summary?pool='+encodeURIComponent(pv));r=await api('/api/rentals')}catch(e){return}
 if(ROLE=='admin'){let _ce=document.getElementById('cfaccts');if(_ce)_ce.innerHTML=Object.keys(r).map(a=>`<div class="ni sub adm${(view=='cf'&&subtab==a)?' on':''}" data-nav=cf:${a} onclick="nav('cf:${a}')">${esc((r[a]&&r[a].label)||a)}</div>`).join('');}
-let acct='https://pearlhash.xyz/account/'+encodeURIComponent(d.wallet);
+let phUrl='https://pearlhash.xyz/account/'+encodeURIComponent(d.wallet);
+let twUrl='https://tw-pool.com/workers/'+encodeURIComponent(d.wallet);
+let pvk=d.pool_view||'merged';
+let PL={};(d.pools||[]).forEach(o=>PL[o.id]=o.label);
+let POOL_URL={pearlhash:phUrl, twpool:twUrl, herominers:'https://pearl.herominers.com/', pearlfortune:'https://pearlfortune.org/#miner='+encodeURIComponent(d.wallet||'')};
+let poolLinks=(pvk=='merged'?(d.pools||[]).map(o=>o.id):[pvk]).filter(id=>POOL_URL[id]).map(id=>`<div class=go onclick="window.open('${POOL_URL[id]}','_blank')">${esc(PL[id]||id)} →</div>`).join('');
 let pe=d.pool_error?`<div class=muted style="color:var(--warn);margin-top:10px">POOL_API: ${esc(d.pool_error)}</div>`:'';
 let bp=Object.entries(d.running_by_platform).map(([k,v])=>`${k} ${v}`).join('  ·  ');
+let rbp=d.running_by_pool||{}; let _pb=(d.pools||[]).filter(o=>rbp[o.id]).map(o=>(PL[o.id]||o.id)+' '+rbp[o.id]);if(rbp.unknown)_pb.push('未知 '+rbp.unknown);let poolBreak=_pb.join(' / ')||'—';
 let ssd=d.stats_since?new Date(d.stats_since*1000):null;let ssl=ssd?((ssd.getMonth()+1)+'-'+ssd.getDate()+' '+String(ssd.getHours()).padStart(2,'0')+':'+String(ssd.getMinutes()).padStart(2,'0')):'';
-let wk=(d.workers||[]).map(w=>`<tr><td>${esc(w.name)}</td><td>${esc((w.gpus||[]).join(', '))}</td><td><b style=color:var(--acc)>${fnum(w.th)}</b> TH/s</td><td>${esc(w.ip)}</td></tr>`).join('')||'<tr><td colspan=4 class=muted>矿池暂无在挖 worker</td></tr>';
+let pbasis=d.produced_basis||'mixed';
+let plabel=pbasis=='since_reset'?('自重置起算'+(ssl?(' (统计自 '+ssl+')'):'')):(pbasis=='all_time'?'全期(已付+未付)':'PearlHash 自重置 + TW Pool 全期');
+let proflabel=pbasis=='since_reset'?'产出折合 − 累计租金':'产出折合 − 累计租金 · ⚠ 口径不一(全期产出 vs 自重置租金), 仅供参考';
+let wk=(d.workers||[]).map(w=>`<tr${w.stale?' style="opacity:.5"':''}><td>${esc(w.name)}${w.stale?' <span class=muted>(离线)</span>':''}</td><td>${esc((w.gpus||[]).join(', '))}</td><td><b style=color:var(--acc)>${fnum(w.th)}</b> TH/s</td><td>${esc(w.ip)}</td></tr>`).join('')||'<tr><td colspan=4 class=muted>矿池暂无在挖 worker</td></tr>';
+let _det=[];
+if(d.pending_balance!=null) _det.push(`待结算 <b>${fnum(d.pending_balance,4)}</b> PEARL`);
+if(d.credited_total!=null) _det.push(`累计收益 <b>${fnum(d.credited_total,4)}</b> PEARL`);
+if(d.shares) _det.push(`份额 <b style=color:#5cb85c>${d.shares.good||0}</b>·<b style=color:#d9534f>${d.shares.invalid||0}</b>·<b class=muted>${d.shares.stale||0}</b> <span class=muted style=font-size:10px>有效·无效·过期</span>`);
+if(d.pool_info){let pi=[];if(d.pool_info.network_height!=null)pi.push('高度 '+d.pool_info.network_height);if(d.pool_info.fee_rate!=null)pi.push('费率 '+(d.pool_info.fee_rate*100).toFixed(1)+'%');if(d.pool_info.blocks_found!=null)pi.push('爆块 '+d.pool_info.blocks_found);if(pi.length)_det.push(pi.join(' · '));}
+let detBar=_det.length?`<div class=card style="grid-column:1/-1"><div class=sub style="line-height:1.9">${_det.join('&nbsp;&nbsp;|&nbsp;&nbsp;')}</div></div>`:'';
+window._lastData=d;
+let hrPanel='';
+if(d.hashrate_series && (d.hashrate_series.points||[]).length){
+  let u=d.hashrate_series.unit;
+  let ulabel=u=='TH'?'TH/s':'相对算力(份额指标·仅趋势)';
+  hrPanel=`<div class="kpanel" id=hrpanel><div class=khead onclick="toggleHr()"><span>算力趋势 / HASHRATE <span class=muted style=font-size:11px>· ${ulabel}</span></span><span class=karr>▼</span></div><div class=kbody id=hrbody><div class=kcanvas-wrap><canvas class=kc id=hrcanvas height=300></canvas></div></div></div>`;
+}
+let poolName=q=>q=='unknown'?'未知':(PL[q]||q);
 let plat='';for(const aid of Object.keys(r).sort((a,b)=>((r[b]&&r[b].machines||[]).length)-((r[a]&&r[a].machines||[]).length))){const v=r[aid];const p=v.platform||aid;
 let badges=`<span class="pill ${v.process_running?'ok':'bad'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?'<span class="pill warn">RENT PAUSED</span>':'');
-let balTxt;if(v.balance!=null){let t=(v.hours_left!=null)?('约 '+fnum(v.hours_left,1)+'h 花完'):(v.burn_hourly>0?'':'当前无消耗');let lab=v.balance_estimated?'估算余额':'余额';balTxt=`${lab} $${fnum(v.balance,2)}${t?' · '+t:''}`;}else{balTxt='余额 —';}
+let balTxt;if(v.balance!=null){let t=(v.hours_left!=null)?('约 '+fnum(v.hours_left,1)+'h 花完'):(v.burn_hourly>0?'':'当前无消耗');let lab=v.balance_estimated?'估算余额':(v.balance_real?'实时余额':'余额');balTxt=`${lab} $${fnum(v.balance,2)}${t?' · '+t:''}`;}else{balTxt='余额 —';}
 let bh;if(v.balance_editable){BALVAL[aid]=(v.balance_usd!=null?v.balance_usd:'');bh=`<span class="bal editable" id="bal_${esc(aid)}" onclick="editBal('${esc(aid)}')" title="点击填写/修改余额(此平台无余额 API, 手动维护)">${balTxt} <span class=ed-pen>✎</span></span>`;}else{bh=`<span class=bal>${balTxt}</span>`;}
 let sstat='';if(p=='salad'){let s=v.salad_status||{};let pr=[];if(s.running_count!=null)pr.push('运行 '+s.running_count);if(s.allocating_count)pr.push('分配中 '+s.allocating_count);let gc=(v.salad_gpu_classes||[]).join(' / ');let serr=(v.salad_error&&!(v.machines||[]).length)?' · '+esc(v.salad_error):'';sstat=`<div class=muted style=margin-bottom:9px>SALAD 实时 · ${pr.join(' · ')||'-'}${gc?' · GPU 档 '+esc(gc):''}${serr}</div>`;}
-let rows=(v.machines||[]).map(m=>{let a=(ROLE=='admin'&&m.id)?`<button class=b-bad onclick="term('${aid}','${p}','${esc(m.id)}','${esc(m.group||'')}')">关闭</button>`:'';
+
+let mlist=(v.machines||[]).filter(m=>pv=='merged'||m.pool==pv);
+let acctBurn=mlist.reduce((s,m)=>s+(parseFloat(m.price)||0),0);
+let rows=mlist.map(m=>{let a=(ROLE=='admin'&&m.id)?`<button class=b-bad onclick="term('${aid}','${p}','${esc(m.id)}','${esc(m.group||'')}')">关闭</button>`:'';
 
 let price=m.price_label?esc(m.price_label):(m.price==null?'-':'$'+fnum(m.price,3)+'/h');
 let gpu=(m.gpu&&m.gpu!='?')?esc(m.gpu):'<span class=muted>—</span>';
-return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}<td>${esc(m.id)}</td><td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?7:6} class=muted>无在跑机器</td></tr>`;
-plat+=`<div class=platbox><div class=top><b>${esc(v.label||aid)}</b>${badges}${bh}</div>${sstat}
-<table><tr>${p=='salad'?'<th>组</th>':''}<th>实例</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th></th></tr>${rows}</table></div>`;}
+return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}<td>${esc(m.id)}</td><td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?8:7} class=muted>无符合机器</td></tr>`;
+plat+=`<div class=platbox><div class=top><b>${esc(v.label||aid)}</b>${badges}${bh}<span class=muted style="font-size:11px;margin-left:8px">$${fnum(acctBurn,3)}/h${pv!='merged'?' ('+poolName(pv)+')':''}</span></div>${sstat}
+<table><tr>${p=='salad'?'<th>组</th>':''}<th>实例</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th>矿池</th><th></th></tr>${rows}</table></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
 <div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addr>${esc(d.wallet)}</div></div>
 <div class=row style=flex-shrink:0;gap:8px>
 <button class=b-mini onclick="copyAddr('${esc(d.wallet)}')">复制</button>
-<div class=go onclick="window.open('${acct}','_blank')">PearlHash →</div></div></div>
+${poolLinks}
+<select id=poolView onchange="setPoolView(this.value)" title="切换显示的矿池(仅显示, 不影响挖矿)"><option value=merged ${pv=='merged'?'selected':''}>合并</option>${(d.pools||[]).map(o=>'<option value='+o.id+(pv==o.id?' selected':'')+'>'+esc(o.label)+'</option>').join('')}</select></div></div>
 <div class=cards>
-<div class=card><div class=k>在跑机器</div><div class=v>${d.running_machines}</div><div class=sub>${esc(bp)}</div></div>
+<div class=card><div class=k>在跑机器</div><div class=v>${d.running_machines}</div><div class=sub>${pv=='merged'?poolBreak:esc(bp)}</div></div>
 <div class=card><div class=k>总算力 矿池实测</div><div class=v>${fnum(d.total_hashrate_th)} <small>TH/s</small></div></div>
-<div class=card><div class=k>累计租金</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · 自重置起算</div></div>
-<div class=card><div class=k>累计产出</div><div class=v style=color:var(--acc)>${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 自重置起算 @ $${fnum(d.coin_price_usd,2)}/币${d.coin_price_live?' <span style="color:var(--ok);font-size:10px">实时</span>':''}</div></div>
-<div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>产出折合 − 累计租金</div></div>
+<div class=card><div class=k>累计租金</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
+<div class=card><div class=k>累计产出</div><div class=v style=color:var(--acc)>${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · ${plabel} @ $${fnum(d.coin_price_usd,2)}/币${d.coin_price_live?' <span style="color:var(--ok);font-size:10px">实时</span>':''}</div><div class=sub>平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small> <span class=muted style="font-size:10px">自重置</span></div></div>
+<div class=card><div class=k>矿池余额</div><div class=v>${d.pool_balance==null?'<span class=muted>—</span>':fnum(d.pool_balance,4)+' <small>PEARL</small>'}</div><div class=sub>${pv=='merged'?'各池合计':poolName(pv)}</div></div>
+${detBar}
+<div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
+<div class=card><div class=k>算力性价比</div><div class=v>${d.efficiency_th_per_usd==null?'<span class=muted>—</span>':fnum(d.efficiency_th_per_usd,1)+' <small>TH/($·h)</small>'}</div><div class=sub>${pv=='merged'?'(全部)':poolName(pv)}总算力 / 当前$/h</div></div>
+<div class=card><div class=k>挖矿成本 (USD/PRL)</div><div class=v style=font-size:18px>${d.cost_cumulative_usd==null?'<span class=muted>—</span>':'$'+fnum(d.cost_cumulative_usd,4)}<small> 累计</small></div><div class=sub>${d.cost_cumulative_usd==null?'<span class=muted>累计无产出</span>':(d.cost_cumulative_usd<d.coin_price_usd?'<span style=color:var(--acc)>盈利(币价 $'+fnum(d.coin_price_usd,4)+')</span>':'<span style="color:#ff6b6b">⚠ 高于币价 $'+fnum(d.coin_price_usd,4)+'</span>')}</div><div class=v style="font-size:18px;margin-top:6px">${d.cost_recent3h_usd==null?'<span class=muted>—</span>':'$'+fnum(d.cost_recent3h_usd,4)}<small> 最近3h</small></div><div class=sub>${d.cost_recent3h_usd==null?'<span class=muted>运行不足3h</span>':(d.cost_recent3h_usd<d.coin_price_usd?'<span style=color:var(--acc)>盈利中</span>':'<span style="color:#ff6b6b">⚠ 应关机</span>')}</div></div>
 </div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
 <span class=muted style="font-size:12px">PRL/USDT <b style="color:var(--hi);font-family:var(--mono)">$${fnum(d.coin_price_usd,4)}</b>${d.coin_price_live?' <span style="color:var(--ok);font-size:10px;letter-spacing:.4px">● 实时</span>':' <span style="color:var(--warn);font-size:10px">离线</span>'}</span>
@@ -1512,13 +2361,36 @@ ${ssl?`<span class=muted style="font-size:12px">统计自 ${ssl} 起算</span>`:
   <div class=kcanvas-wrap id=kwrap2 style=margin-top:4px><canvas class=kc id=kvcanvas height=70></canvas></div>
 </div>
 </div>
+${hrPanel}
 <div class=sec><div class=lbl>矿池在挖 WORKER</div><table><tr><th>Worker</th><th>GPU</th><th>算力</th><th>IP</th></tr>${wk}</table></div>
 <div class=sec><div class=lbl>各平台租用情况</div>${plat}</div>`;
+let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=localStorage.getItem('pool_view')||'merged';
 // renderOverview 每次重建 DOM 后恢复 K线展开状态
 if(_kopen){const kp=document.getElementById('kpanel');if(kp){kp.classList.add('open');if(_kdata)setTimeout(()=>drawKline(_kdata),0);else loadKline();}}
+if(_hropen){const hp=document.getElementById('hrpanel');if(hp){hp.classList.add('open');setTimeout(()=>{if(d.hashrate_series)drawHr(d.hashrate_series);},0);}}
 }
 
 // ---------- K线图 ----------
+let _hropen=false;
+function toggleHr(){_hropen=!_hropen;const p=document.getElementById('hrpanel');if(p)p.classList.toggle('open',_hropen);if(_hropen)setTimeout(()=>{const d=window._lastData;if(d&&d.hashrate_series)drawHr(d.hashrate_series);},0);}
+function drawHr(series){
+  const cc=document.getElementById('hrcanvas');if(!cc||!series||!series.points||!series.points.length)return;
+  const DPR=window.devicePixelRatio||1;const W=cc.parentElement.clientWidth;const H=300;
+  cc.width=W*DPR;cc.height=H*DPR;cc.style.width=W+'px';cc.style.height=H+'px';
+  const ctx=cc.getContext('2d');ctx.setTransform(DPR,0,0,DPR,0,0);ctx.clearRect(0,0,W,H);
+  const pts=series.points;const PAD=44,PADB=24;
+  const xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
+  const minX=Math.min(...xs),maxX=Math.max(...xs)||minX+1;
+  const maxY=Math.max(...ys,0.0001)*1.1,minY=0;
+  const px=t=>PAD+(t-minX)/((maxX-minX)||1)*(W-PAD-8);
+  const py=v=>H-PADB-(v-minY)/((maxY-minY)||1)*(H-PADB-10);
+  ctx.strokeStyle='rgba(128,128,128,.18)';ctx.fillStyle='rgba(128,128,128,.8)';ctx.font='10px monospace';
+  for(let i=0;i<=4;i++){const v=minY+(maxY-minY)*i/4,y=py(v);ctx.beginPath();ctx.moveTo(PAD,y);ctx.lineTo(W-8,y);ctx.stroke();ctx.fillText(v.toFixed(v<10?2:0),4,y+3);}
+  ctx.strokeStyle='#3fc1c9';ctx.lineWidth=1.6;ctx.beginPath();
+  pts.forEach((p,i)=>{const x=px(p[0]),y=py(p[1]);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+  const fmt=t=>{const dt=new Date(t*1000);return (dt.getMonth()+1)+'-'+dt.getDate()+' '+String(dt.getHours()).padStart(2,'0')+':'+String(dt.getMinutes()).padStart(2,'0');};
+  ctx.fillText(fmt(minX),PAD,H-8);ctx.fillText(fmt(maxX),W-92,H-8);
+}
 let _kper='15m',_kopen=false,_kdata=null;
 const _kperMap={'15m':15,'1h':60,'4h':240,'1d':1440};
 function toggleKline(){_kopen=!_kopen;const p=document.getElementById('kpanel');if(p)p.classList.toggle('open',_kopen);if(_kopen&&!_kdata)loadKline();}
@@ -1627,16 +2499,23 @@ if(diff[k]){let dv=Object.entries(diff[k]).map(([p,v])=>p+'='+(v==null||v===''?'
 w=` <span class=cdiff title="${esc(dv)}">⚠ 各平台当前不一致, 保存将统一覆盖</span>`;}
 return `<div class=fld>${label}${req?' <span class=req>必填</span>':''}${w}</div><input id="cm_${k}" value="${esc(c[k]==null?'':c[k])}" placeholder="${ph||''}">`;};
 return `<div class=lbl>全局配置 · COMMON</div>
+<div class=row style="margin-bottom:10px;gap:8px;align-items:center"><button class=b-warn onclick="migrateAll()">⇄ 一键全部账号迁移到</button>
+<select id=migrateAllPool>${(d.pools||[]).map(o=>`<option value="${esc(o.id)}">${esc(o.label)}</option>`).join('')}</select></div>
 <div class=platbox><div class=top><b>COMMON</b><span class=muted>当前值取自 vast · 保存会写入全部 4 个 config(覆盖各平台同名字段)</span></div>
 <div class=grid2>
 ${cf('prl_address','钱包地址 prl_address',1,'你的 $pearl 钱包, 否则挖给别人')}
-${cf('prl_host','矿池 prl_host',0,'84.32.220.219:9000')}
+${cf('prl_host','矿池 prl_host <span class=muted style="font-size:11px;font-weight:400">· 仅 PearlHash 读, TW Pool 不读</span>',0,'84.32.220.219:9000')}
 ${cf('worker_prefix','worker 前缀',0,'auto')}
-${cf('image','矿机镜像 image',0,'docker.io/kuzigmgm/pearl-miner:v11')}
+${cf('image','矿机镜像 image <span class=muted style="font-size:11px;font-weight:400">· 仅未选矿池时兜底</span>',0,'docker.io/kuzigmgm/pearl-miner:v11')}
 ${cf('max_active_instances','最多同时租 (台)',0,'1')}
 ${cf('max_total_hourly_usd','总时租上限 ($/h)',0,'1.0')}
 ${cf('alert_url','告警 URL (可空)',0,'ntfy 等')}
-</div><div class=row style=margin-top:12px><button class=b-acc onclick=saveCommon()>保存全局配置</button>
+</div>
+<div class=lbl style=margin-top:14px>矿池参考 <span class=muted style="font-size:11px;font-weight:400">· 镜像由所选矿池自动决定, 切池/迁移无需改上面的 image/prl_host</span></div>
+<div style="font-size:12px;color:var(--mut);line-height:1.9">
+${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="font-size:11px">${esc(o.image||'')}</code> · ${o.reads_prl_host?'读 PRL_HOST(连上方 prl_host)':'不读 host(池写死在镜像内)'}</div>`).join('')}
+</div>
+<div class=row style=margin-top:12px><button class=b-acc onclick=saveCommon()>保存全局配置</button>
 <span class=hint>保存后各平台需「重启应用」生效</span></div></div>
 <div class=platbox><div class=top><b>账户 · 看板登录</b></div>
 <div class=grid2>
@@ -1655,6 +2534,7 @@ return `<div class=lbl>${esc(v.label||p)} · 平台配置</div>
 <div class=grid2>
 <div class=fld>启用 enabled</div><div><input type=checkbox id="en_${p}" ${v.enabled?'checked':''}></div>
 ${v.has_create?`<div class=fld>自动建机 create_enabled</div><div><input type=checkbox id="ce_${p}" ${v.create_enabled?'checked':''}></div>`:''}
+<div class=fld>新抢矿池 pool</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}</option>`).join('')}</select> <button class=b-warn onclick="migrateAcct('${esc(p)}')">⇄ 迁移现有机器到所选池</button></div>
 </div>
 <div class=lbl style=margin-top:14px>GPU 型号 · 最高 $/h · 最低 TH/s</div>
 <div class=gpurow style=color:var(--mut);font-size:11px><div>GPU</div><div>最高 $/h</div><div>最低 TH/s</div><div></div></div>
@@ -1681,9 +2561,52 @@ ${rentBtn}
 async function savePw(){let pw=document.getElementById('newpw').value;if(pw.length<4){toast('密码至少 4 位');return;}
 let r=await api('/api/dashboard-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
 document.getElementById('newpw').value='';toast(r.error?('失败: '+r.error):'看板密码已更新');}
+async function setPool(aid,pool){let r;try{r=await api('/api/set-pool',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:aid,pool:pool})});}catch(e){toast('切换失败');return;}toast(r&&r.ok?('已切换新抢矿池: '+pool+'(重启应用后新机器生效)'):('失败: '+((r&&r.error)||'未知')));renderConfigTab();}
+function setPoolView(v){localStorage.setItem('pool_view',v);renderOverview();}
 async function loadLog(p){let n=document.getElementById('loglines_'+p).value;let pre=document.getElementById('log_'+p);
 pre.style.display='';pre.textContent='加载中…';
 try{let r=await api('/api/logs?platform='+p+'&lines='+n);pre.textContent=r.log||'(空)';pre.scrollTop=pre.scrollHeight;}catch(e){pre.textContent='加载失败';}}
+async function _migrateConfirm(label,target,cntText){
+  let word=prompt('【一键迁移】将把 '+label+' 迁移到矿池 ['+target+']。\n'+cntText+'\n迁移期间这些机器会停机重启几分钟(runpod 原地换镜像/vast 销毁重租/salad 重建)。\n\n输入 MIGRATE 确认:');
+  return word==='MIGRATE';
+}
+async function _countAffected(aid){
+  try{
+    let rt=await api('/api/rentals');
+    let total=0,lines=[];
+    Object.entries(rt||{}).forEach(([acct,v])=>{
+      if(aid!=='all'&&acct!==aid)return;
+      let n=(v.machines||[]).length||0;total+=n;
+      if(n)lines.push(acct+': '+n+' 台');
+    });
+    return total?('受影响约 '+total+' 台 ('+lines.join(', ')+')'):'当前无在租机器(只切换配置)';
+  }catch(e){return '(获取在租信息失败, 请谨慎确认)';}
+}
+async function migrateAcct(aid){
+  let sel=document.getElementById('pool_'+aid);if(!sel){toast('找不到矿池选择');return;}
+  let target=sel.value;
+  let cnt=await _countAffected(aid);
+  if(!await _migrateConfirm(aid,target,cnt)){toast('已取消(确认词不符)');return;}
+  toast('迁移中…(请稍候)');
+  let r;try{r=await api('/api/migrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:aid,target_pool:target,confirm:'MIGRATE'})});}catch(e){toast('迁移请求失败');return;}
+  _migrateToast(r);renderConfigTab();
+}
+async function migrateAll(){
+  let pools=(CFG&&CFG.pools)||[];
+  let sel=document.getElementById('migrateAllPool');
+  let target=sel?sel.value:'';
+  if(!target||!pools.some(o=>o.id===target)){toast('请选择目标矿池');return;}
+  let cnt=await _countAffected('all');
+  if(!await _migrateConfirm('全部账号',target,cnt)){toast('已取消(确认词不符)');return;}
+  toast('全部迁移中…(请稍候)');
+  let r;try{r=await api('/api/migrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:'all',target_pool:target,confirm:'MIGRATE'})});}catch(e){toast('迁移请求失败');return;}
+  _migrateToast(r);renderConfigTab();
+}
+function _migrateToast(r){
+  if(!r||!r.ok){toast('迁移失败: '+((r&&r.error)||'未知'));return;}
+  let parts=(r.accounts||[]).map(a=>{let res=a.result||{};if(res.error)return a.account+': 错误';let sm=res.summary||{};let ok=(sm.runpod||0)+(sm.vast||0)+(sm.salad||0);let f=sm.failed||0;return a.account+': '+ok+'台'+(f?(' / '+f+'失败'):'');});
+  toast('迁移完成 → '+r.target_pool+': '+parts.join(' | ')+'。重启对应监控后新抢才用新池。');
+}
 
 function gpuRowHtml(p,i,g){return `<div class=gpurow data-gpu>
 <input value="${esc(g.gpu||'')}" placeholder="RTX 4090" data-f=gpu>
@@ -1853,6 +2776,7 @@ def main():
     CONTROL_DIR.mkdir(exist_ok=True)
     threading.Thread(target=spend_loop, daemon=True).start()
     threading.Thread(target=_refresh_loop, daemon=True).start()  # 后台预热缓存, 请求只读缓存不阻塞
+    start_portal_manager()  # 常驻 headless 抓 salad portal GPU/余额(无会话/无 playwright 则静默跳过)
     port = int(CONF.get("port", 8787))
     srv = ThreadingHTTPServer(("0.0.0.0", port), H)
     print(f"pearl dashboard on http://0.0.0.0:{port}  (user={CONF.get('user','admin')})", flush=True)

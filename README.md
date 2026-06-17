@@ -2,7 +2,7 @@
 
 多平台 **GPU 自动抢租挖 $pearl** + **网页看板** 统一管理。
 
-在 **Vast.ai / RunPod / TensorDock / Salad** 上自动扫描 GPU 价格,低于阈值就租下、跑 PearlHash 矿机挖 **$pearl**,持续监控算力,对低效 / 不挖的机器自动销毁拉黑控成本——全程用一个**暗色网页看板**查看与操作。
+在 **Vast.ai / RunPod / TensorDock / Salad** 上自动扫描 GPU 价格,低于阈值就租下、跑矿机挖 **$pearl**(**PearlHash / TW Pool / herominers / pearlfortune** 四矿池可切换迁移),持续监控算力,对低效 / 不挖的机器自动销毁 / 换机控成本——全程用一个**暗色网页看板**查看与操作。
 
 > ⚠️ 会真实花钱。首次先 dry-run(不加 `--live`)看日志,确认无误再小额实跑。
 
@@ -10,11 +10,14 @@
 
 ## 网页看板
 
-- **总览**:钱包、在跑机器数、总算力(矿池实测)、累计租金/产出/折合利润,以及**按账号**列出在跑机器(单价/时长/算力 + Salad「组」列 + 一键关闭)——**每个账号一个卡片**,卡片右上显示**账户余额**(Vast / RunPod 自动拉取;Salad / TensorDock 无余额 API,点余额处 ✎ 直接填一次当前余额,看板按消耗递减显示「估算余额 · 约 Yh 花完」)。
+- **总览**:钱包、在跑机器数、总算力(矿池实测)、累计租金/产出/折合利润、**挖矿成本**(每 $PRL 的电租成本,累计 + 最近 3h 两项,各对比实时币价提示盈亏),以及**按账号**列出在跑机器(单价/时长/算力 + Salad「组」列 + 一键关闭)——**每个账号一个卡片**,卡片右上显示**账户余额**(Vast / RunPod 自动拉取;**Salad 从 portal 抓实时余额**;TensorDock 无余额 API,点余额处 ✎ 直接填一次当前余额,看板按消耗递减显示「估算余额 · 约 Yh 花完」)。
+- **多矿池**:**PearlHash / TW Pool / herominers / pearlfortune** 四池,配置页可切换/一键迁移。总览所有指标可**按池分别查看**,机器表显示每台在哪个池并可按池筛选;池卡片含**待结算/累计收益/份额/网络**详情 + **可折叠算力趋势图**(每池每小时算力折线)。
 - **行情图表**:总览内嵌可折叠 **PRL/USDT K 线图**(Candlestick + EMA20/EMA60 + 成交量,周期 15m/1h/4h/1d,hover tooltip);实时币价自动从 SafeTrade 拉取,看板顶部显示「● 实时」。
+- **Salad 真实 GPU/余额**:通过浏览器会话从 Salad portal 抓每台**真实单卡型号、单价、实时余额**(Salad 公共 API 不返回 GPU,portal 是唯一来源;一次性登录后 headless 静默续期)。**scid 缺失/过期时自动弹窗引导重登**(检测到连续抓空 → 弹有头浏览器,你过完 Turnstile/OTP 自动续上,无需手动重跑脚本;无 GUI 环境则降级为提示)。
+- **逐实例低效治理**:salad 按**矿池权威算力逐实例**判定,某台低于其卡型号阈值并持续超时即自动 reallocate 换机(弹性多卡组按实例真实 GPU 取对应阈值)。
 - **配置**:左侧栏「公共配置」+ **按账号**列出(可分别改每个账号)——网页直接改 **API key、钱包、GPU 型号与价格/算力门槛、各项参数**(结构化表单 + 高级 raw JSON),**暂停/启动租用**,**重启应用**,以及**修改看板登录密码**。
 - **多账号**:同一平台可配多个账号(如 2 个 Salad + 2 个 RunPod),各自独立监控/抢卡(见下「多账号」章节)。
-- 纯 Python 标准库,**零依赖**;密码门保护。
+- core 纯 Python 标准库(Salad GPU/余额功能需 **Playwright**,项目用 **uv** 管理);密码门保护。
 
 ---
 
@@ -23,7 +26,10 @@
 只有**一个配置文件 `.env`**(平台 API key + 看板登录都在里面),**一条命令起 / 停全部服务**。
 
 ```bash
-# 0. 依赖: 只需 Python 3.10+(纯标准库,无需 pip,也不需要 byobu)
+# 0. 依赖: 用 uv 管理(core 纯标准库; salad GPU/余额功能需 playwright)
+#    装 uv: brew install uv     # 或 curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync                          # 按 pyproject.toml 建 .venv(Python 见 .python-version) + 装依赖
+# (可选) salad GPU/单价/真实余额: uv run playwright install chromium  + 见文末章节
 
 # 1. 复制模板(真实文件已被 .gitignore 保护)
 cp .env.example .env
@@ -98,3 +104,17 @@ bash scripts/stop-all.sh && bash scripts/start-all.sh        # 重启, 看板自
 ---
 
 > 详细部署/调参/各平台说明在本地 `docs/`(不随仓库分发)。
+
+## Salad GPU/单价/真实余额(可选, 需 Playwright)
+
+salad 迁 twpool 后, 公共 API 不再提供 GPU 型号。开启后用浏览器会话从 portal-api 抓真实 `gpu_class` + 信用余额:
+
+1. 装依赖: `uv sync && uv run playwright install chromium`
+2. 一次性登录(有头, 每个 salad 账号一个隔离窗口): `uv run python salad_login.py`
+   - 在弹出的窗口里登录对应账号(过 Turnstile/OTP), 完成后回终端按回车保存会话。
+   - 会话存到 `secrets/salad_session_<账号>.json`(已 gitignore, 切勿提交)。
+3. 重启 dashboard。常驻 headless 浏览器会自动续 Cloudflare 通行证并定时刷新 GPU/余额。
+4. **scid 缺失/过期自动重登(半自动)**:dashboard 检测到某账号会话缺失、或连续 2 轮抓取全空(scid 过期)且过冷却(默认 30min)→ **自动弹有头浏览器**到该账号 portal 登录页;你人工过 Turnstile/OTP,登录后**自动检测完成并存会话、续上抓取**(无需手动重跑第 2 步)。超时(默认 10min)未登完则放弃。
+   - 需本机有图形界面;**无 GUI 环境(ssh/服务器)弹窗失败 → 自动降级**为日志提示,回到手动 `salad_login.py` 流程。
+
+未装 Playwright / 未登录时, 整套静默跳过, 不影响其它功能。

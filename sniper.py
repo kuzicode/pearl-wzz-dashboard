@@ -116,6 +116,8 @@ def request_graphql(url, token, query, variables=None, timeout=30):
 def normalize_gpu(name):
     if not name:
         return ""
+    if "," in str(name):  # 多卡组逗号串(salad 弹性多 GPU 组 gpu 字段)无法判定单一型号 → 空, 避免误归一成首个命中型号
+        return ""
     text = re.sub(r"\s+", " ", name.upper()).replace("GEFORCE ", "")
     compact = re.sub(r"[^A-Z0-9]+", "", text)
     if "5090" in compact:
@@ -178,27 +180,35 @@ def gpu_map_value(name, mapping, default=None):
     return default
 
 
+_HASHRATE_UNIT_MULT = {  # 单位 → 折算到 TH/s 的系数
+    "H": 1 / 1_000_000_000_000, "KH": 1 / 1_000_000_000, "MH": 1 / 1_000_000,
+    "GH": 1 / 1_000, "TH": 1, "PH": 1_000, "EH": 1_000_000,
+}
+
 def parse_latest_hashrate(log_text):
     latest = None
     for line in str(log_text or "").splitlines():
+        # pearlhash/旧镜像: "Hashrate Total = N unit/s"
         match = re.search(r"Hashrate Total\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?H)/s", line, re.I)
         if match:
-            value = float(match.group(1))
-            unit = match.group(2).upper()
-            multiplier = {
-                "H": 1 / 1_000_000_000_000,
-                "KH": 1 / 1_000_000_000,
-                "MH": 1 / 1_000_000,
-                "GH": 1 / 1_000,
-                "TH": 1,
-                "PH": 1_000,
-                "EH": 1_000_000,
-            }.get(unit, 1)
-            latest = value * multiplier
+            latest = float(match.group(1)) * _HASHRATE_UNIT_MULT.get(match.group(2).upper(), 1)
             continue
+        # twpool 镜像: "... | 134.6 TH/s window | 135.2 TH/s avg | shares: ..." → 取 window(当前), 无则退 avg
+        match = (re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?H)/s\s*window", line, re.I)
+                 or re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?H)/s\s*avg", line, re.I))
+        if match:
+            latest = float(match.group(1)) * _HASHRATE_UNIT_MULT.get(match.group(2).upper(), 1)
+            continue
+        # 结构化字段
         match = re.search(r"(?:hashrate_th_s|share_equiv_th_s)=([0-9]+(?:\.[0-9]+)?)", line, re.I)
         if match:
             latest = float(match.group(1))
+            continue
+        # pearlfortune (vllm.gpu): '... proof_per_sec="145.11 T/s" ...' (T/s 即 TH/s, 与池同刻度)
+        match = re.search(r'proof_per_sec="?\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?)/s', line, re.I)
+        if match:
+            unit = (match.group(2).upper() or "") + "H"   # T/s→TH, G/s→GH, M/s→MH, 裸/s→H
+            latest = float(match.group(1)) * _HASHRATE_UNIT_MULT.get(unit, 1)
     return latest
 
 
@@ -209,18 +219,7 @@ def parse_hashrate_text(value):
     match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?H)/s", text, re.I)
     if not match:
         return 0.0
-    numeric = float(match.group(1))
-    unit = match.group(2).upper()
-    multiplier = {
-        "H": 1 / 1_000_000_000_000,
-        "KH": 1 / 1_000_000_000,
-        "MH": 1 / 1_000_000,
-        "GH": 1 / 1_000,
-        "TH": 1,
-        "PH": 1_000,
-        "EH": 1_000_000,
-    }.get(unit, 1)
-    return numeric * multiplier
+    return float(match.group(1)) * _HASHRATE_UNIT_MULT.get(match.group(2).upper(), 1)
 
 
 def parse_log_gpu_name(log_text):
@@ -262,6 +261,20 @@ def pearl_worker_hashrates(config):
     return workers
 
 
+def lookup_worker(worker_hashrates, worker_name):
+    """矿池 worker 查找: 先精确匹配, 再前缀匹配(矿机镜像会在 PRL_WORKER 后追加 -hash 后缀)。
+    前缀匹配有歧义(多个候选)时返回 None 避免误判。"""
+    if not worker_name or not worker_hashrates:
+        return None
+    exact = worker_hashrates.get(str(worker_name))
+    if exact is not None:
+        return exact
+    # 前缀匹配: 找所有以 worker_name + '-' 开头的条目
+    prefix = str(worker_name) + "-"
+    matches = [v for k, v in worker_hashrates.items() if k.startswith(prefix)]
+    return matches[0] if len(matches) == 1 else None
+
+
 def alphapool_worker_hashrates(config):
     address = str(config.get("prl_address") or "").strip()
     if not address:
@@ -287,6 +300,111 @@ def alphapool_worker_hashrates(config):
         }
     return workers
 
+
+TWPOOL_API = "https://api.tw-pool.com/api/worker_stats"
+
+def twpool_worker_hashrates(config):
+    """twpool per-worker 算力。返回 {worker_name: {hashrate_th, ip, version, gpu_info}}, 与 pearl_worker_hashrates 同 schema。
+    用 reported(矿机自报 hs, H/s)为当前算力; reported 的 key 形如 '{address}.{worker}'。
+    网络异常或 JSON 解析失败由 request_json 处理(GET 自动重试, HTTPError 上抛)。
+    空 address 返回 {}。"""
+    addr = str((config or {}).get("prl_address") or "").strip()
+    if not addr:
+        return {}
+    url = f"{TWPOOL_API}?address={urllib.parse.quote(addr)}&mode=realtime&excludeWorker=false&selectPool=pearl"
+    data = request_json("GET", url, timeout=20)
+    out = {}
+    reported = (data or {}).get("reported") or {}
+    prefix = addr + "."
+    for key, info in reported.items():
+        worker = key[len(prefix):] if key.startswith(prefix) else key
+        try:
+            hs = float((info or {}).get("hs") or 0)
+        except (TypeError, ValueError):
+            hs = 0.0
+        out[worker] = {"hashrate_th": hs / 1e12, "ip": None, "version": None, "gpu_info": []}
+    return out
+
+
+_pf_workers_cache = {"data": None, "ts": 0.0}
+PEARLFORTUNE_CONN_TTL = 25.0
+
+def pearlfortune_worker_hashrates(config):
+    """pearlfortune 逐-worker 算力(供 salad 低效池权威): {worker: {hashrate_th, gpu_info:[{name}]}}。
+    查 /api/v1/miners/<addr>/connections; reported_hashrate/1e12 → TH(与 twpool 同刻度); stale=true 视为离线(0)。
+    模块级短缓存(避免每账号每轮重打)。失败/无地址 → {}。"""
+    address = str((config or {}).get("prl_address") or "").strip()
+    if not address:
+        return {}
+    now = epoch_now()
+    c = _pf_workers_cache
+    if c["data"] is not None and now - c["ts"] < PEARLFORTUNE_CONN_TTL:
+        return c["data"]
+    out = {}
+    try:
+        url = f"https://pearlfortune.org/api/v1/miners/{urllib.parse.quote(address)}/connections"
+        data = request_json("GET", url, {"User-Agent": "sniper/1.0"}, timeout=15)
+        for w in (((data or {}).get("data") or {}).get("workers") or []):
+            if not isinstance(w, dict):
+                continue
+            name = w.get("worker") or w.get("name")
+            if not name:
+                continue
+            try:
+                th = 0.0 if w.get("stale") else round(float(w.get("reported_hashrate") or 0) / 1e12, 6)
+            except (TypeError, ValueError):
+                th = 0.0
+            gi = (w.get("client_info") or {}).get("gpus") or []
+            model = (gi[0] or {}).get("model") if (gi and isinstance(gi[0], dict)) else None
+            out[str(name)] = {"hashrate_th": th, "gpu_info": ([{"name": model}] if model else [])}
+    except Exception as exc:
+        log(f"pearlfortune worker check failed: {type(exc).__name__}: {exc}")
+        return {}
+    c["data"] = out
+    c["ts"] = now
+    return out
+
+
+_POOL_HASHRATE_FN = {
+    "pearlhash": pearl_worker_hashrates,
+    "twpool": twpool_worker_hashrates,
+    "pearlfortune": pearlfortune_worker_hashrates,
+}
+
+def merged_worker_hashrates(config):
+    """按 monitor_pools 查多个池, 按 worker 名合并取 hashrate_th 最大。
+    任一池查询失败只记日志、跳过该池(不影响其它池)。默认 monitor_pools = 全部已注册池。"""
+    pools = (config or {}).get("monitor_pools") or list(POOLS.keys())
+    merged = {}
+    for pool in pools:
+        fn = _POOL_HASHRATE_FN.get(pool)
+        if not fn:
+            continue
+        try:
+            wh = fn(config) or {}
+        except Exception as exc:
+            log(f"pool {pool} hashrate check failed: {type(exc).__name__}: {exc}")
+            continue
+        for w, info in wh.items():
+            cur = merged.get(w)
+            if cur is None or float(info.get("hashrate_th") or 0) > float(cur.get("hashrate_th") or 0):
+                merged[w] = info
+    return merged
+
+
+def pool_worker_hashrates(config, pool_id):
+    """按 pool_id 返回单池逐-worker 算力 {worker: {hashrate_th, gpu_info}}(供 salad 低效按池路由)。
+    herominers / 未注册池 → {}(不作权威, salad 退容器日志判定)。某池查询失败 → {}(→ 日志兜底, 不误杀)。"""
+    if pool_id == "herominers":
+        return {}
+    fn = _POOL_HASHRATE_FN.get(pool_id)
+    if not fn:
+        return {}
+    try:
+        return fn(config) or {}
+    except Exception as exc:
+        log(f"pool {pool_id} worker check failed: {type(exc).__name__}: {exc}")
+        return {}
 
 
 def compact_location(offer):
@@ -403,6 +521,51 @@ def record_rent(state, provider, external_id, gpu, price, result):
     })
 
 
+POOLS = {
+    "pearlhash": {"label": "PearlHash",
+                  "image": "docker.io/mrkidbk/pearl-miner:v12",
+                  "reads_prl_host": True},
+    "twpool":    {"label": "TW Pool (小幣礦池)",
+                  "image": "docker.io/mrkidbk/pearl-miner-twpool:v1.9.1",
+                  "reads_prl_host": False},
+    "herominers": {"label": "HeroMiners",
+                   "image": "docker.io/mrkidbk/pearl-miner-herominers:v3.3.6",
+                   "reads_prl_host": False},  # 镜像自动测速 15 节点选优, 不需 PRL_HOST
+    "pearlfortune": {"label": "PearlFortune",
+                     "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
+                     "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
+}
+
+def _raw_pool(config):
+    """读取并规范化 config 中的原始 pool 字符串。"""
+    return str((config or {}).get("pool") or "").strip()
+
+def active_pool(config):
+    """从 config 读 pool, 返回 POOLS 中的有效 key; 未知/未配默认返回 'pearlfortune'。"""
+    p = _raw_pool(config)
+    return p if p in POOLS else "pearlfortune"
+
+def effective_image(config):
+    """新抢机器用的镜像: 优先按配置的 pool 镜像; pool 未知/未配则回退 config['image']。"""
+    p = _raw_pool(config)
+    if p in POOLS:
+        return POOLS[p]["image"]
+    return (config or {}).get("image")
+
+def pool_of_image(image):
+    """按镜像判定矿池: 先认 herominers/pearlfortune; twpool/conishc→'twpool'; 其它非空→'pearlhash'; 空→None。"""
+    s = str(image or "").lower()
+    if not s:
+        return None
+    if "herominers" in s:
+        return "herominers"
+    if "pearlfortune" in s:
+        return "pearlfortune"
+    if "twpool" in s or "conishc" in s:
+        return "twpool"
+    return "pearlhash"
+
+
 def make_env(config, provider, gpu, external_id):
     safe_gpu = re.sub(r"[^A-Za-z0-9]+", "-", gpu).strip("-").lower()
     worker = f"{config.get('worker_prefix', 'auto')}-{provider}-{safe_gpu}-{external_id}"
@@ -509,7 +672,7 @@ def rent_vast(config, match, state, live):
     else:
         config["vast"]["_current_price"] = old_price
     body = {
-        "image": config["image"],
+        "image": effective_image(config),
         "label": env["PRL_WORKER"],
         "disk": float(config["vast"].get("disk_gb", 20)),
         "runtype": "args",
@@ -535,6 +698,7 @@ def rent_vast(config, match, state, live):
             blacklist_offer(state, "vast", offer_id, "offer_not_available", {"gpu": match["gpu"], "price": match["price"]})
         return False
     record_rent(state, "vast", offer_id, match["gpu"], match["price"], result)
+    state["rented"][-1]["env"] = {k: str(v) for k, v in env.items()}
     if isinstance(result, dict):
         log(f"Vast rent result: offer={offer_id} success={result.get('success')} contract={result.get('new_contract')}")
     else:
@@ -643,7 +807,7 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
     if hashrate_th is None:
         worker = make_worker(config, "vast", rented.get("gpu"), rented.get("external_id"))
         try:
-            info = pearl_worker_hashrates(config).get(worker)
+            info = lookup_worker(merged_worker_hashrates(config), worker)
         except Exception as exc:
             log(f"Vast PearlHash worker check failed: contract={contract_id} worker={worker} error={type(exc).__name__}: {exc}")
             info = None
@@ -714,6 +878,211 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
     return True
 
 
+HOST_FALLBACK_DEFAULT = "129.226.55.135:9000"
+
+
+def update_zero_tracking(rented, hashrate_th, now_ts=None):
+    """记录算力首次掉到 0 的时刻; 一旦 >0 即清除。用于判断"最近一段时间持续为 0"。"""
+    if now_ts is None:
+        now_ts = epoch_now()
+    if hashrate_th is not None and float(hashrate_th) > 0:
+        rented.pop("zero_since_epoch", None)
+    else:
+        rented.setdefault("zero_since_epoch", now_ts)
+
+
+def restart_instance_with_env(provider, instance_id, env):
+    """改 env 并触发同机重启。仅 RunPod 支持:
+    POST /v1/pods/{id}/update 改 env 会触发 reset、以新 env 重新拉起容器(官方文档:
+    "may trigger a reset of the instance to apply the requested changes effectively")。
+
+    Vast 不支持: 容器 env 在创建时烧死, PUT /api/v0/instances/{id}/ 只处理 state/label,
+    会静默忽略 env 字段且不重启 → 直接报错, 避免静默空操作白等一个观察窗口。"""
+    if provider == "runpod":
+        api_key = os.environ["RUNPOD_API_KEY"]
+        return request_json(
+            "POST",
+            f"https://rest.runpod.io/v1/pods/{instance_id}/update",
+            {"Authorization": f"Bearer {api_key}"},
+            {"env": env},
+            timeout=60,
+        )
+    raise ValueError(
+        f"restart_instance_with_env not supported for provider {provider} "
+        f"(only runpod supports in-place env change + restart; vast env is immutable post-create)"
+    )
+
+
+def migrate_runpod_pod(pod_id, image, env):
+    """迁移一台 runpod pod: POST /v1/pods/{id}/update 改 imageName + 完整 env → 触发 reset 用新镜像重起。
+    实测确认(2026-06-08): env 整体替换(非合并), 故必须传完整 env。返回 Pod 对象。"""
+    api_key = os.environ["RUNPOD_API_KEY"]
+    return request_json(
+        "POST",
+        f"https://rest.runpod.io/v1/pods/{pod_id}/update",
+        {"Authorization": f"Bearer {api_key}"},
+        {"imageName": image, "env": env},
+        timeout=60,
+    )
+
+
+def migrate_account(config, state, account_id, target_pool, live=True):
+    """把该账号现有 active 机器迁移到 target_pool, 并把 config['pool'] 设为 target_pool(新抢也用新池)。
+    - runpod: 每台原地 POST update 换 imageName + 完整 env(reset)。
+    - vast:   每台 DELETE 销毁(扫描循环用新池镜像自动重租)。
+    单台失败 try/except 收集、不中断整批; 迁移后 reset_low_eff_timers 给新机器全新观测窗口。
+    account_id 仅作结果标签(调用方已按账号注入对应平台 API key 到标准环境变量)。"""
+    if target_pool not in POOLS:
+        return {"error": f"unknown pool: {target_pool}"}
+    config["pool"] = target_pool
+    image = POOLS[target_pool]["image"]
+    reads_host = POOLS[target_pool]["reads_prl_host"]
+    results = []
+    # --- runpod: 原地换镜像 ---
+    if (config.get("runpod") or {}).get("enabled"):
+        try:
+            pods = list_runpod_pods()
+        except Exception as exc:
+            pods = []
+            results.append({"platform": "runpod", "id": None, "action": "list", "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        for pod in pods:
+            pid = pod.get("id")
+            worker = ((pod.get("env") or {}).get("PRL_WORKER")) or pod.get("name")
+            env = {"PRL_ADDRESS": config["prl_address"], "PRL_WORKER": worker}
+            if reads_host:
+                env["PRL_HOST"] = config["prl_host"]
+            try:
+                if live:
+                    migrate_runpod_pod(pid, image, env)
+                results.append({"platform": "runpod", "id": pid, "action": "update", "ok": True, "error": None})
+            except Exception as exc:
+                log(f"migrate runpod pod {pid} failed: {type(exc).__name__}: {exc}")
+                results.append({"platform": "runpod", "id": pid, "action": "update", "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    # --- vast: 销毁重租 ---
+    if (config.get("vast") or {}).get("enabled"):
+        try:
+            insts = list_vast_instances()
+        except Exception as exc:
+            insts = []
+            results.append({"platform": "vast", "id": None, "action": "list", "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        for inst in insts:
+            iid = inst.get("id")
+            try:
+                if live:
+                    destroy_vast_instance(iid)
+                results.append({"platform": "vast", "id": iid, "action": "destroy", "ok": True, "error": None})
+            except Exception as exc:
+                log(f"migrate vast instance {iid} failed: {type(exc).__name__}: {exc}")
+                results.append({"platform": "vast", "id": iid, "action": "destroy", "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    # --- salad: PATCH 容器组镜像 + 重建实例 ---
+    if (config.get("salad") or {}).get("enabled"):
+        try:
+            groups = list_salad_container_groups(config)
+        except Exception as exc:
+            groups = []
+            results.append({"platform": "salad", "id": None, "action": "list", "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+        for g in groups:
+            gname = g.get("name")
+            worker = salad_group_worker_name(g) or gname
+            env = {"PRL_ADDRESS": config["prl_address"], "PRL_WORKER": worker}
+            if reads_host:
+                env["PRL_HOST"] = config["prl_host"]
+            try:
+                if live:
+                    migrate_salad_group(config, gname, image, env)
+                    for inst in (list_salad_instances(config, gname) or []):
+                        iid = inst.get("instance_id") or inst.get("id")
+                        if not iid:
+                            log(f"migrate salad {gname}: instance missing id, skip recreate")
+                            continue
+                        try:
+                            recreate_salad_instance(config, gname, iid)
+                        except Exception as exc2:
+                            log(f"migrate salad recreate {gname}/{iid} failed (auto-recreate 兜底): {type(exc2).__name__}: {exc2}")
+                results.append({"platform": "salad", "id": gname, "action": "patch+recreate", "ok": True, "error": None})
+            except Exception as exc:
+                log(f"migrate salad group {gname} failed: {type(exc).__name__}: {exc}")
+                results.append({"platform": "salad", "id": gname, "action": "patch", "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+    try:
+        reset_low_eff_timers(state)
+    except Exception as exc:
+        log(f"migrate reset_low_eff_timers failed: {type(exc).__name__}: {exc}")
+    summary = {
+        "runpod": sum(1 for r in results if r["platform"] == "runpod" and r["ok"]),
+        "vast": sum(1 for r in results if r["platform"] == "vast" and r["ok"]),
+        "salad": sum(1 for r in results if r["platform"] == "salad" and r["ok"]),
+        "failed": sum(1 for r in results if not r["ok"]),
+    }
+    return {"ok": True, "account_id": account_id, "target_pool": target_pool, "results": results, "summary": summary}
+
+
+def try_host_fallback(config, provider, rented, instance_id):
+    """低效将销毁前的兜底: 若最近持续 0 算力且尚未切过 host, 把 PRL_HOST 切到备用地址并原机重启,
+    重置观察窗口再观察一轮; 返回 True 表示已执行兜底(调用方应跳过本次销毁)。
+
+    重启用创建时落库的完整 env(仅覆盖 PRL_HOST), 以保证 PRL_WORKER 等不变, 矿池仍能按原 worker 查算力。
+
+    仅 RunPod 支持: 其 POST /pods/{id}/update 改 env 会触发 reset、以新 env 重新拉起容器。
+    Vast 不支持原地改 env(env 在创建时烧进容器, PUT /instances/{id}/ 只收 state/label,
+    会静默忽略 env 且不重启)→ 对 vast 禁用本兜底, 命中低效直接走正常销毁。"""
+    if provider != "runpod":
+        return False
+    if not POOLS.get(active_pool(config), {}).get("reads_prl_host", True):
+        # 当前抢卡池(如 twpool)不读 PRL_HOST → 切 host 无意义, 禁用兜底, 命中低效直接走正常销毁/回收。
+        return False
+    cfg = config.get(provider, {})
+    if not cfg.get("host_fallback_enabled", True):
+        return False
+    if rented.get("host_switched"):
+        return False
+    fallback_host = str(cfg.get("host_fallback_host", HOST_FALLBACK_DEFAULT)).strip()
+    if not fallback_host or fallback_host == str(config.get("prl_host", "")).strip():
+        return False
+    zero_since = float(rented.get("zero_since_epoch") or 0)
+    zero_window = int(cfg.get("host_fallback_zero_seconds", 60))
+    if zero_since <= 0 or epoch_now() - zero_since < zero_window:
+        return False
+    env = dict(rented.get("env") or {})
+    if not env:
+        # 创建时未落库 env(老条目): 用 make_env 重建 (vast 的 external_id=offer_id 可复原同名 worker;
+        # runpod 老条目的 worker 名可能改变, 仅作降级兜底)。
+        old_price = cfg.get("_current_price")
+        cfg["_current_price"] = float(rented.get("price") or 0)
+        try:
+            env = make_env(config, provider, rented.get("gpu"), rented.get("external_id"))
+        finally:
+            if old_price is None:
+                cfg.pop("_current_price", None)
+            else:
+                cfg["_current_price"] = old_price
+    env = {k: str(v) for k, v in env.items()}
+    env["PRL_HOST"] = fallback_host
+    try:
+        result = restart_instance_with_env(provider, instance_id, env)
+    except Exception as exc:
+        log(f"{provider} host fallback restart failed: instance={instance_id} host={fallback_host} error={type(exc).__name__}: {exc}")
+        return False
+    now_ts = epoch_now()
+    rented["host_switched"] = True
+    rented["host_switched_epoch"] = now_ts
+    rented["host_switched_to"] = fallback_host
+    rented["env"] = env
+    rented["hashrate_last_check_epoch"] = now_ts
+    rented.pop("low_efficiency_since_epoch", None)
+    rented.pop("low_efficiency_reason", None)
+    rented.pop("zero_since_epoch", None)
+    required = int(cfg.get("low_efficiency_stop_seconds", 900))
+    log(f"{provider} host fallback: instance={instance_id} gpu={rented.get('gpu')} zero hashrate {int(zero_window)}s+; switched PRL_HOST -> {fallback_host}, restarting and re-observing {required}s result={result}")
+    notify(
+        config,
+        f"{provider} host fallback",
+        f"{rented.get('gpu')} instance={instance_id} zero hashrate; switched host to {fallback_host} and restarted",
+        priority="high",
+        tags=["arrows_counterclockwise", provider],
+    )
+    return True
+
+
 def apply_low_efficiency_policy(config, state, provider, rented, hashrate_th, price, instance_id, stop_fn, details=None):
     cfg = config.get(provider, {})
     if hashrate_th is None or price <= 0:
@@ -724,6 +1093,7 @@ def apply_low_efficiency_policy(config, state, provider, rented, hashrate_th, pr
     low = (min_eff > 0 and efficiency < min_eff) or (min_hash is not None and hashrate_th < float(min_hash))
     rented["last_hashrate_th"] = round(hashrate_th, 3)
     rented["last_hashrate_efficiency"] = round(efficiency, 3)
+    update_zero_tracking(rented, hashrate_th)
     if not low:
         rented.pop("low_efficiency_since_epoch", None)
         rented.pop("low_efficiency_reason", None)
@@ -733,6 +1103,10 @@ def apply_low_efficiency_policy(config, state, provider, rented, hashrate_th, pr
         first_low_epoch = now_ts
         if provider == "runpod" and cfg.get("backdate_low_efficiency_for_existing", True):
             first_low_epoch = float(rented.get("created_epoch") or now_ts)
+            switched_epoch = float(rented.get("host_switched_epoch") or 0)
+            if switched_epoch:
+                # 已切过 host 重启的, 计时起点不再回填到原创建时刻, 而是从重启时刻起, 给足重新观察的窗口
+                first_low_epoch = max(first_low_epoch, switched_epoch)
         rented["low_efficiency_since_epoch"] = first_low_epoch
         rented["low_efficiency_reason"] = f"hashrate={hashrate_th:.2f}TH efficiency={efficiency:.1f}TH_per_usd_hour"
         log(f"{provider} low efficiency observed: instance={instance_id} gpu={rented.get('gpu')} price=${price:.3f}/h hashrate={hashrate_th:.2f}TH efficiency={efficiency:.1f}")
@@ -741,6 +1115,8 @@ def apply_low_efficiency_policy(config, state, provider, rented, hashrate_th, pr
     duration = now_ts - float(rented["low_efficiency_since_epoch"])
     required = int(cfg.get("low_efficiency_stop_seconds", 900))
     if duration < required:
+        return False
+    if try_host_fallback(config, provider, rented, instance_id):
         return False
     reason = f"low_efficiency:{hashrate_th:.2f}TH:{efficiency:.1f}TH_per_usd_hour:{int(duration)}s"
     rented["active"] = False
@@ -983,6 +1359,11 @@ def reconcile_runpod_instances(config, state):
             rented["inactive_reason"] = "missing_from_runpod_pods"
             continue
         status = str(pod.get("desiredStatus") or pod.get("status") or "").upper()
+        switched_epoch = float(rented.get("host_switched_epoch") or 0)
+        if status in terminal and switched_epoch and (now_ts - switched_epoch) < grace:
+            # 刚切 host 重启, pod 可能短暂 STOPPED/EXITED; 本轮跳过删除, 等切换宽限期后再判
+            log(f"RunPod host-switch grace: pod={pod_id} status={status} skip delete ({int(now_ts-switched_epoch)}s since switch)")
+            continue
         if status in terminal:
             rented["active"] = False
             rented["inactive_reason"] = f"pod_terminal:{status}"
@@ -1017,6 +1398,10 @@ def reconcile_runpod_instances(config, state):
         if machine_id:
             rented["machine_id"] = machine_id
         age = now_ts - float(rented.get("created_epoch") or now_ts)
+        switched_epoch = float(rented.get("host_switched_epoch") or 0)
+        if switched_epoch:
+            # 切 host 重启后, 以重启时刻为准重新计算"机龄", 给足新宽限期
+            age = min(age, now_ts - switched_epoch)
         if age < grace:
             continue
         last_check = float(rented.get("hashrate_last_check_epoch") or 0)
@@ -1025,14 +1410,14 @@ def reconcile_runpod_instances(config, state):
         rented["hashrate_last_check_epoch"] = now_ts
         if worker_hashrates is None:
             try:
-                worker_hashrates = pearl_worker_hashrates(config)
+                worker_hashrates = merged_worker_hashrates(config)
                 worker_api_failed = False
             except Exception as exc:
                 log(f"RunPod PearlHash worker check failed: {type(exc).__name__}: {exc}")
                 worker_hashrates = {}
                 worker_api_failed = True
         worker = ((rented.get("result") or {}).get("env") or {}).get("PRL_WORKER") or (pod.get("env") or {}).get("PRL_WORKER") or rented.get("result", {}).get("name") or pod.get("name")
-        info = worker_hashrates.get(str(worker))
+        info = lookup_worker(worker_hashrates, worker)
         if not info:
             rented["last_hashrate_lookup"] = {"worker": worker, "found": False}
             # worker 不在矿池 = 没在挖。仅当本轮矿池查询成功时按 0 算力计, 交低效策略在持续低效 N 秒后回收;
@@ -1213,7 +1598,7 @@ def try_runpod_create(config, state, live):
                 "gpuCount": 1,
                 "gpuTypeIds": [gpu_type],
                 "gpuTypePriority": "custom",
-                "imageName": config["image"],
+                "imageName": effective_image(config),
                 "env": env,
                 "interruptible": False,
                 "containerDiskInGb": int(cfg.get("container_disk_gb", 20)),
@@ -1258,6 +1643,7 @@ def try_runpod_create(config, state, live):
                         request_json("DELETE", f"https://rest.runpod.io/v1/pods/{pod_id}", {"Authorization": f"Bearer {api_key}"}, timeout=30)
                     continue
                 record_rent(state, "runpod", result.get("id"), gpu_type, cost, result)
+                state["rented"][-1]["env"] = {k: str(v) for k, v in env.items()}
                 log(f"RunPod rent result: cloud={cloud_type} gpu={gpu_type} cost=${cost:.3f}/h id={result.get('id')}")
                 notify(
                     config,
@@ -2079,6 +2465,29 @@ def reallocate_salad_instance(config, group_name, instance_id):
     return request_json("POST", salad_url(config, f"/containers/{group}/instances/{inst}/reallocate"), headers, timeout=30)
 
 
+def migrate_salad_group(config, group_name, image, env):
+    """迁移一个 salad 容器组: PATCH 改 container.image + environment_variables(整体替换) → Salad 异步应用并自动重建实例。
+    实测确认(2026-06-08): merge-patch 对 environment_variables 是整体替换, 故须传完整 env。"""
+    headers = salad_headers()
+    if not headers:
+        raise RuntimeError("SALAD_API_KEY is not set")
+    headers = dict(headers)
+    headers["Content-Type"] = "application/merge-patch+json"
+    group = urllib.parse.quote(str(group_name))
+    body = {"container": {"image": image, "environment_variables": env}}
+    return request_json("PATCH", salad_url(config, f"/containers/{group}"), headers, body, timeout=30)
+
+
+def recreate_salad_instance(config, group_name, instance_id):
+    """显式重建一个 salad 实例以应用新镜像(保守; Salad PATCH 后通常已自动重建, 此为兜底)。"""
+    headers = salad_headers()
+    if not headers:
+        raise RuntimeError("SALAD_API_KEY is not set")
+    group = urllib.parse.quote(str(group_name))
+    inst = urllib.parse.quote(str(instance_id))
+    return request_json("POST", salad_url(config, f"/containers/{group}/instances/{inst}/recreate"), headers, None, timeout=30)
+
+
 def iso_millis_utc(ts):
     return dt.datetime.fromtimestamp(float(ts), dt.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -2229,41 +2638,40 @@ def run_salad_cycle(config, state, live):
     instance_watch = state.setdefault("salad_instance_watch", {})
     interval = int(cfg.get("hashrate_watch_interval_seconds", 30))
     low_seconds = int(cfg.get("low_efficiency_stop_seconds", 180))
+    low_eff_on = bool(cfg.get("salad_low_efficiency_enabled", True))  # 关掉=仍记录算力供显示, 但不判低效/不 reallocate
     cooldown_seconds = int(cfg.get("reallocate_cooldown_seconds", 600))
     log_lookback = int(cfg.get("log_lookback_seconds", 180))
     use_worker_fallback = bool(cfg.get("use_worker_fallback", False))
     worker_hashrates = {}
     if use_worker_fallback:
         try:
-            worker_hashrates = pearl_worker_hashrates(config)
+            worker_hashrates = merged_worker_hashrates(config)
         except Exception as exc:
             log(f"Salad PearlHash worker check failed: {type(exc).__name__}: {exc}")
     # 按型号判健康: 从矿池按 machine_id 解析每台真实 GPU, 取该型号的 min_hashrate_th 门槛
     per_model = bool(cfg.get("per_model_threshold_enabled", True))
-    _pool_cache = {"workers": worker_hashrates if worker_hashrates else None}
-    def _pool_workers():
-        if _pool_cache["workers"] is None:
+    _pool_cache = {}   # pool_id -> {worker: info}
+    def _pool_workers_for(pool_id):
+        if pool_id not in _pool_cache:
             try:
-                _pool_cache["workers"] = pearl_worker_hashrates(config)
+                _pool_cache[pool_id] = pool_worker_hashrates(config, pool_id)
             except Exception as exc:
-                log(f"Salad pool lookup failed: {type(exc).__name__}: {exc}")
-                _pool_cache["workers"] = {}
-        return _pool_cache["workers"] or {}
-    def pool_info_by_machine(mid):
-        # salad worker 名 = <prefix>-salad-<machine_id>; 返回 (gpu_name, hashrate_th 或 None)。
-        # 矿池只列在线 worker → 查不到=该机当前不在矿池(可能离线/未挖)。
+                log(f"Salad pool lookup failed (pool={pool_id}): {type(exc).__name__}: {exc}")
+                _pool_cache[pool_id] = {}
+        return _pool_cache[pool_id] or {}
+    def pool_info_by_machine(mid, pool_id):
         if not mid:
             return "", None
-        for wname, winfo in _pool_workers().items():
+        for wname, winfo in _pool_workers_for(pool_id).items():
             if str(mid) in str(wname):
                 gi = (winfo or {}).get("gpu_info") or []
                 gpu = str((gi[0] if gi else {}).get("name") or "").replace("NVIDIA GeForce ", "").strip()
                 return gpu, float((winfo or {}).get("hashrate_th") or 0)
         return "", None
-    def pool_gpu_by_machine(mid):
+    def pool_gpu_by_machine(mid, pool_id):
         if not mid or not per_model:
             return ""
-        return pool_info_by_machine(mid)[0]
+        return pool_info_by_machine(mid, pool_id)[0]
     alphapool_workers = None
     alphapool_worker_api_failed = False
     for name, group in groups_by_name.items():
@@ -2356,37 +2764,58 @@ def run_salad_cycle(config, state, live):
             log(f"Salad instance/log check failed: group={name} error={type(exc).__name__}: {exc}")
             continue
         running_instances = [x for x in instances if x.get("started") or x.get("ready") or str(x.get("state") or "").lower() == "running"]
+        log_by_machine = {e.get("machine_id"): e for e in log_rates.values() if e.get("machine_id")}  # 按 machine_id 索引日志算力(instance_id 不稳时用)
+        current_pool = pool_of_image(str(((group.get("container") or {}).get("image") or ""))) or "unknown"
+        # 池权威 = 有可靠 TH 刻度 worker 算力的池(pearlhash/twpool/pearlfortune); herominers(share×vardiff 指标不可靠) / unknown → 强制容器日志判定
+        pool_authoritative = current_pool in ("pearlhash", "twpool", "pearlfortune")
         for instance in running_instances:
-            instance_id = str(instance.get("id") or "")
-            if not instance_id:
+            instance_id = str(instance.get("instance_id") or instance.get("id") or "")
+            machine_id = str(instance.get("machine_id") or "")
+            if not instance_id and not machine_id:
                 continue
-            rate = log_rates.get(instance_id)
-            inst_key = f"{name}:{instance_id}"
+            # 日志算力关联: 优先 instance_id, 退 machine_id(salad API 偶发 instance_id=None; machine_id 稳定)
+            rate = (log_rates.get(instance_id) if instance_id else None) or (log_by_machine.get(machine_id) if machine_id else None)
+            inst_key = f"{name}:{instance_id or machine_id}"   # 稳定标识做 key(无 instance_id 用 machine_id)
             inst_entry = instance_watch.setdefault(inst_key, {})
-            machine_id = (rate or {}).get("machine_id") or instance.get("machine_id")
-            if rate:
-                hashrate_th = float(rate.get("hashrate_th") or 0)
-                log_gpu = rate.get("gpu_name") or ""
-                inst_entry["last_hashrate_source"] = "salad_log"
+            inst_entry.setdefault("first_seen_epoch", now_ts)  # 实例首次出现 → 新实例宽限基准
+            if not machine_id:
+                machine_id = (rate or {}).get("machine_id") or ""
+            # 日志 window 算力(显示口径; 无日志则 None)
+            log_hr = float(rate.get("hashrate_th") or 0) if rate else None
+            log_gpu = (rate or {}).get("gpu_name") or ""
+            # 池算力(判定权威): 新镜像每实例唯一 worker(<组>_<machine_id>) → 按 machine_id 命中
+            if pool_authoritative:
+                pool_workers = _pool_workers_for(current_pool)   # {} = 该池 API 挂/无数据
+                pool_api_ok = bool(pool_workers)
+                pool_gpu, pool_hr = pool_info_by_machine(machine_id, current_pool)  # None → 不在该池(离线)
             else:
-                # P1-B: running 实例但本轮无算力日志 → 先用矿池兜底; 矿池也查不到则按 0 算力。
-                # 否则坏/不出日志的实例会永远逃过回收。low_efficiency_stop_seconds 仍提供防抖,
-                # 单轮日志抽风不会立刻踢(需持续低于门槛满 stop_seconds)。
-                if not bool(cfg.get("treat_missing_log_as_zero", True)):
-                    continue
-                pgpu, phr = pool_info_by_machine(machine_id)
-                log_gpu = pgpu or ""
-                if phr is not None:
-                    hashrate_th = float(phr)
-                    inst_entry["last_hashrate_source"] = "pool_fallback"
-                else:
-                    hashrate_th = 0.0
-                    inst_entry["last_hashrate_source"] = "missing_log_zero"
+                pool_workers = {}; pool_api_ok = False; pool_gpu, pool_hr = "", None  # herominers/unknown → 退日志
+            if pool_hr is not None:
+                inst_entry.setdefault("pool_seen_by", {})[current_pool] = now_ts   # 按池记"曾在该池出现过"
+            if not log_gpu:
+                log_gpu = pool_gpu or ""
+            disp_hr = log_hr if log_hr is not None else (float(pool_hr) if pool_hr is not None else 0.0)
             inst_entry["last_check_epoch"] = now_ts
-            inst_entry["last_hashrate_th"] = round(hashrate_th, 3)
+            inst_entry["last_hashrate_th"] = round(disp_hr, 3)            # 显示口径 = 日志 window(无则池)
+            inst_entry["pool_hashrate_th"] = round(float(pool_hr), 3) if pool_hr is not None else None
+            inst_entry["last_hashrate_source"] = "salad_log" if log_hr is not None else ("pool_fallback" if pool_hr is not None else "missing")
             inst_entry["group"] = name
             inst_entry["instance_id"] = instance_id
             inst_entry["machine_id"] = machine_id
+            if not low_eff_on:  # 低效判定已禁用: 只记录算力(供 dashboard), 不判/不 reallocate
+                inst_entry.pop("low_since_epoch", None)
+                inst_entry.pop("low_reason", None)
+                continue
+            # 新实例宽限: 还在下载/启动(新镜像首拉慢), 不判。
+            # 例外: 双无(无容器日志 + 不在矿池, 且矿池 API 正常)的 running 实例不享长宽限 ——
+            #       健康新机会先连矿池/出日志, 双无 = miner 没起来/部署失败 → 直接走 missing 判定,
+            #       首次观测后满 low_efficiency_stop_seconds(默认5分钟)即 reallocate, 不等 10 分钟宽限。
+            _is_missing = (log_hr is None and pool_hr is None and pool_authoritative and pool_api_ok and bool(machine_id))
+            if not _is_missing and now_ts - float(inst_entry.get("first_seen_epoch") or now_ts) < int(cfg.get("salad_new_instance_grace_seconds", 600)):
+                inst_entry.pop("low_since_epoch", None)
+                inst_entry.pop("low_reason", None)
+                continue
+            # gpu / 门槛 解析(保留 alphapool / per_model)
             image_name = str(((group.get("container") or {}).get("image") or ""))
             is_alphapool_group = "alphaminetech/pearl-miner" in image_name or object_contains_text(group, "alphaminetech/pearl-miner")
             alpha_monitor_gpus = set(str(x).upper() for x in cfg.get("alphapool_monitor_gpu_names", []))
@@ -2397,8 +2826,7 @@ def run_salad_cycle(config, state, live):
                 min_hash = float(cfg.get("alphapool_min_hashrate_th", cfg.get("min_hashrate_th", {}).get(log_gpu or "RTX 5070", min_hash)))
                 gpu = log_gpu or "RTX 5070"
             elif per_model:
-                # 按 machine_id 解析真实型号, 取该型号门槛; 取不到型号或型号未配则保持组级 default
-                eff_gpu = pool_gpu_by_machine(inst_entry.get("machine_id")) or log_gpu or gpu
+                eff_gpu = pool_gpu_by_machine(inst_entry.get("machine_id"), current_pool) or log_gpu or gpu
                 if eff_gpu:
                     pmh = gpu_map_value(eff_gpu, cfg.get("min_hashrate_th", {}), None)
                     if pmh is not None:
@@ -2408,21 +2836,42 @@ def run_salad_cycle(config, state, live):
             inst_entry["gpu"] = gpu or log_gpu
             inst_entry["min_hash_applied"] = float(min_hash) if min_hash is not None else None
             inst_entry["mixed_group"] = mixed_group
-            if hashrate_th >= float(min_hash):
+            # 判定: 池权威, 但只对"曾在池上出现过(pool_seen)且有 machine_id"的实例用"池缺席=离线=0"来杀,
+            # 避免新镜像未铺开 / worker 名不匹配 / 缺 machine_id 的健康实例被误杀(这些退日志判定, 日志健康则不杀)。
+            use_pool = pool_authoritative and pool_api_ok and bool(machine_id) and \
+                       (pool_hr is not None or (inst_entry.get("pool_seen_by") or {}).get(current_pool))
+            if use_pool:
+                judged_hr = float(pool_hr) if pool_hr is not None else 0.0
+                judge_src = "pool"
+            elif log_hr is not None:
+                judged_hr = log_hr
+                judge_src = "log_fallback"
+            elif pool_authoritative and pool_api_ok and bool(machine_id):
+                # 既无容器日志算力又不在矿池(且已过新实例宽限): 矿池 API 正常 → 能确认这台真离线/死机 → 视为 0 判低效。
+                # (持续 low_efficiency_stop_seconds 才 reallocate, 单轮日志抖动会被下轮恢复清掉, 不会误杀。)
+                judged_hr = 0.0
+                judge_src = "missing"
+            else:
+                # 矿池 API 也挂 / 无 machine_id → 无法判定, 跳过不杀(防日志API+矿池同时抖动期误杀)。
+                continue
+            if judged_hr >= float(min_hash):
                 inst_entry.pop("low_since_epoch", None)
                 inst_entry.pop("low_reason", None)
                 continue
-            reason = f"instance_hashrate={hashrate_th:.2f}TH<{float(min_hash):.2f}TH gpu={gpu or 'unknown'}"
+            reason = f"{judge_src}_hashrate={judged_hr:.2f}TH<{float(min_hash):.2f}TH gpu={gpu or 'unknown'}"
             if not inst_entry.get("low_since_epoch"):
                 inst_entry["low_since_epoch"] = now_ts
                 inst_entry["low_reason"] = reason
-                log(f"Salad low instance hashrate observed: group={name} instance={instance_id} machine={inst_entry.get('machine_id')} {reason}")
+                log(f"Salad low instance ({judge_src}) observed: group={name} instance={instance_id} machine={machine_id} {reason}")
                 continue
             duration = now_ts - float(inst_entry["low_since_epoch"])
             if duration < low_seconds:
                 continue
             last_reallocate = float(inst_entry.get("last_reallocate_epoch") or 0)
             if now_ts - last_reallocate < cooldown_seconds:
+                continue
+            if not instance_id:  # 无 instance_id 无法调 reallocate API → 跳过(算力已记录)
+                inst_entry["last_reallocate_skipped"] = "no_instance_id"
                 continue
             try:
                 result = reallocate_salad_instance(config, name, instance_id)
@@ -2444,7 +2893,7 @@ def run_salad_cycle(config, state, live):
         min_hash = gpu_map_value(gpu, cfg.get("min_hashrate_th", {}), cfg.get("default_min_hashrate_th"))
         if min_hash is None:
             continue
-        info = worker_hashrates.get(worker_name)
+        info = lookup_worker(worker_hashrates, worker_name)
         if not info and not bool(cfg.get("missing_worker_as_zero", True)):
             continue
         hashrate_th = float((info or {}).get("hashrate_th") or 0)
@@ -2548,6 +2997,33 @@ def run_provider_loop(config, state, live):
             time.sleep(0.2)
 
 
+def reset_low_eff_timers(state):
+    """启动时清空在租机器的低效/零算力计时器, 让每台重新获得完整观测窗口。
+    避免重启后继承重启前(可能基于错误读数)的旧计时器导致一启动就误杀。
+    保留 host_switched_epoch 等其它状态。返回被清掉计时器的机器数。"""
+    cleared = 0
+    # runpod / vast: rented 里的低效计时
+    for r in state.get("rented", []):
+        if not r.get("active", True):
+            continue
+        if r.get("low_efficiency_since_epoch") is not None:
+            cleared += 1
+        r.pop("low_efficiency_since_epoch", None)
+        r.pop("low_efficiency_reason", None)
+        r.pop("zero_since_epoch", None)
+    # salad: 组级(salad_watch)+ 逐实例(salad_instance_watch)的低效计时
+    # 保留 last_reallocate_epoch 等(reallocate 冷却状态), 只清观测计时器
+    for watch_key in ("salad_watch", "salad_instance_watch"):
+        for entry in (state.get(watch_key) or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("low_since_epoch") is not None:
+                cleared += 1
+            entry.pop("low_since_epoch", None)
+            entry.pop("low_reason", None)
+    return cleared
+
+
 def main():
     parser = argparse.ArgumentParser(description="Vast/RunPod low-price GPU sniper for pearl-miner.")
     parser.add_argument("--config", default=str(ROOT / "config.local.json"))
@@ -2560,8 +3036,11 @@ def main():
     if config is None:
         raise SystemExit(f"Config not found: {config_path}")
     state = load_json(STATE_PATH, {"seen": {}, "rented": []})
+    reset_n = reset_low_eff_timers(state)  # 重启后重置观测窗口, 避免继承旧计时器一启动就误杀
     mode = "LIVE" if args.live else "DRY-RUN"
     log(f"Starting sniper mode={mode} config={config_path}")
+    if reset_n:
+        log(f"Reset low-efficiency timers for {reset_n} active rental(s) on startup (fresh observation window)")
     if not args.once:
         intervals = provider_intervals(config)
         log(f"Concurrent provider scanner enabled: vast={intervals['vast']}s tensordock={intervals['tensordock']}s runpod={intervals['runpod']}s")
