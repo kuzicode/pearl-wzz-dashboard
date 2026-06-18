@@ -535,7 +535,7 @@ SALAD_GPU_PRICES = {
 
 # salad 无独立 class、按基础型号同 class 计费的卡 → 价格 key 别名(gpu_key 归一后再解析)。
 # 例: salad 无 'RTX 4080 SUPER' class, 它按 'RTX 4080 (16 GB)' class 计费 → 复用 RTX 4080 的实时价。
-SALAD_PRICE_ALIAS = {"rtx 4080 super": "rtx 4080"}
+SALAD_PRICE_ALIAS = {"rtx 4080 super": "rtx 4080", "rtx 4070 super": "rtx 4070"}  # salad 无独立 Super class, 按基础型号计费
 
 def salad_inst_price_num(gname, classprice, prio):
     """实例时价(USD/h): salad gpu-classes 实时价(classprice, 先解析别名)优先 → SALAD_GPU_PRICES 兜底 → None。
@@ -600,27 +600,26 @@ def _salad_compute(account_id):
             names = [g.get("name") for g in (d.get("items") or [])]
         watch = read_state(account_id).get("salad_instance_watch") or {}
         gpu_cache = salad_gpu_for(account_id)  # portal gpu_class: {instance_id: gpu_class}(优先源)
-        # 矿池侧: salad worker 名 = <prefix>-salad-<machine_id>, gpu_info 带真实卡型
-        pool = pool_data()
-        pool_workers = (pool.get("connected_workers") or []) if isinstance(pool, dict) else []
+        # 矿池侧 worker 名 = <prefix>-salad-<machine_id>。跨所有矿池监控取归一化 worker(name/th/gpus),
+        # 因为挖矿池可能是 pearlfortune/twpool 等而非 pearlhash(原写死 pool_data()=pearlhash → 算力/GPU 全匹配不上)。
+        pool_workers = []
+        for _mon in POOL_MONITORS.values():
+            try:
+                pool_workers += (_mon["view"]() or {}).get("workers") or []
+            except Exception:
+                pass
         def pool_match(mid):
             if not mid:
                 return None
             for w in pool_workers:
-                if mid in str(w.get("worker_name") or ""):
-                    return w
-            return None
-        def pool_worker(name):
-            for w in pool_workers:
-                if str(w.get("worker_name") or "") == str(name):
+                if mid in str(w.get("name") or ""):   # salad worker 名含 machine_id
                     return w
             return None
         def pgpu(w):
-            gi = (w or {}).get("gpu_info") or []
-            return str((gi[0] if gi else {}).get("name") or "").replace("NVIDIA GeForce ", "").strip()
+            g = (w or {}).get("gpus") or []
+            return str((g[0] if g else "") or "").replace("NVIDIA GeForce ", "").strip()
         def phr(w):
-            gi = (w or {}).get("gpu_info") or []
-            return round(sum(hashrate_th(g.get("hashrate")) for g in gi), 2) if gi else None
+            return (w or {}).get("th") if w else None
         def fetch_group(nm):  # 单组: 拉 组详情 + 实例; 返回片段, 由主线程按 names 顺序合并
             out = {"name": nm, "counts": None, "gpu_classes": [], "prices": [], "instances": [], "error": None}
             prio = "medium"
@@ -663,7 +662,7 @@ def _salad_compute(account_id):
                 iid = str(inst.get("instance_id") or inst.get("id") or "")
                 mid = str(inst.get("machine_id") or "")
                 w = watch.get(f"{nm}:{iid or mid}") or watch.get(f"{nm}:{iid}") or {}  # key 用 instance_id 或 machine_id(与 sniper 一致; salad instance_id 偶发 None)
-                pw = pool_match(mid) or pool_worker(nm)
+                pw = pool_match(mid)
                 gc = str(gpu_cache.get(iid) or "").replace("NVIDIA GeForce ", "").strip()
                 gpu = gc or pgpu(pw) or (w.get("gpu") or "").strip() or "?"
                 hr = w.get("last_hashrate_th")
@@ -677,7 +676,7 @@ def _salad_compute(account_id):
                                          "image": (g.get("container") or {}).get("image")})
             if not insts:  # /instances 失败/为空时, 用矿池 salad worker 兜底显示
                 for w in pool_workers:
-                    wn = str(w.get("worker_name") or "")
+                    wn = str(w.get("name") or "")
                     if "salad" not in wn:
                         continue
                     mm = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", wn)
@@ -764,7 +763,8 @@ def active_rentals(account_id):
     out = []
     if platform_of(account_id) == "salad":
         for i in salad_live(account_id).get("instances", []):
-            out.append({"id": i["id"], "gpu": i.get("gpu") or "?", "price": i.get("price"),
+            out.append({"id": i["id"], "machine_id": i.get("machine_id"),
+                        "gpu": i.get("gpu") or "?", "price": i.get("price"),
                         "price_label": i.get("price_label"),
                         "hashrate_th": i.get("hashrate_th"),
                         "created_epoch": i.get("started_epoch"),
@@ -1363,10 +1363,25 @@ def _is_running(machine):
     仅 'running' 算(排除 creating/downloading/allocating/stopping —— 这些已分配但还没在挖)。"""
     return machine.get("state") in (None, "running")
 
+def _default_pool_key(S):
+    """前端默认矿池视图: 取已启用账号配置的活跃池(出现最多的); 无则兜底 pearlfortune。
+    用于"进入看板默认显示在跑的那个池", 而非"合并"(合并会把各池链接全列出, 挤窄钱包地址)。"""
+    from collections import Counter
+    c = Counter()
+    for acct in list_accounts():
+        cfg = read_config(acct)
+        plat = platform_of(acct)
+        if (cfg.get(plat, {}) or {}).get("enabled"):
+            c[S.active_pool(cfg)] += 1
+    return c.most_common(1)[0][0] if c else "pearlfortune"
+
 def build_summary(pool_key="merged"):
     import sniper as S
     valid = set(S.POOLS) | {"merged"}
-    pool_key = pool_key if pool_key in valid else "merged"
+    default_pool = _default_pool_key(S)
+    if pool_key in (None, "", "default"):   # 'default' 哨兵 = 用配置的活跃池(前端首次进入无 localStorage 时传)
+        pool_key = default_pool
+    pool_key = pool_key if pool_key in valid else default_pool
     pv = pool_view(pool_key)
     rentals = build_rentals()
     per_plat, running = {}, 0
@@ -1458,6 +1473,7 @@ def build_summary(pool_key="merged"):
         "pool_info": pv.get("pool_info"),
         "hashrate_series": pv.get("hashrate_series"),
         "pool_view": pool_key,
+        "default_pool": default_pool,
         "pools": [{"id": k, "label": v["label"]} for k, v in S.POOLS.items()],
         "stats_since": int(float(stats.get("reset_epoch") or stats.get("last_epoch") or 0)),
         "pool_error": pv["pool_error"],
@@ -2329,14 +2345,14 @@ function dur(s){if(s==null)return '-';let h=Math.floor(s/3600),m=Math.floor(s%36
 function fnum(n,d){if(n==null)return '-';n=Number(n);if(Math.abs(n)<1e-9)n=0;return n.toLocaleString(undefined,{maximumFractionDigits:d==null?2:d});}
 async function resetStats(){if(!confirm('确认重置统计? 累计租金 / 产出 / 利润都会清零, 从现在重新起算(币价保留)。'))return;try{let r=await api('/api/reset-stats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});if(r&&r.ok){toast('统计已重置, 从现在起算');refresh();}else toast((r&&r.error)||'重置失败');}catch(e){}}
 
-async function renderOverview(){if(EDITING)return;let d,r,pv;try{pv=localStorage.getItem('pool_view')||'merged';d=await api('/api/summary?pool='+encodeURIComponent(pv));r=await api('/api/rentals')}catch(e){return}
+async function renderOverview(){if(EDITING)return;let d,r,pv;try{let stored=localStorage.getItem('pool_view');d=await api('/api/summary?pool='+encodeURIComponent(stored||'default'));r=await api('/api/rentals');pv=d.pool_view||'merged'}catch(e){return}
 if(ROLE=='admin'){let _ce=document.getElementById('cfaccts');if(_ce)_ce.innerHTML=Object.keys(r).map(a=>`<div class="ni sub adm${(view=='cf'&&subtab==a)?' on':''}" data-nav=cf:${a} onclick="nav('cf:${a}')">${esc((r[a]&&r[a].label)||a)}</div>`).join('');}
 let phUrl='https://pearlhash.xyz/account/'+encodeURIComponent(d.wallet);
 let twUrl='https://tw-pool.com/workers/'+encodeURIComponent(d.wallet);
 let pvk=d.pool_view||'merged';
 let PL={};(d.pools||[]).forEach(o=>PL[o.id]=o.label);
 let POOL_URL={pearlhash:phUrl, twpool:twUrl, herominers:'https://pearl.herominers.com/', pearlfortune:'https://pearlfortune.org/#miner='+encodeURIComponent(d.wallet||'')};
-let poolLinks=(pvk=='merged'?(d.pools||[]).map(o=>o.id):[pvk]).filter(id=>POOL_URL[id]).map(id=>`<div class=go onclick="window.open('${POOL_URL[id]}','_blank')">${esc(PL[id]||id)} →</div>`).join('');
+let poolLinks=(pvk=='merged'?(d.pools||[]).map(o=>o.id):[pvk]).filter(id=>POOL_URL[id]).map(id=>`<div class=go title="在 ${esc(PL[id]||id)} 打开本钱包地址的矿池面板(算力/收益, 新标签)" onclick="window.open('${POOL_URL[id]}','_blank')">📊 矿池面板 →</div>`).join('');
 let pe=d.pool_error?`<div class=muted style="color:var(--warn);margin-top:10px">POOL_API: ${esc(d.pool_error)}</div>`:'';
 let bp=Object.entries(d.running_by_platform).map(([k,v])=>`${k} ${v}`).join('  ·  ');
 let rbp=d.running_by_pool||{}; let _pb=(d.pools||[]).filter(o=>rbp[o.id]).map(o=>(PL[o.id]||o.id)+' '+rbp[o.id]);if(rbp.unknown)_pb.push('未知 '+rbp.unknown);let poolBreak=_pb.join(' / ')||'—';
@@ -2371,9 +2387,10 @@ let rows=mlist.map(m=>{let a=(ROLE=='admin'&&m.id)?`<button class=b-bad onclick=
 
 let price=m.price_label?esc(m.price_label):(m.price==null?'-':'$'+fnum(m.price,3)+'/h');
 let gpu=(m.gpu&&m.gpu!='?')?esc(m.gpu):'<span class=muted>—</span>';
-return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}<td>${esc(m.id)}</td><td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?8:7} class=muted>无符合机器</td></tr>`;
+let idcell=p=='salad'?`<td title="实例 ${esc(m.id)}${m.machine_id?(' · 机器(worker 后缀) '+esc(m.machine_id)):''}">${esc(m.machine_id||m.id)}</td>`:`<td>${esc(m.id)}</td>`;
+return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?8:7} class=muted>无符合机器</td></tr>`;
 plat+=`<div class=platbox><div class=top><b>${esc(v.label||aid)}</b>${badges}${bh}<span class=muted style="font-size:11px;margin-left:8px">$${fnum(acctBurn,3)}/h${pv!='merged'?' ('+poolName(pv)+')':''}</span></div>${sstat}
-<div class=tscroll><table><tr>${p=='salad'?'<th>组</th>':''}<th>实例</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
+<div class=tscroll><table><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
 <div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addr>${esc(d.wallet)}</div></div>
@@ -2386,11 +2403,18 @@ ${poolLinks}
 <div class=card><div class=k>总算力 矿池实测</div><div class=v>${fnum(d.total_hashrate_th)} <small>TH/s</small></div></div>
 <div class=card><div class=k>累计租金</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
 <div class=card><div class=k>累计产出</div><div class=v style=color:var(--acc)>${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · ${plabel} @ $${fnum(d.coin_price_usd,2)}/币${d.coin_price_live?' <span style="color:var(--ok);font-size:10px">实时</span>':''}</div><div class=sub>平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small> <span class=muted style="font-size:10px">自重置</span></div></div>
-<div class=card><div class=k>矿池余额</div><div class=v>${d.pool_balance==null?'<span class=muted>—</span>':fnum(d.pool_balance,4)+' <small>PEARL</small>'}</div><div class=sub>${pv=='merged'?'各池合计':poolName(pv)}</div></div>
-${detBar}
 <div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
+</div>
+<div class="kpanel" id=poolpanel>
+<div class=khead onclick="togglePool()"><span>🪙 矿池分析 <span class=muted style="font-size:11px">· 余额 / 性价比 / 挖矿成本</span></span><span class=karr>▼</span></div>
+<div class=kbody id=poolbody>
+<div class=cards>
+<div class=card><div class=k>矿池余额</div><div class=v>${d.pool_balance==null?'<span class=muted>—</span>':fnum(d.pool_balance,4)+' <small>PEARL</small>'}</div><div class=sub>${pv=='merged'?'各池合计':poolName(pv)}</div></div>
 <div class=card><div class=k>算力性价比</div><div class=v>${d.efficiency_th_per_usd==null?'<span class=muted>—</span>':fnum(d.efficiency_th_per_usd,1)+' <small>TH/($·h)</small>'}</div><div class=sub>${pv=='merged'?'(全部)':poolName(pv)}总算力 / 当前$/h</div></div>
 <div class=card><div class=k>挖矿成本 (USD/PRL)</div><div class=v style=font-size:18px>${d.cost_cumulative_usd==null?'<span class=muted>—</span>':'$'+fnum(d.cost_cumulative_usd,4)}<small> 累计</small></div><div class=sub>${d.cost_cumulative_usd==null?'<span class=muted>累计无产出</span>':(d.cost_cumulative_usd<d.coin_price_usd?'<span style=color:var(--acc)>盈利(币价 $'+fnum(d.coin_price_usd,4)+')</span>':'<span style="color:#ff6b6b">⚠ 高于币价 $'+fnum(d.coin_price_usd,4)+'</span>')}</div><div class=v style="font-size:18px;margin-top:6px">${d.cost_recent3h_usd==null?'<span class=muted>—</span>':'$'+fnum(d.cost_recent3h_usd,4)}<small> 最近3h</small></div><div class=sub>${d.cost_recent3h_usd==null?'<span class=muted>运行不足3h</span>':(d.cost_recent3h_usd<d.coin_price_usd?'<span style=color:var(--acc)>盈利中</span>':'<span style="color:#ff6b6b">⚠ 应关机</span>')}</div></div>
+${detBar}
+</div>
+</div>
 </div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
 <span class=muted style="font-size:12px">PRL/USDT <b style="color:var(--hi);font-family:var(--mono)">$${fnum(d.coin_price_usd,4)}</b>${d.coin_price_live?' <span style="color:var(--ok);font-size:10px;letter-spacing:.4px">● 实时</span>':' <span style="color:var(--warn);font-size:10px">离线</span>'}</span>
@@ -2416,13 +2440,16 @@ ${ssl?`<span class=muted style="font-size:12px">统计自 ${ssl} 起算</span>`:
 ${hrPanel}
 <div class=sec><div class=lbl>矿池在挖 WORKER</div><div class=tscroll><table><tr><th>Worker</th><th>GPU</th><th>算力</th><th>IP</th></tr>${wk}</table></div></div>
 <div class=sec><div class=lbl>各平台租用情况</div>${plat}</div>`;
-let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=localStorage.getItem('pool_view')||'merged';
+let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=pv;
 // renderOverview 每次重建 DOM 后恢复 K线展开状态
 if(_kopen){const kp=document.getElementById('kpanel');if(kp){kp.classList.add('open');if(_kdata)setTimeout(()=>drawKline(_kdata),0);else loadKline();}}
 if(_hropen){const hp=document.getElementById('hrpanel');if(hp){hp.classList.add('open');setTimeout(()=>{if(d.hashrate_series)drawHr(d.hashrate_series);},0);}}
+if(_poolopen){const pp=document.getElementById('poolpanel');if(pp)pp.classList.add('open');}
 }
 
 // ---------- K线图 ----------
+let _poolopen=false;
+function togglePool(){_poolopen=!_poolopen;const p=document.getElementById('poolpanel');if(p)p.classList.toggle('open',_poolopen);}
 let _hropen=false;
 function toggleHr(){_hropen=!_hropen;const p=document.getElementById('hrpanel');if(p)p.classList.toggle('open',_hropen);if(_hropen)setTimeout(()=>{const d=window._lastData;if(d&&d.hashrate_series)drawHr(d.hashrate_series);},0);}
 function drawHr(series){

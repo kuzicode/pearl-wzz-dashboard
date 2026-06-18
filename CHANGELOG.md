@@ -2,6 +2,60 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [vast/runpod 算力回退日志文案纠正] — 2026-06-18
+
+vast/runpod 拉取容器日志失败回退到矿池 worker API 时, 日志写死「PearlHash」, 但代码实际走 `merged_worker_hashrates`(按 `monitor_pools` 跨所有池, 含当前活跃池 pearlfortune)。文案误导, 让人以为 pearlfortune 出错或只查了 pearlhash。
+
+### Changed — 变更
+- `sniper.py` 三处日志文案 `PearlHash worker API/check` → `pool worker API (merged across monitor_pools, incl active pool)` / `pool worker check failed`(vast 2 处 + runpod 1 处)。纯文案, 行为不变。
+
+### Notes — 注意
+- 排查 contract 41434959(RTX 4090): vast 实例日志持续 403(该 host/上游不放日志, 非 S3 竞态可重试范畴), 回退查矿池 worker 也 found=false → 该机始终未在 pearlfortune 出算力, 已 inactive。pearlfortune 本身正常(salad 4 台在挖)。**pearlfortune 未出错**。
+- 文案改动需 sniper 重启(start-all.sh / 各账号进程)才在日志生效; 已部署文件, 运行中进程下次重启自动采用。
+
+---
+
+## [Salad 实例列表算力/单价/ID 对应修复] — 2026-06-18
+
+修复 salad 实例列表三处:算力恒空、RTX 4070 SUPER 显示价格区间而非单价、实例 ID 与「矿池在挖 WORKER」对不上。
+
+### Fixed — 修复
+- **算力恒空(核心 bug)**:`_salad_compute` 原写死 `pool_data()`(= pearlhash 监控)取 worker 匹配算力/GPU。但实际挖矿池常是 pearlfortune/twpool, pearlhash 无 worker → 匹配全空。改为跨所有 `POOL_MONITORS` 取归一化 worker(`name`/`th`/`gpus`), 按 salad worker 名内含的 `machine_id` 子串匹配。算力/GPU 现正常回填。
+- **RTX 4070 SUPER 单价区间**:salad org 无独立「RTX 4070 Super」class(只有 4070 / 4070 Ti / 4070 Ti Super), 物理卡按 RTX 4070 计费。`SALAD_PRICE_ALIAS` 增 `rtx 4070 super → rtx 4070`(同既有 `rtx 4080 super → rtx 4080` 惯例), 现显示 `$0.070/h`。
+- **ID 对应**:salad 公共 API 实例 `id`=instance_id, 而矿池 worker 名 = `<prefix>-salad-<machine_id>`, 两者本就不同。`active_rentals` 现透传 `machine_id`, 列表「实例」列改显 machine_id(= worker 后缀, 列头改「机器(worker)」, instance_id 移入 title 悬浮), 与「矿池在挖 WORKER」一一对得上。
+
+### Notes — 注意
+- 服务器 + 本地已同步;Playwright 隧道实测:5/5 实例有算力、单价 `$0.070/h`、机器列与 worker 后缀逐条对应(47c9f16f / 2b6431a0 / af240eaf …)。salad batch 优先级机器会动态进出, 实例数随时间变动属正常。
+
+---
+
+## [钱包卡矿池视图默认在跑池 + 链接按钮改名] — 2026-06-18
+
+钱包卡矿池视图不再默认「合并」(合并会把 4 个矿池链接全列出, 把钱包地址挤窄), 改为默认显示当前在跑的矿池(取全局配置活跃池, 如 PearlFortune), 只显示该池一个链接按钮。
+
+### Changed — 变更
+- **默认矿池视图 = 配置活跃池**:后端 `build_summary` 新增 `_default_pool_key()`(取已启用账号 `S.active_pool` 多数, 兜底 `pearlfortune`)+ 响应字段 `default_pool`;`pool` 参数支持 `default` 哨兵(空/未知一并解析为活跃池)。前端首次进入(无 localStorage)请求 `pool=default`, 视图与下拉框随后端解析结果 `d.pool_view` 同步。「合并」仍保留为可手选项。
+- **矿池链接按钮改名**:`PearlFortune →` → `📊 PearlFortune 矿池面板 →`(打开该矿池本钱包地址的矿池面板/算力收益页), 加 title 悬浮说明。
+
+### Notes — 注意
+- 服务器 + 本地 dashboard.py 已同步;Playwright 隧道实测:清 localStorage 后进入默认 `pearlfortune`、下拉同步、钱包卡仅一个算力页按钮、地址不再被挤窄;`pool=merged` 显式仍正常。
+
+---
+
+## [仪表盘 KPI 重排 + 矿池分析折叠] — 2026-06-18
+
+仪表盘首行 KPI 精简为核心指标,次要的矿池分析数据收进可折叠面板,默认收起。
+
+### Changed — 变更
+- **累计折合利润移回首行**:放在累计产出右边,首行卡片为 在跑机器 / 总算力 / 累计租金 / 累计产出 / 累计折合利润。
+- **新增「🪙 矿池分析」折叠面板**(复用 `.kpanel` 模式,`togglePool()`/`_poolopen`,默认收起):内含 矿池余额 / 算力性价比 / 挖矿成本 三卡 + 矿池分析数据条(待结算 / 累计收益 / 份额 / 费率 / 高度 / 爆块,原 `detBar`)。
+- 面板展开态随 `renderOverview` 重建 DOM 后恢复(与 K线 / 算力趋势面板一致)。
+
+### Notes — 注意
+- 服务器 + 本地 dashboard.py 已同步部署;Playwright 经隧道实测:首行 5 卡、面板默认收起、点击向下展开后三卡 + 数据条正常。
+
+---
+
 ## [看板手机端响应式适配] — 2026-06-17
 
 看板 UI 由桌面固定侧栏布局适配为手机端可用:登录页 + 主页(仪表盘)在窄屏完整可用、无横向溢出。

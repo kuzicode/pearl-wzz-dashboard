@@ -803,13 +803,13 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
         log_text = request_vast_instance_logs(contract_id, int(cfg.get("hashrate_log_tail_lines", 300)))
         hashrate_th = parse_latest_hashrate(log_text)
     except Exception as exc:
-        log(f"Vast hashrate log check failed: contract={contract_id} error={exc}; falling back to PearlHash worker API")
+        log(f"Vast hashrate log check failed: contract={contract_id} error={exc}; falling back to pool worker API (merged across monitor_pools, incl active pool)")
     if hashrate_th is None:
         worker = make_worker(config, "vast", rented.get("gpu"), rented.get("external_id"))
         try:
             info = lookup_worker(merged_worker_hashrates(config), worker)
         except Exception as exc:
-            log(f"Vast PearlHash worker check failed: contract={contract_id} worker={worker} error={type(exc).__name__}: {exc}")
+            log(f"Vast pool worker check failed: contract={contract_id} worker={worker} error={type(exc).__name__}: {exc}")
             info = None
         if info:
             hashrate_th = float(info.get("hashrate_th") or 0)
@@ -1413,7 +1413,7 @@ def reconcile_runpod_instances(config, state):
                 worker_hashrates = merged_worker_hashrates(config)
                 worker_api_failed = False
             except Exception as exc:
-                log(f"RunPod PearlHash worker check failed: {type(exc).__name__}: {exc}")
+                log(f"RunPod pool worker check failed: {type(exc).__name__}: {exc}")
                 worker_hashrates = {}
                 worker_api_failed = True
         worker = ((rented.get("result") or {}).get("env") or {}).get("PRL_WORKER") or (pod.get("env") or {}).get("PRL_WORKER") or rented.get("result", {}).get("name") or pod.get("name")
