@@ -371,17 +371,21 @@ _POOL_HASHRATE_FN = {
     "pearlfortune": pearlfortune_worker_hashrates,
 }
 
-def merged_worker_hashrates(config):
-    """按 monitor_pools 查多个池, 按 worker 名合并取 hashrate_th 最大。
-    任一池查询失败只记日志、跳过该池(不影响其它池)。默认 monitor_pools = 全部已注册池。"""
+def merged_worker_hashrates_ex(config):
+    """同 merged_worker_hashrates, 另返回 pool_ok: 是否"至少一个被监控池查询成功(未抛异常)"。
+    单池函数在 API 失败时会抛异常(见 request_json), 故"未抛异常"即该池查询成功(空结果=真的没 worker)。
+    pool_ok=False 表示全部被监控池查询都失败 → "worker 不在池" 应视为未知(不回收), 防矿池 API 抖动误杀。
+    返回 (merged, pool_ok)。"""
     pools = (config or {}).get("monitor_pools") or list(POOLS.keys())
     merged = {}
+    pool_ok = False
     for pool in pools:
         fn = _POOL_HASHRATE_FN.get(pool)
         if not fn:
             continue
         try:
             wh = fn(config) or {}
+            pool_ok = True
         except Exception as exc:
             log(f"pool {pool} hashrate check failed: {type(exc).__name__}: {exc}")
             continue
@@ -389,7 +393,26 @@ def merged_worker_hashrates(config):
             cur = merged.get(w)
             if cur is None or float(info.get("hashrate_th") or 0) > float(cur.get("hashrate_th") or 0):
                 merged[w] = info
-    return merged
+    return merged, pool_ok
+
+
+def merged_worker_hashrates(config):
+    """按 monitor_pools 查多个池, 按 worker 名合并取 hashrate_th 最大。
+    任一池查询失败只记日志、跳过该池(不影响其它池)。默认 monitor_pools = 全部已注册池。
+    (仅需算力字典的旧调用者用此; 需要"查询是否成功"信号的回收逻辑用 merged_worker_hashrates_ex。)"""
+    return merged_worker_hashrates_ex(config)[0]
+
+
+def resolve_hashrate_from_pool(info, pool_ok, missing_as_zero):
+    """把矿池 worker 查找结果换算成用于低效判定的算力(TH):
+    - 命中 → 其算力;
+    - 未命中且本轮矿池查询成功(pool_ok)且开关开(missing_as_zero) → 0.0(视为没在挖, 交低效计时回收);
+    - 否则(查询失败/开关关) → None(未知, 跳过不回收, 避免 API 抖动误杀)。"""
+    if info:
+        return float(info.get("hashrate_th") or 0)
+    if pool_ok and missing_as_zero:
+        return 0.0
+    return None
 
 
 def pool_worker_hashrates(config, pool_id):
@@ -807,15 +830,17 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
     if hashrate_th is None:
         worker = make_worker(config, "vast", rented.get("gpu"), rented.get("external_id"))
         try:
-            info = lookup_worker(merged_worker_hashrates(config), worker)
+            merged, pool_ok = merged_worker_hashrates_ex(config)
         except Exception as exc:
             log(f"Vast pool worker check failed: contract={contract_id} worker={worker} error={type(exc).__name__}: {exc}")
-            info = None
+            merged, pool_ok = {}, False
+        info = lookup_worker(merged, worker)
         if info:
-            hashrate_th = float(info.get("hashrate_th") or 0)
             rented["last_hashrate_lookup"] = {"worker": worker, "found": True, "ip": info.get("ip"), "version": info.get("version")}
         else:
             rented["last_hashrate_lookup"] = {"worker": worker, "found": False}
+        # worker 不在池且本轮查询成功 = 没在挖 → 按 0 算力交低效策略回收; 全池查询失败则保持 None 跳过, 防误杀。
+        hashrate_th = resolve_hashrate_from_pool(info, pool_ok, bool(cfg.get("missing_worker_as_zero", True)))
     if hashrate_th is None:
         return False
     price = float(rented.get("price") or inst.get("dph_total") or 0)
@@ -1410,8 +1435,9 @@ def reconcile_runpod_instances(config, state):
         rented["hashrate_last_check_epoch"] = now_ts
         if worker_hashrates is None:
             try:
-                worker_hashrates = merged_worker_hashrates(config)
-                worker_api_failed = False
+                # pool_ok=False 表示全部被监控池查询都失败 → worker_api_failed, 跳过不按 0 杀(防 API 抖动误杀全体)。
+                worker_hashrates, pool_ok = merged_worker_hashrates_ex(config)
+                worker_api_failed = not pool_ok
             except Exception as exc:
                 log(f"RunPod pool worker check failed: {type(exc).__name__}: {exc}")
                 worker_hashrates = {}

@@ -2,7 +2,7 @@
 
 多平台 **GPU 自动抢租挖 $pearl** + **网页看板** 统一管理。
 
-在 **Vast.ai / RunPod / TensorDock / Salad** 上自动扫描 GPU 价格,低于阈值就租下、跑矿机挖 **$pearl**(**PearlHash / TW Pool / herominers / pearlfortune** 四矿池可切换迁移),持续监控算力,对低效 / 不挖的机器自动销毁 / 换机控成本——全程用一个**暗色网页看板**查看与操作。
+在 **Vast.ai / RunPod / TensorDock / Salad** 上自动扫描 GPU 价格,低于阈值就租下、跑矿机挖 **$pearl**(当前主用 **PearlHash** 矿池 + **WildRig Multi** 矿机镜像;架构支持多矿池切换/迁移,TW Pool / HeroMiners / PearlFortune 已下线),持续监控算力,对低效 / 不挖的机器自动销毁 / 换机控成本——全程用一个**网页看板**(IBM Carbon 风格 · 默认亮色可切暗色)查看与操作。
 
 > ⚠️ 会真实花钱。首次先 dry-run(不加 `--live`)看日志,确认无误再小额实跑。
 
@@ -99,7 +99,8 @@ bash scripts/stop-all.sh && bash scripts/start-all.sh        # 重启, 看板自
 
 - 看板在 `服务器:端口` 上、能填 key + 启停真实租机,**唯一防线是密码——务必改掉 `.env` 里默认的 `DASHBOARD_PASSWORD=123456`**。
 - `.gitignore` 已保护 `.env`(含 key + 看板密码)/ `keys/` / 真实 `config.*.json`(含钱包)/ `state.*.json` / `logs/` / `docs/`,不会被提交。
-- 实际挖矿用第三方矿机镜像(`kuzigmgm/pearl-miner`),使用即信任该来源与 PearlHash 项目。
+- 实际挖矿用矿机镜像(`kuzigmgm/pearl-miner:v12-wildrig`,基于 PearlHash 官方推荐的 **WildRig Multi**;在 PearlHash 池 0% 抽水),使用即信任该来源与 PearlHash 项目。
+- **访客预览模式**:非管理员进入看板仅见演示占位页,实时数据(钱包/算力/收益/在跑机器)前后端均不下发,需部署自己的看板并登录管理员才可见——公开域名部署时保护隐私。
 
 ---
 

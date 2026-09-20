@@ -1,7 +1,7 @@
 {
   "image": "docker.io/kuzigmgm/pearl-miner:v11",
   "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
-  "prl_host": "84.32.220.219:9000",
+  "prl_host": "pool.pearlhash.xyz:9000",
   "worker_prefix": "auto",
   "alert_url": "",
   "max_active_instances": 1,

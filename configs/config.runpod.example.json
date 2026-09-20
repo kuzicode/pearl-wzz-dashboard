@@ -4,7 +4,7 @@
   "max_total_hourly_usd": 1.0,
   "poll_seconds": 10,
   "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
-  "prl_host": "84.32.220.219:9000",
+  "prl_host": "pool.pearlhash.xyz:9000",
   "provider_intervals_seconds": {
     "vast": 10,
     "runpod": 2,
@@ -49,7 +49,7 @@
     },
     "hashrate_watch_interval_seconds": 30,
     "hashrate_zero_recover_seconds": 120,
-    "hashrate_grace_seconds": 180,
+    "hashrate_grace_seconds": 600,
     "low_efficiency_stop_seconds": 300,
     "backdate_low_efficiency_for_existing": true,
     "min_th_per_usd_hour": 334,

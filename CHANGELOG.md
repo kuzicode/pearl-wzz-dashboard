@@ -2,6 +2,71 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [访客模式屏蔽实时数据 + 演示占位引导] — 2026-09-20
+
+公开域名下,访客不应看到钱包/算力/收益/机器等实时数据。
+
+### Changed — 变更
+- **前端**:访客(guest)进仪表盘显示**演示占位页**(辉光珍珠 + 「访客模式 · Guest」说明「实时数据仅在你部署自己的看板后可见」+ 「查看部署说明 · 工具说明 →」按钮引导到 `doc:guide`),不再渲染真实数据。`renderOverview` 加 `ROLE!='admin'` 与 `guest_masked` 双分支;`initRole` 拿到 role 后补一次渲染,消除默认 admin 的首帧闪现。
+- **后端**:`/api/summary`、`/api/rentals` 对访客返回 `{"guest_masked":true}`(不含 wallet/机器/收益),防公开域名下直接 curl 取数。
+- 登录页「偷窥模式 · 仅看仪表盘」文案改为「访客预览 · 部署后见数据 / GUEST」。
+- 访客侧栏仍可见 工具集 / 文档(工具说明、挖珠教程),配置工作台仍仅管理员。
+
+## [下线失效矿池 + 钱包头微调] — 2026-09-20
+
+### Changed — 变更
+- **下线 3 个失效矿池**:TW Pool(twpool)/ HeroMiners / PearlFortune 从看板池列表(池面板按钮、矿池视图下拉、迁移选择器、配置池说明)隐藏,只保留 PearlHash。经评估:三者 API 仍响应 200,但我们只在 PearlHash 挖、其余无活动,据用户反馈已不可用。实现:`dashboard.py` 加 `OFFLINE_POOLS` 常量 + `available_pools()`,过滤两处 `pools` 列表。
+- **钱包头**:「复制」由第二行文字按钮改为**地址右侧小图标**(`.copyi`,发丝方框 + hover 薄荷);地址行改 flex,图标固定、地址可横向滚动。
+- **池面板按钮**去掉 📊 图标,仅文字。
+
+### 后续微调(同日)
+- **sniper 只查 pearlhash**:四个 config 设 `monitor_pools:["pearlhash"]` 并 stop-all/start-all 重启,不再查三个死池的 account API(日志死池查询 0 条)。
+- **累计产出卡精简**:副文本两行合并为一行 `≈ $X · 平均 Y PEARL/h`(去掉"自重置起算/统计自.../@ 币价/实时"与单独的"自重置"行)。
+- **复制图标修位**:原 `flex:1` 把图标顶到卡片最右 → 改 `flex:0 1 auto`,图标紧跟地址;换 Feather copy 双方块图标、`--tx` 深色 + 4px 圆角小框。
+
+## [看板前端重构为 IBM Carbon 风格] — 2026-09-20
+
+把看板从"薄荷绿 + 圆角 + 渐变/阴影/毛玻璃 + Inter"重构成 IBM Carbon Design System 风格。纯 `dashboard.py` 内嵌 CSS 改动,HTML 结构与 JS 逻辑、所有 class 名不变。
+
+### Changed — 变更
+- **字体**:Inter/Roboto Mono/JetBrains → **IBM Plex Sans + IBM Plex Mono**(Google Fonts,OFL);body 加 `letter-spacing:.16px`(Carbon 精度细节)。
+- **颜色 token**:亮色改 Carbon White(白/浅灰 #f4f4f4/发丝 #e0e0e0/炭 #161616),暗色改 Carbon Gray-100(#161616/#262626/#393939)。**强调色保留原本薄荷/青绿色系**(暗 #3fe0c5 / 亮 #0b9a82),并保留原本蓝→青渐变(`--g1`/`--g2`)做层次感。
+- **纯平化**:所有圆角 → 0(直角);去卡片/表格/按钮阴影、渐变背景、header/side 毛玻璃;深度改由面变化 + 1px 发丝线承载。
+- **保留层次感**:主按钮 `.b-acc` 薄荷渐变、侧栏辉光珍珠 mark、品牌渐变字、激活态渐变高亮均保留(Carbon 直角 + 薄荷渐变的混合)。
+- **组件**:danger `.b-bad` 实心红;输入焦点用 2px 薄荷 outline;表头去 uppercase 重 tracking。favicon 保留薄荷珍珠图标。
+- **登录页**:按要求**只换字体**(→ Plex Sans/Mono)+ 微调,海洋浪花/珍珠旋转动效与玻璃卡全部保留。
+- meta theme-color 与 `applyTheme` 同步改(亮 #ffffff / 暗 #161616)。
+
+## [回收逻辑根治: Vast 查无 worker 按 0 回收 + 防 API 抖动误杀] — 2026-09-20
+
+换 WildRig 镜像后实测暴露两处回收缺陷,一并根治(仅 `sniper.py` + vast/runpod config)。
+
+### Fixed — 修复
+- **Vast 漏杀坏机**:`reconcile_vast_hashrate` 日志读不到算力时回退矿池 API,原先 worker 不在池就保持 `None` → 跳过,坏机(如宿主驱动太旧、`Failed to start OpenCL threads` 的 5090)一直空烧钱。现改为:本轮矿池查询成功但 worker 不在池 → 按 0 算力交低效计时回收(与 RunPod `missing_worker_as_zero` 对齐,vast 默认 True)。
+- **全平台误杀风险**:`merged_worker_hashrates` 吞掉每池异常、总返回字典,RunPod 的 `worker_api_failed` 几乎不触发 → pearlhash API 整体宕机时会把所有机当 0 批量销毁。新增 `merged_worker_hashrates_ex` 返回 `pool_ok`(至少一池查询成功),RunPod 改用 `worker_api_failed = not pool_ok`;全池失败时"worker 不在池"视为未知、跳过不杀。
+
+### Added — 新增
+- `merged_worker_hashrates_ex(config)` → `(merged, pool_ok)`;`resolve_hashrate_from_pool(info, pool_ok, missing_as_zero)` 纯决策函数(命中→算力 / 未命中+查询成功→0 / 否则→None)。
+- `tests/test_reclaim_missing_worker.py` 覆盖 pool_ok 信号与三态决策。
+
+### Changed — 变更
+- vast config 加 `missing_worker_as_zero: true`;vast/runpod `hashrate_grace_seconds` 由首夜临时的 1200 回落到 600(覆盖镜像慢拉取又不久拖坏机),`low_efficiency_stop_seconds` 保持 300。
+
+## [工具集页更新矿池 / Miner / 数据源导航] — 2026-09-19
+
+服务器重装后看板恢复, 顺带把「工具集」页(`dashboard.py` 的 `LINKS` 常量)从主网早期那批外链更新到 2026-09 现状, 为重启租赁机器跑 miner 做准备。矿池格局已变(Kryptex 约占全网 50%)。
+
+### Added — 新增
+- **矿池** 分类补齐 6 个已验证官方地址:Kryptex Pool / LuckyPool / HeroMiners / K1Pool / PearlPool.cloud / f2pool。
+- 新增 **Miner 下载** 分类:HydraX(1%)/ SRBMiner-MULTI(3%)/ lpminer(0%)/ BzMiner(2%)/ PRL-Today 收益悬浮窗。
+- 新增 **数据源 / 调研** 分类:PearlTrack / Lord of Pearls / prlscan / MiningPoolStats / Hashrate.no / HydraX Miner 对比。
+
+### Notes — 注意
+- 纯静态 `LINKS` 数据改动, 未动 `renderLinks()` / CSS / 后端。调研数值(算力/份额/开发费)按需求**不进网页**, 仅一次性分析交付。
+- URL 均经 WebSearch 查证。已部署并重启看板。
+
+---
+
 ## [vast/runpod 算力回退日志文案纠正] — 2026-06-18
 
 vast/runpod 拉取容器日志失败回退到矿池 worker API 时, 日志写死「PearlHash」, 但代码实际走 `merged_worker_hashrates`(按 `monitor_pools` 跨所有池, 含当前活跃池 pearlfortune)。文案误导, 让人以为 pearlfortune 出错或只查了 pearlhash。

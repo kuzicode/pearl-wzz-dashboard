@@ -4,7 +4,7 @@
   "max_total_hourly_usd": 1.0,
   "poll_seconds": 10,
   "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
-  "prl_host": "84.32.220.219:9000",
+  "prl_host": "pool.pearlhash.xyz:9000",
   "provider_intervals_seconds": {
     "vast": 2,
     "runpod": 10,
@@ -37,7 +37,7 @@
     "hashrate_watch_enabled": true,
     "hashrate_watch_interval_seconds": 30,
     "hashrate_log_tail_lines": 300,
-    "hashrate_grace_seconds": 300,
+    "hashrate_grace_seconds": 600,
     "low_efficiency_stop_seconds": 300,
     "min_th_per_usd_hour": 334,
     "min_hashrate_th": {
@@ -45,7 +45,8 @@
       "RTX 4090": 220,
       "NVIDIA GeForce RTX 4090": 220,
       "NVIDIA GeForce RTX 5090": 250
-    }
+    },
+    "missing_worker_as_zero": true
   },
   "runpod": {
     "enabled": false,
