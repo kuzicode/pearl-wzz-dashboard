@@ -54,8 +54,9 @@ else
   echo "  ✅ dashboard 启动 (pid $!) → logs/dashboard.log"
 fi
 
-PORT="$(grep -E '^DASHBOARD_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d "'\"")"; PORT="${PORT:-8787}"
-HOST="$(grep -E '^DASHBOARD_HOST=' .env 2>/dev/null | cut -d= -f2 | tr -d "'\"")"; HOST="${HOST:-127.0.0.1}"
+# .env 缺该字段时 grep 无匹配返回 1, 在 set -e + pipefail 下会让脚本退出 → 加 || true 用默认值
+PORT="$( (grep -E '^DASHBOARD_PORT=' .env 2>/dev/null || true) | cut -d= -f2 | tr -d "'\"")"; PORT="${PORT:-8787}"
+HOST="$( (grep -E '^DASHBOARD_HOST=' .env 2>/dev/null || true) | cut -d= -f2 | tr -d "'\"")"; HOST="${HOST:-127.0.0.1}"
 echo
 echo "✅ 全部启动完成。"
 if [ "$HOST" = "127.0.0.1" ]; then

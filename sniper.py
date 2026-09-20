@@ -3123,11 +3123,15 @@ def main():
     if not addr or "REPLACE" in addr.upper() or not addr.startswith("prl1"):
         log(f"配置错误: {config_path} 的 prl_address 未填或仍是占位符({addr or '空'}), 请改成你自己的 prl1… 钱包地址后再启动")
         raise SystemExit(2)
-    # API key 仍是模板占位符 → 退出(留空会被 start-all 跳过, 填了占位符则会一直 401)
-    for var in ("VAST_API_KEY", "RUNPOD_API_KEY", "TENSORDOCK_API_TOKEN", "SALAD_API_KEY"):
+    # 本 config 启用的平台, 其 API key 仍是模板占位符 → 退出(留空会被 start-all 跳过, 填了占位符则会一直 401)。
+    # 只查启用的平台: 旧 .env 里未使用平台残留的占位串不应影响正常账号。
+    key_vars = {"vast": "VAST_API_KEY", "runpod": "RUNPOD_API_KEY", "tensordock": "TENSORDOCK_API_TOKEN", "salad": "SALAD_API_KEY"}
+    for plat, var in key_vars.items():
+        if not (config.get(plat) or {}).get("enabled", False):
+            continue
         val = os.environ.get(var, "")
         if val.startswith("replace_with"):
-            log(f"配置错误: .env 的 {var} 仍是占位符, 请填真实 key 或留空")
+            log(f"配置错误: 已启用 {plat} 但 .env 的 {var} 仍是占位符, 请填真实 key 或留空")
             raise SystemExit(2)
     global ACCOUNT
     m = re.match(r"^config\.(.+)\.json$", config_path.name)

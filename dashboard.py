@@ -1720,7 +1720,8 @@ def build_full_config():
             "label": account_label(acct),
             "enabled": bool(sub.get("enabled")),
             "has_create": plat in HAS_CREATE,
-            "create_enabled": bool(sub.get("create_enabled")),
+            # vast 老配置无 create_enabled 键时 sniper 默认 true(照常租机), 看板显示须一致, 否则显示关闭但后台在租
+            "create_enabled": bool(sub.get("create_enabled", plat == "vast")),
             "min_th_per_usd_hour": sub.get("min_th_per_usd_hour"),
             "gpus": gpu_rows(sub),
             "specific": spec,

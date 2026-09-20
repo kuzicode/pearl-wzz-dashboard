@@ -2,6 +2,14 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [review 修复: 占位 key 只校验已启用平台 / Vast 自动建机默认值统一 / start-all 缺字段不退出] — 2026-09-20
+
+### Fixed — 修复
+- 启动护栏只检查**本 config 已启用平台**的 key 占位符;旧 `.env` 里未使用平台残留的 `replace_with_…` 不再导致正常账号退出(原实现无条件查四个变量,会停掉监控与回收)。
+- Vast `create_enabled` 缺省值看板与 sniper 统一为 **true**(旧配置无该键时看板曾显示关闭而后台仍在租机,保存其它参数还会把它意外关掉)。
+- `start-all.sh` 在 `.env` 缺 `DASHBOARD_HOST` / `DASHBOARD_PORT` 时不再因 `set -e` + `pipefail` 异常退出,改用默认值。
+- 测试:更新依赖旧镜像 / 已下线矿池 / 已移除迁移功能的断言(`test_full_config_pools`、`test_pool_registry`、`test_summary_newpools`;删除 `test_migrate*`)。
+
 ## [新人初始化流程整改: 安全默认 + 护栏 + 文档对齐] — 2026-09-20
 
 ### Changed — 变更
