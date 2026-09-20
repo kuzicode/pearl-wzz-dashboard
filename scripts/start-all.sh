@@ -54,9 +54,15 @@ else
   echo "  ✅ dashboard 启动 (pid $!) → logs/dashboard.log"
 fi
 
-PORT="$(grep -E '^DASHBOARD_PORT=' .env 2>/dev/null | cut -d= -f2)"; PORT="${PORT:-8787}"
+PORT="$(grep -E '^DASHBOARD_PORT=' .env 2>/dev/null | cut -d= -f2 | tr -d "'\"")"; PORT="${PORT:-8787}"
+HOST="$(grep -E '^DASHBOARD_HOST=' .env 2>/dev/null | cut -d= -f2 | tr -d "'\"")"; HOST="${HOST:-127.0.0.1}"
 echo
 echo "✅ 全部启动完成。"
-echo "   网页看板: http://<本机IP>:${PORT}  (登录 admin / .env 里的 DASHBOARD_PASSWORD)"
+if [ "$HOST" = "127.0.0.1" ]; then
+  echo "   网页看板: http://localhost:${PORT}  (登录 admin / .env 里的 DASHBOARD_PASSWORD)"
+  echo "   ⚠ 当前只监听本机 127.0.0.1: 云服务器请前置反代(Caddy/Nginx)提供 HTTPS, 或在 .env 设 DASHBOARD_HOST=0.0.0.0 后重启以直连 http://<服务器IP>:${PORT}"
+else
+  echo "   网页看板: http://<本机IP>:${PORT}  (监听 ${HOST}; 登录 admin / .env 里的 DASHBOARD_PASSWORD)"
+fi
 echo "   看日志:   tail -f logs/<账号>.log   (账号: salad / salad-2 / runpod / runpod-2)"
 echo "   全部停止: bash scripts/stop-all.sh"

@@ -779,6 +779,9 @@ def run_vast_cycle(config, state, live):
         return
     if live:
         reconcile_vast_instances(config, state)
+    # create_enabled=false → 只监控/回收不下单(与 runpod/tensordock 一致); 老配置无此键默认 true
+    if not config.get("vast", {}).get("create_enabled", True):
+        return
     for match in find_vast_offers(config, state):
         if rent_vast(config, match, state, live):
             break
@@ -1607,7 +1610,6 @@ def try_runpod_create(config, state, live):
     if not live:
         log("Dry run: RunPod create would be attempted only with --live")
         return
-    reconcile_runpod_instances(config, state)
     if active_count_excluding(state, "runpod") + count >= int(config.get("max_active_instances", 1)):
         return
     if active_hourly_excluding(state, "runpod") + hourly >= float(config.get("max_total_hourly_usd", 0)):
@@ -1733,8 +1735,16 @@ def try_runpod_create(config, state, live):
 
 
 def run_runpod_cycle(config, state, live):
-    if config.get("runpod", {}).get("enabled", False):
-        try_runpod_create(config, state, live)
+    if not config.get("runpod", {}).get("enabled", False):
+        return
+    # 监控/回收(reconcile: 零算力/低效/短命拉黑)必须始终跑, 不受「暂停租用」与 create_enabled 影响;
+    # 之前它挂在 try_runpod_create 的暂停/create 检查之后 → 暂停租用期间死机不回收(ISS-018)。
+    if live and os.environ.get("RUNPOD_API_KEY"):
+        try:
+            reconcile_runpod_instances(config, state)
+        except Exception as exc:
+            log(f"RunPod reconcile error: {type(exc).__name__}: {exc}")
+    try_runpod_create(config, state, live)
 
 
 def tensordock_headers():
@@ -2473,14 +2483,18 @@ def reconcile_tensordock_instances(config, state):
 
 def try_tensordock_create(config, state, live):
     cfg = config.get("tensordock", {})
-    if renting_paused("tensordock"):
-        return
     if not cfg.get("enabled", False):
+        return
+    # 监控/回收始终跑, 不受「暂停租用」与 create_enabled 影响(ISS-018)
+    if live:
+        try:
+            reconcile_tensordock_instances(config, state)
+        except Exception as exc:
+            log(f"TensorDock reconcile error: {type(exc).__name__}: {exc}")
+    if renting_paused("tensordock"):
         return
     if not cfg.get("create_enabled", False):
         return
-    if live:
-        reconcile_tensordock_instances(config, state)
     for match in find_tensordock_offers(config, state):
         if rent_tensordock(config, match, state, live):
             break
@@ -3104,6 +3118,17 @@ def main():
     config = load_json(config_path, None)
     if config is None:
         raise SystemExit(f"Config not found: {config_path}")
+    # 新手护栏: 钱包没改 / 缺失 → 直接退出, 否则租到机器挖给无效地址(白烧钱)
+    addr = str(config.get("prl_address") or "").strip()
+    if not addr or "REPLACE" in addr.upper() or not addr.startswith("prl1"):
+        log(f"配置错误: {config_path} 的 prl_address 未填或仍是占位符({addr or '空'}), 请改成你自己的 prl1… 钱包地址后再启动")
+        raise SystemExit(2)
+    # API key 仍是模板占位符 → 退出(留空会被 start-all 跳过, 填了占位符则会一直 401)
+    for var in ("VAST_API_KEY", "RUNPOD_API_KEY", "TENSORDOCK_API_TOKEN", "SALAD_API_KEY"):
+        val = os.environ.get(var, "")
+        if val.startswith("replace_with"):
+            log(f"配置错误: .env 的 {var} 仍是占位符, 请填真实 key 或留空")
+            raise SystemExit(2)
     global ACCOUNT
     m = re.match(r"^config\.(.+)\.json$", config_path.name)
     ACCOUNT = m.group(1) if m else None

@@ -2,16 +2,16 @@
 
 多平台 **GPU 自动抢租挖 $pearl** + **网页看板** 统一管理。
 
-在 **Vast.ai / RunPod / TensorDock / Salad** 上自动扫描 GPU 价格,低于阈值就租下、跑矿机挖 **$pearl**(当前主用 **PearlHash** 矿池 + **WildRig Multi** 矿机镜像;架构支持多矿池切换/迁移,TW Pool / HeroMiners / PearlFortune 已下线),持续监控算力,对低效 / 不挖的机器自动销毁 / 换机控成本——全程用一个**网页看板**(IBM Carbon 风格 · 默认亮色可切暗色)查看与操作。
+在 **RunPod / Vast.ai / TensorDock / Salad** 上自动扫描 GPU 价格,低于阈值就租下、跑矿机挖 **$pearl**(当前主用 **PearlHash** 矿池 + **WildRig Multi** 矿机镜像;架构支持多矿池切换/迁移,TW Pool / HeroMiners / PearlFortune 已下线),持续监控算力,对低效 / 不挖的机器自动销毁 / 换机控成本——全程用一个**网页看板**(IBM Carbon 风格 · 默认亮色可切暗色)查看与操作。
 
-> ⚠️ 会真实花钱。首次先 dry-run(不加 `--live`)看日志,确认无误再小额实跑。
+> ⚠️ 会真实花钱。模板默认 `enabled=false`、`create_enabled=false`(不租机);建议先只开「启用」不开「自动建机」跑一阵看日志/看板(只观察不下单),确认无误再开自动建机、小额实跑。
 
 ---
 
 ## 网页看板
 
 - **总览**:钱包、在跑机器数、总算力(矿池实测)、累计租金/产出/折合利润、**挖矿成本**(每 $PRL 的电租成本,累计 + 最近 3h 两项,各对比实时币价提示盈亏),以及**按账号**列出在跑机器(单价/时长/算力 + Salad「组」列 + 一键关闭)——**每个账号一个卡片**,卡片右上显示**账户余额**(Vast / RunPod 自动拉取;**Salad 从 portal 抓实时余额**;TensorDock 无余额 API,点余额处 ✎ 直接填一次当前余额,看板按消耗递减显示「估算余额 · 约 Yh 花完」)。
-- **多矿池**:**PearlHash / TW Pool / herominers / pearlfortune** 四池,配置页可切换/一键迁移。总览所有指标可**按池分别查看**,机器表显示每台在哪个池并可按池筛选;池卡片含**待结算/累计收益/份额/网络**详情 + **可折叠算力趋势图**(每池每小时算力折线)。
+- **矿池**:默认 **PearlHash**(WildRig 矿机,池内 0% 抽水);架构支持多池(每账号「新抢矿池」下拉,只影响新租机器;镜像随池自动决定),TW Pool / HeroMiners / PearlFortune 已下线。总览指标可**按池分别查看**,机器表显示每台在哪个池。
 - **行情图表**:总览内嵌可折叠 **PRL/USDT K 线图**(Candlestick + EMA20/EMA60 + 成交量,周期 15m/1h/4h/1d,hover tooltip);实时币价自动从 SafeTrade 拉取,看板顶部显示「● 实时」。
 - **Salad 真实 GPU/余额**:通过浏览器会话从 Salad portal 抓每台**真实单卡型号、单价、实时余额**(Salad 公共 API 不返回 GPU,portal 是唯一来源;一次性登录后 headless 静默续期)。**scid 缺失/过期时自动弹窗引导重登**(检测到连续抓空 → 弹有头浏览器,你过完 Turnstile/OTP 自动续上,无需手动重跑脚本;无 GUI 环境则降级为提示)。
 - **逐实例低效治理**:salad 按**矿池权威算力逐实例**判定,某台低于其卡型号阈值并持续超时即自动 reallocate 换机(弹性多卡组按实例真实 GPU 取对应阈值)。
@@ -23,53 +23,56 @@
 
 ## 快速开始
 
-只有**一个配置文件 `.env`**(平台 API key + 看板登录都在里面),**一条命令起 / 停全部服务**。
+只有**一个配置文件 `.env`**(平台 API key + 看板登录都在里面),**一条命令起 / 停全部服务**。下面以只用 **RunPod** 为例(其它平台同理,复制对应模板即可):
 
 ```bash
-# 0. 依赖: 用 uv 管理(core 纯标准库; salad GPU/余额功能需 playwright)
+# 0. 依赖: Python 3.11+ 与 uv(core 纯标准库; 只有 Salad 余额抓取需要 playwright)
 #    装 uv: brew install uv     # 或 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync                          # 按 pyproject.toml 建 .venv(Python 见 .python-version) + 装依赖
-# (可选) salad GPU/单价/真实余额: uv run playwright install chromium  + 见文末章节
+uv sync                          # 建 .venv + 装依赖
 
-# 1. 复制模板(真实文件已被 .gitignore 保护)
+# 1. 复制模板(真实文件已被 .gitignore 保护, 不会提交)
 cp .env.example .env
-for p in vast runpod tensordock salad; do cp configs/config.$p.example.json configs/config.$p.json; done
+cp configs/config.runpod.example.json configs/config.runpod.json   # 用哪个平台就复制哪个; 看板只认 config.<平台>.json
 
-# 2. 改两处:
-#    ① .env : 填平台 API key + 改 DASHBOARD_PASSWORD(看板登录密码,默认 123456 务必改掉)
-#    ② 所有 config.*.json 的 prl_address 改成【你自己的 $pearl 钱包】
+# 2. 改两处
+#    ① .env : 填 RUNPOD_API_KEY(不用的平台留空即可, 会自动跳过) + 改 DASHBOARD_PASSWORD(默认 123456 务必改)
+#    ② configs/config.runpod.json : prl_address 改成【你自己的 prl1… 钱包】(占位符不改会拒绝启动),
+#       并把 runpod.enabled / create_enabled 改为 true(模板默认 false = 不租机)
+#       —— ② 也可以先不改, 起来后在看板里点: 配置总览填钱包 → 账号页 ①API Key ②启用 ③矿池 ④上限 ⑤GPU 档 → 保存 → 重启应用
 
-# 3. 一条命令起全部(4 平台 live 抢卡 + 网页看板)
-#    Linux / macOS:
-bash scripts/start-all.sh
-#    Windows(PowerShell):
-powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1
+# 3. 一条命令起全部(已启用账号的抢卡进程 + 网页看板)
+bash scripts/start-all.sh                                  # Linux / macOS
+powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1   # Windows
+#    停全部: bash scripts/stop-all.sh  /  scripts\stop-all.ps1
 
-# 一条命令停全部
-#    Linux / macOS:
-bash scripts/stop-all.sh
-#    Windows(PowerShell):
-powershell -ExecutionPolicy Bypass -File scripts\stop-all.ps1
-
-# 4. 浏览器访问  http://<服务器IP>:8787 (Windows 本机用 http://localhost:8787)
-#    登录 admin / 你设的 DASHBOARD_PASSWORD
+# 4. 浏览器打开 http://localhost:8787, 登录 admin / 你设的 DASHBOARD_PASSWORD
 ```
 
-> 钱包、key、密码、GPU 门槛等都能在看板**配置页**里改:「配置总览」填钱包 → 各账号页按「基础设置」①→⑤ 填完 → 保存 → 「重启应用」生效。
-> 看板里还能**查看各平台后台日志**、暂停/启动租用、一键关闭某台机器。
+> **云服务器上访问看板**:看板默认只监听 `127.0.0.1`(安全)。两种做法:① 前置 Caddy/Nginx 反代出 HTTPS 域名(推荐,Caddyfile 一行 `reverse_proxy 127.0.0.1:8787`);② 在 `.env` 设 `DASHBOARD_HOST=0.0.0.0` 后重启,直连 `http://<服务器IP>:8787`(明文暴露公网,务必强密码)。
+>
+> 钱包、key、密码、GPU 门槛等都能在看板**配置页**里改:「配置总览」填钱包 → 各账号页按「基础设置」①→⑤ 填完 → 保存 → 「重启应用」生效。看板里还能**查看各平台后台日志**、暂停/启动租用、一键关闭某台机器。
 
----
+### 默认配置是什么
+
+| 项 | 模板默认 | 说明 |
+|----|------|------|
+| `<平台>.enabled` / `create_enabled` | **false / false** | 不租机。`enabled=true, create_enabled=false` = 只观察不下单(看日志里的 observe hit 判断出价是否合理);两者都 true 才真租 |
+| `pool` / `monitor_pools` | `pearlhash` | 矿池与算力监控来源;镜像 `kuzigmgm/pearl-miner:v13-wildrig` 随池自动决定 |
+| `max_active_instances` / `max_total_hourly_usd` | 1 台 / $1.0/h | **每账号独立**的花钱护栏,先小后大 |
+| GPU 档 `thresholds` / `min_hashrate_th` | 4090 ≤$0.4 ≥220TH,5090 ≤$0.5 ≥250TH | 高于出价不租;实测算力持续低于门槛自动回收换机 |
+| `worker_prefix` | `auto` | 矿池里 worker 名前缀;多人/多账号同钱包请各自改成不同前缀 |
+| `DASHBOARD_HOST` | `127.0.0.1` | 见上「云服务器上访问看板」 |
 
 ## 必须配置(否则白挖 / 跑不起来)
 
 | 项 | 说明 |
 |----|------|
-| `prl_address`(每份 config)| **你自己的 $pearl 钱包**,不改 = 挖给别人 |
-| `.env` 的 API key | 启用平台的(VAST / RUNPOD / TENSORDOCK / SALAD)|
+| `prl_address`(每份 config)| **你自己的 $pearl 钱包**;占位符不改 sniper 会拒绝启动 |
+| `.env` 的 API key | 启用平台的(RUNPOD / VAST / TENSORDOCK / SALAD),不用的留空 |
 | `.env` 的 `DASHBOARD_PASSWORD` | 看板登录密码,**默认 `123456`,公网端口务必改掉** |
 | `max_active_instances` / `max_total_hourly_usd` | 花钱护栏,**先设小**(注意:**每平台独立计算**,非全局——4 平台各跑独立进程/独立 state,最坏情况是 `平台数 × 上限`;Salad 受其 group replica 数管,不计入这两项)|
 
-Salad 需在其后台预建 container group(env 填你的钱包)+ `SALAD_API_KEY`;TensorDock 需在 `keys/` 放 SSH 密钥对。
+Salad 需在其后台预建 container group(镜像 `kuzigmgm/pearl-miner:v13-wildrig`,env **必须填 `PRL_ADDRESS`**,镜像不带默认钱包、留空会拒绝启动)+ `SALAD_API_KEY`;TensorDock 需 SSH 密钥对:`ssh-keygen -t ed25519 -f keys/tensordock -N ""`(config 里 `ssh_key_path` / `ssh_private_key_path` 指向它)。
 
 ---
 
@@ -91,7 +94,7 @@ bash scripts/stop-all.sh && bash scripts/start-all.sh        # 重启, 看板自
 - **账号标签**自动按「平台-标识」显示(Salad 用组织名,如 `salad-duffett` / `salad-mrkidbk`);想自定义在 config 加 `"account_label": "..."`。
 - **同钱包多账号**:各账号 `prl_address` 可相同,但矿池 worker 名 / Salad 容器组名要全局不冲突(如各账号用不同 `worker_prefix`、不同组名)。
 - **护栏按账号独立**:`max_active_instances` / `max_total_hourly_usd` 各账号各算,最坏总花费 = 各账号上限之和。
-- 注意:Salad「暂停租用」是**平台级**(sniper 按平台读暂停标记),同平台多账号会联动。
+- 「暂停租用」按账号独立(`control/<账号>.rent-paused`);暂停只停下单,监控与低效回收照常。
 
 ---
 

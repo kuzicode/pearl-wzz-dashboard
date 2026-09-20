@@ -8,12 +8,14 @@ import re
 import time
 import threading
 import subprocess
+import sys
 import secrets
 import hmac
 import hashlib
 import datetime as dt
 import urllib.request
 import urllib.parse
+import urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -52,7 +54,7 @@ SPECIFIC = {
               ("alphapool_worker_api_enabled", "bool"), ("alphapool_reallocate_enabled", "bool"),
               ("balance_usd", "num")],
 }
-HAS_CREATE = {"runpod", "tensordock"}
+HAS_CREATE = {"runpod", "tensordock", "vast"}
 NO_BALANCE_API = {"salad", "tensordock"}  # 无公共余额 API → 看板手填(总览内联编辑); salad 另有 portal 实时余额(salad_portal), 有则优先并隐藏手填
 OFFLINE_POOLS = {"twpool", "herominers", "pearlfortune"}  # 已下线/不可用的矿池: 从看板池列表(按钮/下拉/迁移)隐藏; 只保留 pearlhash
 
@@ -1821,11 +1823,15 @@ def launch_platform(acct):
     env["SNIPER_LOG_PATH"] = f"logs/{acct}.log"
     env["SNIPER_STATE_PATH"] = f"state.{acct}.json"
     try:
+        (ROOT / "logs").mkdir(exist_ok=True)
         logf = open(ROOT / f"logs/{acct}.log", "a")
-        subprocess.Popen(["python3", "sniper.py", "--config", f"configs/config.{acct}.json", "--live"],
-                         cwd=str(ROOT), env=env, stdout=logf, stderr=logf, start_new_session=True)
+        # stdout 丢弃: sniper.log() 已自行写 logs/<acct>.log 且同时 print, stdout 再进同一文件会每行重复两次;
+        # stderr 仍进日志以保留 Traceback。用当前解释器(uv .venv 的 python), 与 start-all.sh 的 uv run 一致。
+        subprocess.Popen([sys.executable, "sniper.py", "--config", f"configs/config.{acct}.json", "--live"],
+                         cwd=str(ROOT), env=env, stdout=subprocess.DEVNULL, stderr=logf, start_new_session=True)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[launch] {acct} failed: {type(e).__name__}: {e}", flush=True)
         return False
 
 def restart_platform(acct):
@@ -1880,7 +1886,14 @@ def do_terminate(acct, mid, group=None):
             r = S.reallocate_salad_instance(cfg, group or "", mid)
         else:
             return {"error": "平台无效"}
+        print(f"[terminate] {acct} id={mid} result={r}", flush=True)
         return {"ok": True, "platform": acct, "id": mid, "result": r}
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # 平台已没有这台实例(被监控回收 / 平台侧已销毁 / 重复点击): 视为已完成, 不当失败
+            print(f"[terminate] {acct} id={mid} already gone (404)", flush=True)
+            return {"ok": True, "platform": acct, "id": mid, "gone": True, "note": "实例已不存在(已销毁), 稍后刷新即消失"}
+        return {"error": f"HTTPError: HTTP Error {e.code}: {e.reason}"}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -2167,7 +2180,9 @@ summary:hover{color:var(--acc)}
 .ovt td{padding:8px;border-bottom:1px solid var(--bd);vertical-align:middle;white-space:nowrap}
 .ovt tr:last-child td{border-bottom:0}
 .rtab td:last-child,.rtab th:last-child{width:1%;white-space:nowrap;text-align:right}
-.card .v.tip{cursor:help;text-decoration:underline dotted;text-decoration-thickness:1px;text-underline-offset:5px}
+.card .v.tip{cursor:help;position:relative;border-bottom:1px dotted var(--mut);display:inline-block;padding-bottom:2px}
+.card .v.tip::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 8px);z-index:20;background:var(--hi);color:var(--bg);font-size:11.5px;font-weight:500;letter-spacing:0;line-height:1.4;padding:6px 10px;border-radius:2px;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+.card .v.tip:hover::after{opacity:1}
 .ovt a{color:var(--acc);text-decoration:none;font-weight:600}.ovt .pill{margin-right:4px}
 details details{border-top:0;margin-top:10px;padding-top:0}details .grid2{margin-top:10px}
 .ckrow{display:flex;align-items:center;gap:10px;min-height:34px}.ckrow input{margin:0;width:16px;height:16px;flex:0 0 auto}.ckrow .hint{margin:0}
@@ -2511,7 +2526,7 @@ ${poolLinks}
 <div class=card><div class=k>在跑机器</div><div class=v>${d.running_machines}</div><div class=sub>${pv=='merged'?poolBreak:esc(bp)}</div></div>
 <div class=card><div class=k>总算力 矿池实测</div><div class=v>${fnum(d.total_hashrate_th)} <small>TH/s</small></div></div>
 <div class=card><div class=k>累计租金</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
-<div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) title="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
+<div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
 <div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
 </div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
@@ -2818,7 +2833,7 @@ async function toggle(p,paused){await api('/api/rent-toggle',{method:'POST',head
 async function term(aid,plat,id,group){let label=plat=='salad'?'迁移(reallocate)':'关闭并销毁';
 if(!confirm('确定要'+label+'这台机器吗?\n'+aid+' · '+id))return;
 let r=await api('/api/terminate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:aid,id:id,group:group})});
-toast(r.error?('失败: '+r.error):'已执行 '+id);renderOverview();}
+toast(r.error?('失败: '+r.error):(r.note?r.note:'已执行 '+id));renderOverview();}
 function editBal(aid){EDITING=aid;const el=document.getElementById('bal_'+aid);if(!el)return;el.classList.remove('editable');el.removeAttribute('onclick');el.removeAttribute('title');const cur=(BALVAL[aid]!=null?BALVAL[aid]:'');el.innerHTML=`<span class=bal-edit><span class=cur>$</span><input id="bali_${esc(aid)}" type=number step=0.01 min=0 value="${cur}" placeholder="0.00" onkeydown="balKey(event,'${esc(aid)}')"><button class="bb ok" title=保存 onclick="saveBal('${esc(aid)}')">✓</button><button class="bb x" title=取消 onclick="cancelBal()">✕</button></span>`;const inp=document.getElementById('bali_'+aid);inp.focus();inp.select();}
 function balKey(e,aid){if(e.key=='Enter'){e.preventDefault();saveBal(aid);}else if(e.key=='Escape'){e.preventDefault();cancelBal();}}
 function cancelBal(){EDITING=null;renderOverview();}
@@ -2841,28 +2856,29 @@ document.getElementById('lk').innerHTML=`<div class=lbl>工具集 · TOOLS</div>
 function docGuide(){return `<div class=doc>
 <div class=lbl>工具说明 · GUIDE</div>
 <h2>这是什么</h2>
-<div class=sub2>一句话:一个"自动租 GPU 挖珍珠(PRL)"的调度面板 —— 在 4 个云租卡平台(Salad / Vast / RunPod / TensorDock)上自动找便宜显卡、起矿机挖 PRL,自动淘汰算力差的坏机,把"产出 &gt; 租金"的差价变成你的利润。</div>
+<div class=sub2>一句话:一个"自动租 GPU 挖珍珠(PRL)"的调度面板 —— 在 4 个云租卡平台(RunPod / Vast / TensorDock / Salad)上自动找便宜显卡、起矿机挖 PRL,自动淘汰算力差的坏机,把"产出 &gt; 租金"的差价变成你的利润。</div>
 <div class=tip>📌 重要:这是一套<b>需要你自己部署运行的开源工具</b>,不是托管网站。你要把这份代码跑在<b>自己的电脑或一台云服务器</b>上,才能看到这个面板。下面先讲怎么把它跑起来。</div>
 <div class=lcard><h3>💻 本地部署:怎么把它跑起来</h3>
-<p><b>环境:</b>只需 <b>Python 3.10+</b>(纯标准库,无需 pip / docker / 数据库)。跑面板的这台机器<b>不需要显卡</b> —— 它只是"指挥部",真正挖矿的是你在各平台租的远程 GPU。</p>
-<p><b>四步起跑:</b></p>
+<p><b>环境:</b>Python 3.11+ 与 <b>uv</b>(项目用 uv 建虚拟环境;核心代码纯标准库,Salad 余额抓取才用到 Playwright)。跑面板的这台机器<b>不需要显卡</b> —— 它只是"指挥部",真正挖矿的是你在各平台租的远程 GPU。</p>
+<p><b>五步起跑(只用 RunPod 举例):</b></p>
 <ol>
-<li>拿到本项目代码(git clone 或下载解压)。</li>
-<li><b>cp .env.example .env</b> —— 在 <b>.env</b> 里填各平台 API Key,并改掉 <b>DASHBOARD_PASSWORD</b>(默认 123456 务必改)。</li>
-<li>把 <b>config.*.json</b> 里的 <b>prl_address</b> 改成你自己的钱包地址。</li>
+<li>拿到本项目代码(git clone 或下载解压),在目录里执行 <b>uv sync</b>。</li>
+<li><b>cp .env.example .env</b> —— 填你要用平台的 API Key(不用的留空,会自动跳过),改掉 <b>DASHBOARD_PASSWORD</b>(默认 123456 务必改)。</li>
+<li><b>cp configs/config.runpod.example.json configs/config.runpod.json</b> —— 想用哪个平台就复制哪个模板(看板只认 config.&lt;平台&gt;.json)。</li>
+<li>改这份 config 的 <b>prl_address</b> 为你自己的钱包(占位符不改会拒绝启动),并把 <b>runpod.enabled</b> 与 <b>create_enabled</b> 改为 true(模板默认 false,防误开销)。这一步也可以稍后在看板里点:配置总览填钱包 → 账号页 ①→⑤。</li>
 <li>一条命令起全部:<b>bash scripts/start-all.sh</b>(Windows:<b>start-all.ps1</b>);停全部:<b>stop-all.sh</b>。</li>
 </ol>
-<p>起好后浏览器打开 <b>http://&lt;这台机器的IP&gt;:8787</b>,用 <b>admin / 你设的密码</b> 登录,就是当前这个面板。</p>
+<p>起好后浏览器打开 <b>http://localhost:8787</b>,用 <b>admin / 你设的密码</b> 登录,就是当前这个面板。</p>
 <p><b>跑在哪?两种选择:</b></p>
 <ul>
 <li><b>自己电脑</b> —— 适合先试玩;地址用 http://localhost:8787。<b>关机/断网就停了。</b></li>
-<li><b>云服务器 / VPS</b>(推荐长期跑)—— 24h 不间断、随时随地公网访问。但端口暴露在公网,<b>务必改掉默认密码</b>,否则别人能填 key、启停你的租机。</li>
+<li><b>云服务器 / VPS</b>(推荐长期跑)—— 24h 不间断。看板默认只监听本机 127.0.0.1:要么前置 Caddy/Nginx 反代出 HTTPS 域名(推荐),要么在 .env 设 <b>DASHBOARD_HOST=0.0.0.0</b> 直连 http://&lt;服务器IP&gt;:8787(明文暴露公网,<b>务必改掉默认密码</b>,否则别人能填 key、启停你的租机)。</li>
 </ul></div>
 <div class=lcard><h3>⚙️ 原理:它到底怎么挖(docker 拉取)</h3>
 <p>你<b>不用</b>手动登录每台租来的机器装环境。流程全自动:</p>
 <ol>
 <li>sniper 调用各平台 API <b>租到一块 GPU</b>。</li>
-<li>下单时把一个 <b>docker 矿机镜像</b>(默认 <b>pearl-miner:v11</b>)+ 一组<b>环境变量</b>(你的钱包 PRL_ADDRESS、矿池 PRL_HOST、worker 名等)一起下发给平台。</li>
+<li>下单时把一个 <b>docker 矿机镜像</b>(默认 <b>kuzigmgm/pearl-miner:v13-wildrig</b>,随所选矿池自动决定)+ 一组<b>环境变量</b>(你的钱包 PRL_ADDRESS、矿池 PRL_HOST、worker 名等)一起下发给平台。</li>
 <li>平台自动 <b>docker pull 拉取镜像</b> → 在租来的 GPU 上跑起容器 → 容器里的矿机<b>连上 PearlHash 矿池开始挖 PRL</b>,收益直接进你的钱包地址。</li>
 <li>镜像内矿机会自报算力;面板通过矿池 API <b>盯着每台</b>,算力低于门槛(坏卡 / 老驱动 / 虚标)就让它停、再换一台。</li>
 </ol>
@@ -2884,10 +2900,10 @@ function docGuide(){return `<div class=doc>
 <div class=lcard><h3>🔧 关键参数(配置工作台)</h3>
 <ul>
 <li><b>钱包地址 prl_address</b> —— 收益打到这,<b>务必是你自己的钱包</b>,填错就是给别人挖。</li>
-<li><b>总时租上限 max_total_hourly_usd</b> —— 所有平台合计每小时最多花多少,防超支。</li>
-<li><b>最大在跑数 max_active_instances</b> —— 同时最多开几台。</li>
-<li><b>矿机镜像 image / 矿池地址 prl_host</b> —— 一般用默认值即可。</li>
-<li><b>各平台:API Key、出价上限、可靠性、GPU 档筛选、健康算力门槛</b> —— 控制只租"够便宜 + 够稳"的卡。</li>
+<li><b>总时租上限 max_total_hourly_usd</b> —— <b>每个账号各自</b>每小时最多花多少;最坏总花费 = 各账号上限之和(配置总览顶部有合计)。</li>
+<li><b>最多同时租 max_active_instances</b> —— 该账号同时最多开几台。</li>
+<li><b>新抢矿池</b> —— 默认 PearlHash;矿机镜像随矿池自动决定,不用手填 image / prl_host。</li>
+<li><b>各账号:API Key、启用 / 自动建机、GPU 档(型号 / 最高出价 / 最低算力)</b> —— 控制只租"够便宜 + 够稳"的卡;自动建机关掉 = 只观察不下单。</li>
 </ul></div>
 <div class=tip>🔐 安全:API Key、钱包私钥 / 助记词只存在你部署的那台机器的本地文件(.env / 配置),不进代码仓库;公网部署务必改默认密码,转账、配置前再次确认钱包地址是你自己的。</div>
 </div>`;}
@@ -2903,7 +2919,7 @@ function docTutorial(){return `<div class=doc>
 </ul></div>
 <div class=lcard><h3><span class=step>b</span>去租卡平台租机器、充值、拿 API Key</h3>
 <ul>
-<li>打开 <span class=jump onclick="nav('lk')">工具集</span> → <b>租卡平台</b>,选一个或多个(Salad / Vast / RunPod / TensorDock)。</li>
+<li>打开 <span class=jump onclick="nav('lk')">工具集</span> → <b>租卡平台</b>,选一个或多个(RunPod / Vast / TensorDock / Salad;新手推荐先 RunPod)。</li>
 <li>注册账号 → <b>充值余额</b>(没余额起不了机)。</li>
 <li>在平台后台找到 <b>API Key / Token</b>,复制备用。</li>
 </ul>
@@ -2912,7 +2928,7 @@ function docTutorial(){return `<div class=doc>
 <ul>
 <li>回到本面板 → <b>配置总览</b>(需管理员登录):填第 a 步的<b>钱包地址</b>(写入全部账号), 告警 URL 可留空。</li>
 <li>到左栏对应<b>账号配置</b>页, 按「基础设置」从上到下: ① 粘贴 <b>API Key</b> → ② 勾选启用 → ③ 选矿池(默认 PearlHash) → ④ 设<b>最多同时租</b>与<b>总时租上限</b>控制预算 → ⑤ 填 GPU 档(型号 / 最高出价 / 最低算力) → <b>保存配置</b> → <b>重启应用</b>。其余参数在「高级设置」里, 默认值通常无需改。</li>
-<li>各平台点 <b>重启</b> 生效。之后 sniper 自动租卡、起矿机挖 PRL,<b>仪表盘</b>开始出算力和累计产出。</li>
+<li>之后 sniper 自动租卡、起矿机挖 PRL,<b>仪表盘</b>开始出算力和累计产出;想先观察不花钱,把「自动建机」关掉即可。</li>
 <li>每个参数啥意思?见 <span class=jump onclick="nav('doc:guide')">工具说明</span>。</li>
 </ul></div>
 <div class=lcard><h3><span class=step>d</span>卖币获利(以 SafeTrade 为例)</h3>
@@ -2934,6 +2950,7 @@ setInterval(()=>{if(view=='ov')renderOverview();},10000);initTheme();initRole();
 
 def main():
     CONTROL_DIR.mkdir(exist_ok=True)
+    (ROOT / "logs").mkdir(exist_ok=True)  # 看板拉起 sniper 前保证 logs/ 存在(不经 start-all 启动时也不会静默失败)
     threading.Thread(target=spend_loop, daemon=True).start()
     threading.Thread(target=_refresh_loop, daemon=True).start()  # 后台预热缓存, 请求只读缓存不阻塞
     start_portal_manager()  # 常驻 headless 抓 salad portal GPU/余额(无会话/无 playwright 则静默跳过)

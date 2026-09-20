@@ -25,7 +25,7 @@ mkdir -p logs
 nohup bash scripts/run-dashboard.sh >>logs/dashboard.log 2>&1 </dev/null &
 sleep 2
 if curl -s -o /dev/null --max-time 6 "http://127.0.0.1:$PORT/"; then
-  echo "✅ dashboard 已重启, 监听 http://<本机IP>:$PORT (本机 http://localhost:$PORT)"
+  echo "✅ dashboard 已重启: 本机 http://localhost:$PORT (默认只监听 127.0.0.1; 对外需反代或 .env 设 DASHBOARD_HOST=0.0.0.0)"
 else
   echo "⚠ 起后未立即响应, 看 logs/dashboard.log 末尾"
   tail -n 5 logs/dashboard.log

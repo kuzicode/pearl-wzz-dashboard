@@ -6,7 +6,7 @@ Set-Location $Root
 if (Test-Path ".env") {
   Get-Content ".env" | ForEach-Object {
     if ($_ -match '^\s*([^#][^=]+?)\s*=\s*(.*)\s*$') {
-      [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), "Process")
+      [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim().Trim("'").Trim('"'), "Process")
     }
   }
 }

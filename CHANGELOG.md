@@ -2,6 +2,28 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [新人初始化流程整改: 安全默认 + 护栏 + 文档对齐] — 2026-09-20
+
+### Changed — 变更
+- **模板默认不花钱**:4 个 `config.*.example.json` 的 `enabled` / `create_enabled` 默认 **false**(Vast 新增 `create_enabled` 开关,老配置无此键默认 true),并补 `pool: pearlhash`、`monitor_pools: ["pearlhash"]`(之前缺省会去查全部 5 个池含 3 个已下线池);护栏默认 1 台 / $1.0/h。
+- **`.env.example` 的 key 留空**(之前是 `replace_with_…` 占位串,导致 start-all 的"空 key 跳过"永远不触发、四个进程一起 401);新增 `DASHBOARD_HOST=127.0.0.1` 及说明。
+- **WildRig 镜像 v13-wildrig 去掉内置默认钱包**(原为作者钱包,Salad 手建组漏填 PRL_ADDRESS 会挖给作者);`PRL_ADDRESS` 为空或非 prl1… 时拒绝启动。默认 worker 前缀 kuzi → miner。
+- README「快速开始」按"只用 RunPod"的最小路径重写,补上 `cp configs/config.<平台>.example.json` 一步(之前遗漏)、云服务器访问看板的两种方式(反代 / `DASHBOARD_HOST=0.0.0.0`)、「默认配置是什么」表、TensorDock 密钥生成命令、Salad 组必须填钱包;去掉已下线的"一键迁移"与"dry-run 不加 --live"(start-all 无此模式)的说法。看板内「工具说明」同步(uv / 五步 / 镜像 v13 / 时租上限是**每账号**而非全局 / 去掉 image、prl_host 参数)。
+- 平台文案顺序统一 RunPod / Vast / TensorDock / Salad。
+
+### Fixed — 修复
+- **钱包 / key 护栏**:sniper 启动时 `prl_address` 缺失或仍是占位符、或 `.env` 的 key 仍是 `replace_with_…` → 直接报错退出(之前会租到机器挖给无效地址)。
+- 看板拉起 sniper 前自动建 `logs/`(之前不经 start-all 启动看板时「重启应用」静默失败);改用当前解释器(uv .venv)启动,与 start-all 一致;拉起失败打印原因。
+- Windows `.ps1` 读 `.env` 时剥掉看板写入的引号(之前从看板保存的 key 在 Windows 上带引号导致 401)。
+- `start-all.sh` / `restart-dashboard.sh` 结束语按实际监听地址提示(默认 localhost,云服务器提示反代或改 HOST)。
+
+## [修: 暂停租用时不回收死机 / 关闭已销毁实例报 404 / 产出卡 tooltip 不显示] — 2026-09-20
+
+### Fixed — 修复
+- **暂停租用 / 关闭自动建机期间 RunPod、TensorDock 不再回收死机**:回收(reconcile)从 create 路径里挪到 cycle 顶层,始终执行;之前暂停期间 0 算力机器会一直烧钱。
+- 看板「关闭」遇到平台 404(实例已被回收或平台侧已销毁)不再报失败,提示「实例已不存在」;终止操作写入看板日志。
+- 累计产出卡的「已确认 · 待成熟」悬停提示改为 CSS 自绘 tooltip(页面每几秒重绘会打断浏览器原生 title 提示),大数字下加虚线提示可悬停。
+
 ## [看板体验微调: 去 GPU 列 / 去矿池分析 / 加宽 / 产出 tooltip / 按钮对齐 / 平台排序] — 2026-09-20
 
 ### Changed — 变更

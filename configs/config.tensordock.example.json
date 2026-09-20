@@ -5,6 +5,10 @@
   "poll_seconds": 10,
   "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
   "prl_host": "pool.pearlhash.xyz:9000",
+  "pool": "pearlhash",
+  "monitor_pools": [
+    "pearlhash"
+  ],
   "provider_intervals_seconds": {
     "vast": 10,
     "runpod": 10,
@@ -20,8 +24,8 @@
     "create_enabled": false
   },
   "tensordock": {
-    "enabled": true,
-    "create_enabled": true,
+    "enabled": false,
+    "create_enabled": false,
     "base_url": "https://dashboard.tensordock.com/api/v2",
     "image": "ubuntu2404",
     "vcpu_count": 2,
