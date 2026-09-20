@@ -2,6 +2,15 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [累计产出含待成熟 pending + 卡片拆分标注] — 2026-09-20
+
+### Fixed — 修复
+- **累计产出漏算 pending**:`tick_output` 读矿池 pending 时用了错字段 `total_pending`,而 API 实际是 `total_pending_prl` → pending 恒为 0,累计产出只反映已确认部分。改为读 `total_pending_prl`(兼容旧 `total_pending`)。修完累计产出大数字正确 = 已确认 + 待成熟(总额)。
+
+### Added — 新增
+- summary 暴露 `output_confirmed`(已确认 = 总额 − pending,clamp≥0)与 `output_pending`(待成熟 = total_pending_prl + 非-ph 池 pending_balance)。
+- 累计产出卡片次行加标注:`已确认 X · 待成熟 +Y PRL`(待成熟用暖色),两者相加 = 大数字总额,与矿池 account 页一致(如 0.27 已确认 + 4.44 待成熟 = 4.71)。NOCK pending 未开放付款,暂不显示。
+
 ## [访客模式屏蔽实时数据 + 演示占位引导] — 2026-09-20
 
 公开域名下,访客不应看到钱包/算力/收益/机器等实时数据。

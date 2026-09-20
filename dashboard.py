@@ -976,7 +976,9 @@ def tick_output(pool=None):
         pool = pool_data()
     if not isinstance(pool, dict):
         return float(read_json(STATS_PATH, {}).get("cumulative_output", 0.0))
-    pending = float((pool.get("pending_rewards") or {}).get("total_pending") or 0)
+    # 矿池 pending 字段是 total_pending_prl(旧版可能是 total_pending), 都兜一下。
+    _pr = pool.get("pending_rewards") or {}
+    pending = float(_pr.get("total_pending_prl") or _pr.get("total_pending") or 0)
     credits = [(int(t.get("timestamp") or 0), float(t.get("amount") or 0))
                for t in (pool.get("balance_transactions") or [])
                if float(t.get("amount") or 0) > 0]
@@ -1429,16 +1431,21 @@ def build_summary(pool_key="merged"):
             rbp[key] = rbp.get(key, 0) + 1
     running_machines = running if pool_key == "merged" else rbp.get(pool_key, 0)
     cp = coin_price()
-    ph_output = round(tick_output(pool_data()), 4)     # pearlhash 自重置累加 + 惰性写各池 output_<pool>_baseline
+    _pd = pool_data()
+    ph_output = round(tick_output(_pd), 4)     # pearlhash 自重置累加 + 惰性写各池 output_<pool>_baseline
+    ph_pending = float(((_pd.get("pending_rewards") or {}) if isinstance(_pd, dict) else {}).get("total_pending_prl")
+                       or ((_pd.get("pending_rewards") or {}) if isinstance(_pd, dict) else {}).get("total_pending") or 0)
     stats = read_json(STATS_PATH, {})                  # 在 tick_output 之后读, 拿到刚写入的基线
     # 每个非-pearlhash 池的全期 output(balance+paid)与自重置增量
     non_ph = [k for k in S.POOLS if k != "pearlhash"]
     alltime = {}     # pool -> balance+paid(全期)
     sincere = {}     # pool -> 自重置增量
+    np_pending = {}  # pool -> 当前待成熟(pending_balance)
     for pk in non_ph:
         v = POOL_MONITORS[pk]["view"]()
-        tot = round(float(v.get("pool_balance") or 0) + float(v.get("pool_paid") or 0)
-                    + float(v.get("pending_balance") or 0), 4)
+        _pend = float(v.get("pending_balance") or 0)
+        np_pending[pk] = _pend
+        tot = round(float(v.get("pool_balance") or 0) + float(v.get("pool_paid") or 0) + _pend, 4)
         alltime[pk] = tot
         base = float(stats.get(_baseline_key(pk)) or 0.0)
         sincere[pk] = max(0.0, round(tot - base, 4))
@@ -1452,6 +1459,15 @@ def build_summary(pool_key="merged"):
         output, basis = round(ph_output + sum(sincere.values()), 4), "since_reset"
         sr_output = round(ph_output + sum(sincere.values()), 4)
     output_usd = round(output * cp, 2)
+    # 产出拆分: 待成熟(pending, 矿池未成熟) 与 已确认(= 总额 - 待成熟, clamp≥0), 供卡片次行标注; 两者相加 = 大数字总额
+    if pool_key == "pearlhash":
+        output_pending = round(ph_pending, 4)
+    elif pool_key in non_ph:
+        output_pending = round(np_pending.get(pool_key, 0.0), 4)
+    else:  # merged
+        output_pending = round(ph_pending + sum(np_pending.values()), 4)
+    output_pending = min(output_pending, output)          # pending 不超过总额(防基线错位显示负确认)
+    output_confirmed = round(max(0.0, output - output_pending), 4)
     # 按池当前 burn(POOLS 驱动)
     burn_total = 0.0
     bbp = {k: 0.0 for k in S.POOLS}
@@ -1491,6 +1507,8 @@ def build_summary(pool_key="merged"):
         "coin_price_usd": cp,
         "coin_price_live": _price_cache.get("prl") is not None,  # True=实时拉取, False=fallback
         "cumulative_output": output,
+        "output_confirmed": output_confirmed,
+        "output_pending": output_pending,
         "avg_output_per_hour": avg_output_per_hour,
         "cumulative_output_usd": output_usd,
         "cumulative_profit_usd": round(output_usd - rent, 2),
@@ -2487,7 +2505,7 @@ ${poolLinks}
 <div class=card><div class=k>在跑机器</div><div class=v>${d.running_machines}</div><div class=sub>${pv=='merged'?poolBreak:esc(bp)}</div></div>
 <div class=card><div class=k>总算力 矿池实测</div><div class=v>${fnum(d.total_hashrate_th)} <small>TH/s</small></div></div>
 <div class=card><div class=k>累计租金</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
-<div class=card><div class=k>累计产出</div><div class=v style=color:var(--acc)>${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
+<div class=card><div class=k>累计产出</div><div class=v style=color:var(--acc)>${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div>${(d.output_confirmed!=null||d.output_pending!=null)?`<div class=sub style="margin-top:2px">已确认 ${fnum(d.output_confirmed,4)} · <span style="color:var(--warn)">待成熟 +${fnum(d.output_pending,4)}</span> <small>PRL</small></div>`:''}</div>
 <div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
 </div>
 <div class="kpanel" id=poolpanel>
