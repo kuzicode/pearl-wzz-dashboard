@@ -2,6 +2,16 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [回退访客数据屏蔽] — 2026-09-20
+
+按需求恢复:访客(偷窥模式)照常查看仪表盘实时数据,不再显示演示占位。
+
+### Reverted — 回退
+- 删除前端 `guestOverview()` 占位页与 `renderOverview` 的访客/`guest_masked` 分支;访客走正常渲染。
+- 删除后端 `/api/summary`、`/api/rentals` 对访客的 `guest_masked` 屏蔽;访客拿真实数据。
+- 还原 `initRole`(去掉多加的一次重渲染)与登录页文案(「偷窥模式 · 仅看仪表盘 / PEEK MODE」)。
+- 访客仍为只读(所有写操作 / 配置 / 日志接口对 guest 依旧 403,与原行为一致)。
+
 ## [累计产出含待成熟 pending + 卡片拆分标注] — 2026-09-20
 
 ### Fixed — 修复

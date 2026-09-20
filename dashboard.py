@@ -1947,17 +1947,12 @@ class H(BaseHTTPRequestHandler):
                     p = 15
                 return self._send(200, kline_data(p))
             if path == "/api/summary":
-                # 访客: 屏蔽实时数据(钱包/算力/收益/机器), 只回占位; 保护隐私(公开域名下防直接取数)。
-                if role != "admin":
-                    return self._send(200, {"guest_masked": True, "pools": [], "pool_view": "merged"})
                 qs = urllib.parse.parse_qs(self.path.split("?",1)[1] if "?" in self.path else "")
                 pk = (qs.get("pool") or ["merged"])[0]
                 return self._send(200, build_summary(pk))
             if path == "/api/rentals":
-                if role != "admin":
-                    return self._send(200, {"guest_masked": True})
                 return self._send(200, build_rentals())
-            # ↓ 以下仅管理员;访客(guest)只能看工具集 / 文档
+            # ↓ 以下仅管理员;访客(guest)只能看总览数据与工具集
             if role != "admin":
                 return self._send(403, {"error": "forbidden"})
             if path == "/api/config":
@@ -2376,7 +2371,7 @@ th{font-family:'IBM Plex Sans','Noto Sans SC',sans-serif;text-transform:none;let
 <button type=submit class=lbtn>登录 / LOGIN</button>
 </form>
 <div class=ldiv></div>
-<div class=foot onclick=guestLogin()><span class=eye>👁</span><span>访客预览 · 部署后见数据</span><span class=lmono>/ GUEST</span></div>
+<div class=foot onclick=guestLogin()><span class=eye>👁</span><span>偷窥模式 · 仅看仪表盘</span><span class=lmono>/ PEEK MODE</span></div>
 </section></main></div>
 
 <div class=mtopbar><button class=mtoggle onclick=toggleSide() aria-label="菜单">☰</button><span class=mbrand>今晚挖珍珠</span></div>
@@ -2427,7 +2422,7 @@ if(r.ok){const d=await r.json();afterAuth(d.role);}else{const d=await r.json();d
 async function guestLogin(){const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({guest:true})});
 if(r.ok){const d=await r.json();afterAuth(d.role||'guest');}}
 async function logout(){try{await fetch('/logout',{method:'POST'});}catch(e){}location.reload();}
-async function initRole(){try{const m=await fetch('/api/me');if(m.ok){const d=await m.json();ROLE=d.role;applyRole();if(view=='ov')renderOverview();}}catch(e){}}
+async function initRole(){try{const m=await fetch('/api/me');if(m.ok){const d=await m.json();ROLE=d.role;applyRole();}}catch(e){}}
 function applyTheme(t){let light=t=='light';document.documentElement.setAttribute('data-theme',light?'light':'dark');let b=document.getElementById('tbtn');if(b)b.textContent=light?'☀️':'🌙';let mc=document.querySelector('meta[name=theme-color]');if(mc)mc.setAttribute('content',light?'#ffffff':'#161616');}
 function initTheme(){let t='light';try{t=localStorage.getItem('pearl_theme')||'light';}catch(e){}applyTheme(t);}
 function toggleTheme(){let cur=document.documentElement.getAttribute('data-theme')||'dark';let nx=cur=='light'?'dark':'light';try{localStorage.setItem('pearl_theme',nx);}catch(e){}applyTheme(nx);}
@@ -2436,19 +2431,7 @@ function dur(s){if(s==null)return '-';let h=Math.floor(s/3600),m=Math.floor(s%36
 function fnum(n,d){if(n==null)return '-';n=Number(n);if(Math.abs(n)<1e-9)n=0;return n.toLocaleString(undefined,{maximumFractionDigits:d==null?2:d});}
 async function resetStats(){if(!confirm('确认重置统计? 累计租金 / 产出 / 利润都会清零, 从现在重新起算(币价保留)。'))return;try{let r=await api('/api/reset-stats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});if(r&&r.ok){toast('统计已重置, 从现在起算');refresh();}else toast((r&&r.error)||'重置失败');}catch(e){}}
 
-function guestOverview(){document.getElementById('ov').innerHTML=`
-<div class="card" style="padding:40px 32px;max-width:720px;margin:0 auto;text-align:center">
-<div class=orb style="width:56px;height:56px;margin:0 auto 20px"></div>
-<div style="font-size:26px;font-weight:300;color:var(--hi);letter-spacing:-.3px;margin-bottom:12px">访客模式 · Guest</div>
-<div style="color:var(--mut);font-size:15px;line-height:1.7;max-width:560px;margin:0 auto">这是「今晚挖珍珠」多平台 GPU 自动抢租挖矿看板的<b style="color:var(--hi);font-weight:600">演示视图</b>。为保护隐私,实时数据(钱包地址、算力、收益、在跑机器)<b style="color:var(--hi);font-weight:600">仅在你部署自己的看板后可见</b>。</div>
-<div style="color:var(--sub);font-size:13px;line-height:1.7;max-width:560px;margin:14px auto 0">看板会在 Vast.ai / RunPod / TensorDock / Salad 上自动抢租低价 GPU、跑 PearlHash 矿机、监控算力并回收低效机器,全程一个网页统一管理。</div>
-<div style="margin-top:26px"><button class=b-acc onclick="nav('doc:guide')" style="padding:12px 22px;font-size:14px">查看部署说明 · 工具说明 →</button></div>
-<div class=peek style="margin-top:22px;border-top:1px solid var(--bd);cursor:default;color:var(--sub)">部署好自己的看板后,登录管理员即可看到实时数据</div>
-</div>`;}
-async function renderOverview(){if(EDITING)return;
-if(ROLE!='admin'){guestOverview();return;}
-let d,r,pv;try{let stored=localStorage.getItem('pool_view');d=await api('/api/summary?pool='+encodeURIComponent(stored||'default'));r=await api('/api/rentals');pv=d.pool_view||'merged'}catch(e){return}
-if(!d||d.guest_masked){guestOverview();return;}
+async function renderOverview(){if(EDITING)return;let d,r,pv;try{let stored=localStorage.getItem('pool_view');d=await api('/api/summary?pool='+encodeURIComponent(stored||'default'));r=await api('/api/rentals');pv=d.pool_view||'merged'}catch(e){return}
 if(ROLE=='admin'){let _ce=document.getElementById('cfaccts');if(_ce)_ce.innerHTML=Object.keys(r).map(a=>`<div class="ni sub adm${(view=='cf'&&subtab==a)?' on':''}" data-nav=cf:${a} onclick="nav('cf:${a}')">${esc((r[a]&&r[a].label)||a)}</div>`).join('');}
 let phUrl='https://pearlhash.xyz/account/'+encodeURIComponent(d.wallet);
 let twUrl='https://tw-pool.com/workers/'+encodeURIComponent(d.wallet);
