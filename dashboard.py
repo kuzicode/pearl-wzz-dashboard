@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 CONTROL_DIR = ROOT / "control"
 STATS_PATH = ROOT / "dashboard-stats.json"
 PLATFORMS = ["vast", "runpod", "tensordock", "salad"]
+PLATFORM_ORDER = ["runpod", "vast", "tensordock", "salad"]  # 看板展示顺序(左栏 / 仪表盘 / 配置总览)
 KEYNAME = {
     "vast": "VAST_API_KEY",
     "runpod": "RUNPOD_API_KEY",
@@ -71,7 +72,10 @@ def list_accounts():
         if name.endswith(".example.json"):
             continue
         out.append(name[len("config."):-len(".json")])
-    return sorted(out, key=lambda a: (platform_of(a), a))
+    def _ord(a):
+        pl = platform_of(a)
+        return (PLATFORM_ORDER.index(pl) if pl in PLATFORM_ORDER else len(PLATFORM_ORDER), a)
+    return sorted(out, key=_ord)
 
 def account_label(account_id):
     """卡片/侧栏标签: 平台-标识(标识 = 自定义 account_label / salad 的 org / 账号序号)。"""
@@ -2161,7 +2165,9 @@ summary:hover{color:var(--acc)}
 .ovtw{overflow-x:auto;margin-top:6px}.ovt{width:100%;border-collapse:collapse;font-size:12.5px}
 .ovt th{text-align:left;color:var(--mut);font-weight:500;font-size:11px;letter-spacing:.3px;padding:6px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
 .ovt td{padding:8px;border-bottom:1px solid var(--bd);vertical-align:middle;white-space:nowrap}
-.ovt td.gpul{white-space:normal;min-width:200px;line-height:1.6}.ovt tr:last-child td{border-bottom:0}
+.ovt tr:last-child td{border-bottom:0}
+.rtab td:last-child,.rtab th:last-child{width:1%;white-space:nowrap;text-align:right}
+.card .v.tip{cursor:help;text-decoration:underline dotted;text-decoration-thickness:1px;text-underline-offset:5px}
 .ovt a{color:var(--acc);text-decoration:none;font-weight:600}.ovt .pill{margin-right:4px}
 details details{border-top:0;margin-top:10px;padding-top:0}details .grid2{margin-top:10px}
 .ckrow{display:flex;align-items:center;gap:10px;min-height:34px}.ckrow input{margin:0;width:16px;height:16px;flex:0 0 auto}.ckrow .hint{margin:0}
@@ -2255,11 +2261,11 @@ background:radial-gradient(circle,rgba(255,255,255,.95),rgba(255,255,255,0) 70%)
 .nigrp{margin:13px 0 5px;padding:13px 13px 0;font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--mut);font-weight:700;border-top:1px solid var(--bd)}
 .sfoot{margin-top:auto;color:var(--mut);font-size:11px;font-family:var(--mono);padding:12px 13px 0;border-top:1px solid var(--bd)}
 main{flex:1;min-width:0;margin-left:210px;padding:26px 32px;display:flex;justify-content:center}
-.inner{width:100%;max-width:1040px}
+.inner{width:100%;max-width:1280px}
 .b-mini{padding:7px 12px;font-size:11.5px}
 .suser{color:var(--tx);font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:7px;min-width:0}
 .suser .dot{width:7px;height:7px;border-radius:50%;background:var(--g2);box-shadow:0 0 8px var(--g2);flex-shrink:0}
-.lgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(258px,1fr));gap:14px}
+.lgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
 .doc{max-width:880px}
 .doc h2{font-size:18px;margin:2px 0 6px;color:var(--hi)}
 .doc .sub2{color:var(--mut);font-size:12.5px;margin-bottom:16px;line-height:1.6}
@@ -2470,12 +2476,6 @@ let pbasis=d.produced_basis||'mixed';
 let plabel=pbasis=='since_reset'?('自重置起算'+(ssl?(' (统计自 '+ssl+')'):'')):(pbasis=='all_time'?'全期(已付+未付)':'PearlHash 自重置 + TW Pool 全期');
 let proflabel=pbasis=='since_reset'?'产出折合 − 累计租金':'产出折合 − 累计租金 · ⚠ 口径不一(全期产出 vs 自重置租金), 仅供参考';
 let wk=(d.workers||[]).map(w=>`<tr${w.stale?' style="opacity:.5"':''}><td>${esc(w.name)}${w.stale?' <span class=muted>(离线)</span>':''}</td><td>${esc((w.gpus||[]).join(', '))}</td><td><b style=color:var(--acc)>${fnum(w.th)}</b> TH/s</td><td>${esc(w.ip)}</td></tr>`).join('')||'<tr><td colspan=4 class=muted>矿池暂无在挖 worker</td></tr>';
-let _det=[];
-if(d.pending_balance!=null) _det.push(`待结算 <b>${fnum(d.pending_balance,4)}</b> PEARL`);
-if(d.credited_total!=null) _det.push(`累计收益 <b>${fnum(d.credited_total,4)}</b> PEARL`);
-if(d.shares) _det.push(`份额 <b style=color:#5cb85c>${d.shares.good||0}</b>·<b style=color:#d9534f>${d.shares.invalid||0}</b>·<b class=muted>${d.shares.stale||0}</b> <span class=muted style=font-size:10px>有效·无效·过期</span>`);
-if(d.pool_info){let pi=[];if(d.pool_info.network_height!=null)pi.push('高度 '+d.pool_info.network_height);if(d.pool_info.fee_rate!=null)pi.push('费率 '+(d.pool_info.fee_rate*100).toFixed(1)+'%');if(d.pool_info.blocks_found!=null)pi.push('爆块 '+d.pool_info.blocks_found);if(pi.length)_det.push(pi.join(' · '));}
-let detBar=_det.length?`<div class=card style="grid-column:1/-1"><div class=sub style="line-height:1.9">${_det.join('&nbsp;&nbsp;|&nbsp;&nbsp;')}</div></div>`:'';
 window._lastData=d;
 let hrPanel='';
 if(d.hashrate_series && (d.hashrate_series.points||[]).length){
@@ -2484,7 +2484,7 @@ if(d.hashrate_series && (d.hashrate_series.points||[]).length){
   hrPanel=`<div class="kpanel" id=hrpanel><div class=khead onclick="toggleHr()"><span>算力趋势 / HASHRATE <span class=muted style=font-size:11px>· ${ulabel}</span></span><span class=karr>▼</span></div><div class=kbody id=hrbody><div class=kcanvas-wrap><canvas class=kc id=hrcanvas height=300></canvas></div></div></div>`;
 }
 let poolName=q=>q=='unknown'?'未知':(PL[q]||q);
-let plat='';for(const aid of Object.keys(r).sort((a,b)=>((r[b]&&r[b].machines||[]).length)-((r[a]&&r[a].machines||[]).length))){const v=r[aid];const p=v.platform||aid;
+let plat='';for(const aid of Object.keys(r)){const v=r[aid];const p=v.platform||aid;
 let badges=`<span class="pill ${v.process_running?'ok':'bad'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?'<span class="pill warn">RENT PAUSED</span>':'');
 let balTxt;if(v.balance!=null){let t=(v.hours_left!=null)?('约 '+fnum(v.hours_left,1)+'h 花完'):(v.burn_hourly>0?'':'当前无消耗');let lab=v.balance_estimated?'估算余额':(v.balance_real?'实时余额':'余额');balTxt=`${lab} $${fnum(v.balance,2)}${t?' · '+t:''}`;}else{balTxt='余额 —';}
 let bh;if(v.balance_editable){BALVAL[aid]=(v.balance_usd!=null?v.balance_usd:'');bh=`<span class="bal editable" id="bal_${esc(aid)}" onclick="editBal('${esc(aid)}')" title="点击填写/修改余额(此平台无余额 API, 手动维护)">${balTxt} <span class=ed-pen>✎</span></span>`;}else{bh=`<span class=bal>${balTxt}</span>`;}
@@ -2500,7 +2500,7 @@ let idcell=p=='salad'?`<td title="实例 ${esc(m.id)}${m.machine_id?(' · 机器
 return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?8:7} class=muted>无符合机器</td></tr>`;
 let _pt=v.console_url?`<b><a class=platlink href="${esc(v.console_url)}" target=_blank rel=noopener title="打开 ${esc(v.label||aid)} 后台 ↗">${esc(v.label||aid)} ↗</a></b>`:`<b>${esc(v.label||aid)}</b>`;
 plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}<span class=muted style="font-size:11px;margin-left:8px">$${fnum(acctBurn,3)}/h${pv!='merged'?' ('+poolName(pv)+')':''}</span></div>${sstat}
-<div class=tscroll><table><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
+<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
 <div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addrrow><span class=addr>${esc(d.wallet)}</span><span class=copyi title="复制钱包地址" onclick="copyAddr('${esc(d.wallet)}')"><svg viewBox="0 0 24 24" width=16 height=16 fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round aria-hidden=true><rect x=9 y=9 width=13 height=13 rx=2 ry=2/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span></div></div>
@@ -2511,19 +2511,8 @@ ${poolLinks}
 <div class=card><div class=k>在跑机器</div><div class=v>${d.running_machines}</div><div class=sub>${pv=='merged'?poolBreak:esc(bp)}</div></div>
 <div class=card><div class=k>总算力 矿池实测</div><div class=v>${fnum(d.total_hashrate_th)} <small>TH/s</small></div></div>
 <div class=card><div class=k>累计租金</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
-<div class=card><div class=k>累计产出</div><div class=v style=color:var(--acc)>${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div>${(d.output_confirmed!=null||d.output_pending!=null)?`<div class=sub style="margin-top:2px">已确认 ${fnum(d.output_confirmed,4)} · <span style="color:var(--warn)">待成熟 +${fnum(d.output_pending,4)}</span> <small>PRL</small></div>`:''}</div>
+<div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) title="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
 <div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
-</div>
-<div class="kpanel" id=poolpanel>
-<div class=khead onclick="togglePool()"><span>🪙 矿池分析 <span class=muted style="font-size:11px">· 余额 / 性价比 / 挖矿成本</span></span><span class=karr>▼</span></div>
-<div class=kbody id=poolbody>
-<div class=cards>
-<div class=card><div class=k>矿池余额</div><div class=v>${d.pool_balance==null?'<span class=muted>—</span>':fnum(d.pool_balance,4)+' <small>PEARL</small>'}</div><div class=sub>${pv=='merged'?'各池合计':poolName(pv)}</div></div>
-<div class=card><div class=k>算力性价比</div><div class=v>${d.efficiency_th_per_usd==null?'<span class=muted>—</span>':fnum(d.efficiency_th_per_usd,1)+' <small>TH/($·h)</small>'}</div><div class=sub>${pv=='merged'?'(全部)':poolName(pv)}总算力 / 当前$/h</div></div>
-<div class=card><div class=k>挖矿成本 (USD/PRL)</div><div class=v style=font-size:18px>${d.cost_cumulative_usd==null?'<span class=muted>—</span>':'$'+fnum(d.cost_cumulative_usd,4)}<small> 累计</small></div><div class=sub>${d.cost_cumulative_usd==null?'<span class=muted>累计无产出</span>':(d.cost_cumulative_usd<d.coin_price_usd?'<span style=color:var(--acc)>盈利(币价 $'+fnum(d.coin_price_usd,4)+')</span>':'<span style="color:#ff6b6b">⚠ 高于币价 $'+fnum(d.coin_price_usd,4)+'</span>')}</div><div class=v style="font-size:18px;margin-top:6px">${d.cost_recent3h_usd==null?'<span class=muted>—</span>':'$'+fnum(d.cost_recent3h_usd,4)}<small> 最近3h</small></div><div class=sub>${d.cost_recent3h_usd==null?'<span class=muted>运行不足3h</span>':(d.cost_recent3h_usd<d.coin_price_usd?'<span style=color:var(--acc)>盈利中</span>':'<span style="color:#ff6b6b">⚠ 应关机</span>')}</div></div>
-${detBar}
-</div>
-</div>
 </div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
 <span class=muted style="font-size:12px">PRL/USDT <b style="color:var(--hi);font-family:var(--mono)">$${fnum(d.coin_price_usd,4)}</b>${d.coin_price_live?' <span style="color:var(--ok);font-size:10px;letter-spacing:.4px">● 实时</span>':' <span style="color:var(--warn);font-size:10px">离线</span>'}</span>
@@ -2553,12 +2542,9 @@ let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=pv;
 // renderOverview 每次重建 DOM 后恢复 K线展开状态
 if(_kopen){const kp=document.getElementById('kpanel');if(kp){kp.classList.add('open');if(_kdata)setTimeout(()=>drawKline(_kdata),0);else loadKline();}}
 if(_hropen){const hp=document.getElementById('hrpanel');if(hp){hp.classList.add('open');setTimeout(()=>{if(d.hashrate_series)drawHr(d.hashrate_series);},0);}}
-if(_poolopen){const pp=document.getElementById('poolpanel');if(pp)pp.classList.add('open');}
 }
 
 // ---------- K线图 ----------
-let _poolopen=false;
-function togglePool(){_poolopen=!_poolopen;const p=document.getElementById('poolpanel');if(p)p.classList.toggle('open',_poolopen);}
 let _hropen=false;
 function toggleHr(){_hropen=!_hropen;const p=document.getElementById('hrpanel');if(p)p.classList.toggle('open',_hropen);if(_hropen)setTimeout(()=>{const d=window._lastData;if(d&&d.hashrate_series)drawHr(d.hashrate_series);},0);}
 function drawHr(series){
@@ -2688,15 +2674,14 @@ w=` <span class=cdiff title="${esc(dv)}">⚠ 各账号当前不一致, 保存将
 return `<div class=fld>${label}${req?' <span class=req>必填</span>':''}${w}</div><input id="cm_${k}" value="${esc(c[k]==null?'':c[k])}" placeholder="${ph||''}">`;};
 let rows=Object.entries(P).map(([a,v])=>{let ac=v.account||{};
 let st=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?'<span class="pill warn">RENT PAUSED</span>':'')+(v.key_set?'':'<span class="pill bad">KEY 未设置</span>')+(v.enabled?'':'<span class="pill mut">未启用</span>');
-let gp=(v.gpus||[]).map(g=>esc(g.gpu||'')+(g.max_price!=null?' ≤$'+g.max_price:'')+(g.min_hashrate!=null?' ≥'+g.min_hashrate+'TH':'')).join('<span class=muted> / </span>')||'—';
 let w=ac.prl_address||'';let ws=w?(w.slice(0,8)+'…'+w.slice(-4)):'∅';
 let warn=(c.prl_address&&w!==c.prl_address)?' <span class=cdiff title="与全局钱包不一致, 请检查">⚠</span>':'';
 let lim=(ac.max_active_instances==null?'—':ac.max_active_instances)+' 台 · $'+(ac.max_total_hourly_usd==null?'—':ac.max_total_hourly_usd)+'/h';
-return `<tr><td><a href=# onclick="nav('cf:${esc(a)}');return false">${esc(v.label||a)}</a></td><td>${st}</td><td>${esc(v.pool_label||v.pool||'')}</td><td>${lim}</td><td class=gpul>${gp}</td><td title="${esc(w)}"><code style="font-size:11px">${esc(ws)}</code>${warn}</td></tr>`;}).join('');
+return `<tr><td><a href=# onclick="nav('cf:${esc(a)}');return false">${esc(v.label||a)}</a></td><td>${st}</td><td>${esc(v.pool_label||v.pool||'')}</td><td>${lim}</td><td title="${esc(w)}"><code style="font-size:11px">${esc(ws)}</code>${warn}</td></tr>`;}).join('');
 let sumH=Object.values(P).reduce((t,v)=>t+(parseFloat((v.account||{}).max_total_hourly_usd)||0),0);
 return `<div class=lbl>配置总览</div>
 <div class=platbox><div class=top><b>各账号配置一览</b><span class=muted>点账号名进入编辑 · 最坏每小时花费 = 各账号时租上限之和 ≈ $${sumH.toFixed(2)}/h</span></div>
-<div class=ovtw><table class=ovt><thead><tr><th>账号</th><th>状态</th><th>矿池</th><th>最多同时租 · 时租上限</th><th>GPU 档 (型号 ≤最高出价 ≥最低算力)</th><th>钱包</th></tr></thead><tbody>${rows||'<tr><td colspan=6 class=muted>还没有账号 config: 复制 configs/config.<平台>.example.json 为 config.<平台>.json 后刷新</td></tr>'}</tbody></table></div></div>
+<div class=ovtw><table class=ovt><thead><tr><th>账号</th><th>状态</th><th>矿池</th><th>最多同时租 · 时租上限</th><th>钱包</th></tr></thead><tbody>${rows||'<tr><td colspan=5 class=muted>还没有账号 config: 复制 configs/config.<平台>.example.json 为 config.<平台>.json 后刷新</td></tr>'}</tbody></table></div></div>
 <div class=platbox><div class=top><b>全局 · 钱包与告警</b><span class=muted>保存会写入全部 ${n} 个账号 config(其余参数在各账号页单独设置)</span></div>
 <div class=grid2>
 ${cf('prl_address','钱包地址 prl_address',1,'你的 $pearl 钱包, 否则挖给别人')}
@@ -2841,12 +2826,12 @@ async function saveBal(aid){const inp=document.getElementById('bali_'+aid);if(!i
 const LINKS=[
 {t:'官网',i:'🌐',items:[['Pearl Research','https://pearlresearch.ai/']]},
 {t:'区块浏览器',i:'🔎',items:[['Explorer','https://explorer.pearlresearch.ai/']]},
-{t:'交易平台',i:'💱',items:[['SafeTrade · PRL-USDT','https://safetrade.com/exchange/PRL-USDT'],['Pearl OTC','https://app.pearl-otc.com/'],['OKX Web3 · PRL','https://web3.okx.com/zh-hans/token/ethereum/0x07696dcab55e62cfef953666b29fe1970518cb00']]},
 {t:'钱包',i:'👛',items:[['Compute Wallet','https://compute.pearlresearch.ai/wallet']]},
+{t:'租卡平台',i:'🖥️',items:[['RunPod','https://runpod.io?ref=9hx2ahkb'],['Vast.ai','https://cloud.vast.ai/'],['TensorDock','https://dashboard.tensordock.com/'],['Salad','https://portal.salad.com/']]},
 {t:'矿池',i:'⛏️',items:[['PearlHash','http://pearlhash.xyz'],['AlphaPool','https://pearl.alphapool.tech/'],['Kryptex Pool','https://pool.kryptex.com/prl'],['LuckyPool','https://pearl.luckypool.io/'],['HeroMiners','https://pearl.herominers.com/'],['K1Pool','https://k1pool.com/pool/pearl'],['PearlPool.cloud','https://pearlpool.cloud/'],['f2pool','https://www.f2pool.com/coin/pearl']]},
 {t:'Miner 下载',i:'⚙️',items:[['HydraX · 1% RTX50强','https://hydrax.gg/'],['SRBMiner-MULTI · 3%','https://github.com/doktor83/SRBMiner-Multi/releases'],['lpminer · 0% NV简装','https://github.com/BaikalMine-Pools/pearl-miner/releases'],['BzMiner · 2%','https://github.com/bzminer/bzminer/releases'],['PRL-Today 收益悬浮窗','https://github.com/stlin256/prl-today']]},
-{t:'租卡平台',i:'🖥️',items:[['Salad','https://portal.salad.com/'],['RunPod','https://runpod.io?ref=9hx2ahkb'],['TensorDock','https://dashboard.tensordock.com/'],['Vast.ai','https://cloud.vast.ai/']]},
 {t:'收益计算器',i:'🧮',items:[['Akakay 计算器','https://pearl.akakay.com/'],['Pearl Dashboard','https://pearl-dashboard-pearl.vercel.app/']]},
+{t:'交易平台',i:'💱',items:[['SafeTrade · PRL-USDT','https://safetrade.com/exchange/PRL-USDT'],['Pearl OTC','https://app.pearl-otc.com/'],['OKX Web3 · PRL','https://web3.okx.com/zh-hans/token/ethereum/0x07696dcab55e62cfef953666b29fe1970518cb00']]},
 {t:'数据源 / 调研',i:'📊',items:[['PearlTrack 浏览器','https://pearltrack.io/'],['Lord of Pearls','https://lordofpearls.xyz/'],['prlscan · 矿池榜','https://prlscan.com/pools'],['MiningPoolStats','https://miningpoolstats.stream/pearl'],['Hashrate.no · PRL','https://www.hashrate.no/coins/PRL/pools'],['HydraX · Miner 对比','https://hydrax.gg/blog/best-pearl-miner-2026.html']]},
 ];
 function dom(u){try{return new URL(u).host}catch(e){return u}}
