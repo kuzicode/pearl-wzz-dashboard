@@ -2,6 +2,12 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Kryptex/KRig 对比朋友镜像: 无 bug, 改在 Salad 试] — 2026-09-20
+
+### Changed — 变更
+- 与朋友跑通的 `conishc/pearl-miner:kryptex-krig-1.5.1` 逐项对比:krig-miner 二进制 md5 相同、启动参数相同、对方镜像为纯 ubuntu 无 CUDA 库 → 我方镜像无 bug;差异在宿主(Salad 新驱动 vs RunPod 社区机旧驱动,KRig 需支持 CUDA 13 的驱动)。
+- KRig 镜像 `krig-1.5.1` 重推:入口地址 `KRIG_URL` 未设时读 sniper 注入的 `PRL_HOST`(可配区域入口如 `stratum+ssl://prl-sg.kryptex.network:8048`),去掉内置默认钱包(缺 `PRL_ADDRESS` 拒绝启动);`POOLS["kryptex"].reads_prl_host` → true。
+
 ## [review 修复: 占位 key 只校验已启用平台 / Vast 自动建机默认值统一 / start-all 缺字段不退出] — 2026-09-20
 
 ### Fixed — 修复

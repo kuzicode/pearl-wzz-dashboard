@@ -589,7 +589,7 @@ POOLS = {
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
                   "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.1",
-                  "reads_prl_host": False},  # KRig(Kryptex 官方 miner)+ Kryptex 池(镜像内 KRIG_URL 默认, 不读 PRL_HOST)
+                  "reads_prl_host": True},  # KRig(Kryptex 官方 miner)+ Kryptex 池(镜像内 KRIG_URL 默认, 不读 PRL_HOST)
 }
 
 def _raw_pool(config):
