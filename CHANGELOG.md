@@ -2,6 +2,12 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Kryptex 在 Salad 跑通前的两处修正: 官方入口 + 短 rig 名] — 2026-09-21
+
+### Fixed — 修复
+- Salad 容器日志显示 KRig 在 Salad 上 GPU 初始化正常,但连池失败:① KRig 1.5.1 拒绝区域入口 `prl-sg.kryptex.network`("not the official Kryptex PRL pool"),改回官方 `prl.kryptex.network:8048`;② 矿池对过长 rig 名返回 `Invalid login`(直连 stratum 探测:带完整 36 位机器 ID 被拒,`kx-<前 8 位>` 通过)。镜像 `krig-1.5.1`/`krig-1.5.1-r2` 的 rig 名改为机器 ID 前 8 位;sniper / 看板按机器 ID 匹配 Salad worker 时同时接受 8 位前缀。
+- `POOLS["kryptex"]` 镜像 → `krig-1.5.1-r2`。
+
 ## [Kryptex/KRig 对比朋友镜像: 无 bug, 改在 Salad 试] — 2026-09-20
 
 ### Changed — 变更

@@ -649,8 +649,10 @@ def _salad_compute(account_id):
         def pool_match(mid):
             if not mid:
                 return None
+            mid8 = str(mid)[:8]
             for w in pool_workers:
-                if mid in str(w.get("name") or ""):   # salad worker 名含 machine_id
+                nm = str(w.get("name") or "")
+                if mid in nm or (len(mid8) == 8 and f"-{mid8}" in nm):   # salad worker 名含 machine_id(KRig 镜像只带前 8 位)
                     return w
             return None
         def pgpu(w):

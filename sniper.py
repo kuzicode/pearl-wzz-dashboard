@@ -588,7 +588,7 @@ POOLS = {
                      "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
-                  "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.1",
+                  "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.1-r2",
                   "reads_prl_host": True},  # KRig(Kryptex 官方 miner)+ Kryptex 池(镜像内 KRIG_URL 默认, 不读 PRL_HOST)
 }
 
@@ -2745,8 +2745,9 @@ def run_salad_cycle(config, state, live):
     def pool_info_by_machine(mid, pool_id):
         if not mid:
             return "", None
+        mid8 = str(mid)[:8]   # KRig 镜像 rig 名只带 machine id 前 8 位(Kryptex 拒绝过长 rig 名), 也要能命中
         for wname, winfo in _pool_workers_for(pool_id).items():
-            if str(mid) in str(wname):
+            if str(mid) in str(wname) or (len(mid8) == 8 and f"-{mid8}" in str(wname)):
                 gi = (winfo or {}).get("gpu_info") or []
                 gpu = str((gi[0] if gi else {}).get("name") or "").replace("NVIDIA GeForce ", "").strip()
                 return gpu, float((winfo or {}).get("hashrate_th") or 0)
