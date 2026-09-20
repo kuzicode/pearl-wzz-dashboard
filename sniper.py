@@ -21,10 +21,20 @@ STATE_PATH = Path(os.environ.get("SNIPER_STATE_PATH") or (ROOT / "state.json"))
 LOG_PATH = Path(os.environ.get("SNIPER_LOG_PATH") or (ROOT / "sniper.log"))
 
 
+ACCOUNT = None  # 本进程账号名(由 --config 文件名推出: config.runpod-2.json → runpod-2), main() 里赋值
+
+
+def account_platform(account):
+    """runpod-2 → runpod ; runpod → runpod"""
+    return re.sub(r"-\d+$", "", account or "")
+
+
 def renting_paused(provider):
-    """看板暂停租用: 存在 control/<provider>.rent-paused 文件时, 只停租用/迁移, 监控照常。"""
+    """看板暂停租用: 存在 control/<账号>.rent-paused 文件时, 只停租用/迁移, 监控照常。
+    开关按账号隔离(账 1 文件名即平台名, 与旧的平台级文件兼容); 本进程账号不属于该平台时退回平台级文件。"""
     try:
-        return (ROOT / "control" / f"{provider}.rent-paused").exists()
+        name = ACCOUNT if (ACCOUNT and account_platform(ACCOUNT) == provider) else provider
+        return (ROOT / "control" / f"{name}.rent-paused").exists()
     except Exception:
         return False
 
@@ -261,6 +271,25 @@ def pearl_worker_hashrates(config):
     return workers
 
 
+# Kryptex API 走 Cloudflare, 必须用浏览器 UA(否则 error 1010 拦截)
+KRYPTEX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+
+def kryptex_worker_hashrates(config):
+    """Kryptex 池逐-worker 算力。GET /prl/api/v3/miner/workers/{addr} → {worker: {hashrate_th, gpu_info}}。
+    注意: Kryptex 的 hashrate 单位待真机校准(首版按 H/s 用 hashrate_to_th); 首轮 hashrate_watch_enabled=false 不回收。"""
+    address = str(config.get("prl_address") or "").strip()
+    if not address:
+        return {}
+    url = f"https://pool.kryptex.com/prl/api/v3/miner/workers/{urllib.parse.quote(address)}"
+    data = request_json("GET", url, {"User-Agent": KRYPTEX_UA, "Accept": "application/json"}, timeout=20)
+    workers = {}
+    for w in (data or {}).get("results", []):
+        name = str(w.get("worker") or "")
+        if name:
+            workers[name] = {"hashrate_th": hashrate_to_th(w.get("hashrate")), "gpu_info": []}
+    return workers
+
+
 def lookup_worker(worker_hashrates, worker_name):
     """矿池 worker 查找: 先精确匹配, 再前缀匹配(矿机镜像会在 PRL_WORKER 后追加 -hash 后缀)。
     前缀匹配有歧义(多个候选)时返回 None 避免误判。"""
@@ -369,6 +398,7 @@ _POOL_HASHRATE_FN = {
     "pearlhash": pearl_worker_hashrates,
     "twpool": twpool_worker_hashrates,
     "pearlfortune": pearlfortune_worker_hashrates,
+    "kryptex": kryptex_worker_hashrates,
 }
 
 def merged_worker_hashrates_ex(config):
@@ -546,7 +576,7 @@ def record_rent(state, provider, external_id, gpu, price, result):
 
 POOLS = {
     "pearlhash": {"label": "PearlHash",
-                  "image": "docker.io/mrkidbk/pearl-miner:v12",
+                  "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
                   "reads_prl_host": True},
     "twpool":    {"label": "TW Pool (小幣礦池)",
                   "image": "docker.io/mrkidbk/pearl-miner-twpool:v1.9.1",
@@ -557,6 +587,9 @@ POOLS = {
     "pearlfortune": {"label": "PearlFortune",
                      "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
+    "kryptex":   {"label": "Kryptex",
+                  "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.1",
+                  "reads_prl_host": False},  # KRig(Kryptex 官方 miner)+ Kryptex 池(镜像内 KRIG_URL 默认, 不读 PRL_HOST)
 }
 
 def _raw_pool(config):
@@ -564,9 +597,12 @@ def _raw_pool(config):
     return str((config or {}).get("pool") or "").strip()
 
 def active_pool(config):
-    """从 config 读 pool, 返回 POOLS 中的有效 key; 未知/未配默认返回 'pearlfortune'。"""
+    """从 config 读 pool, 返回 POOLS 中的有效 key; 未知/未配则按 config['image'] 推断(pool_of_image), 再不行默认 'pearlhash'。"""
     p = _raw_pool(config)
-    return p if p in POOLS else "pearlfortune"
+    if p in POOLS:
+        return p
+    guess = pool_of_image((config or {}).get("image"))
+    return guess if guess in POOLS else "pearlhash"
 
 def effective_image(config):
     """新抢机器用的镜像: 优先按配置的 pool 镜像; pool 未知/未配则回退 config['image']。"""
@@ -586,6 +622,8 @@ def pool_of_image(image):
         return "pearlfortune"
     if "twpool" in s or "conishc" in s:
         return "twpool"
+    if "kryptex" in s or "krig" in s:
+        return "kryptex"
     return "pearlhash"
 
 
@@ -1636,6 +1674,11 @@ def try_runpod_create(config, state, live):
                 "countryCodes": country_codes,
                 "name": env["PRL_WORKER"],
             }
+            # 可选: 只租宿主驱动 CUDA 版本在列表内的机器(RunPod allowedCudaVersions, 可选值 13.0/12.9/12.8/.../11.8)。
+            # CUDA 原生 miner(KRig/PF)在旧驱动宿主上 cuInit 失败; 按账号配置, 不配则不传(任意版本)。
+            acv = cfg.get("allowed_cuda_versions")
+            if acv:
+                body["allowedCudaVersions"] = [str(x) for x in acv]
             registry_auth_id = cfg.get("container_registry_auth_id") or os.environ.get("RUNPOD_CONTAINER_REGISTRY_AUTH_ID")
             if registry_auth_id:
                 body["containerRegistryAuthId"] = registry_auth_id
@@ -3061,6 +3104,9 @@ def main():
     config = load_json(config_path, None)
     if config is None:
         raise SystemExit(f"Config not found: {config_path}")
+    global ACCOUNT
+    m = re.match(r"^config\.(.+)\.json$", config_path.name)
+    ACCOUNT = m.group(1) if m else None
     state = load_json(STATE_PATH, {"seen": {}, "rented": []})
     reset_n = reset_low_eff_timers(state)  # 重启后重置观测窗口, 避免继承旧计时器一启动就误杀
     mode = "LIVE" if args.live else "DRY-RUN"

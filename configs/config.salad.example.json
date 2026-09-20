@@ -1,5 +1,5 @@
 {
-  "image": "docker.io/kuzigmgm/pearl-miner:v11",
+  "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
   "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
   "prl_host": "pool.pearlhash.xyz:9000",
   "worker_prefix": "auto",

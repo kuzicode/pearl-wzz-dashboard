@@ -1,5 +1,5 @@
 {
-  "image": "docker.io/kuzigmgm/pearl-miner:v11",
+  "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
   "max_active_instances": 1,
   "max_total_hourly_usd": 1.0,
   "poll_seconds": 10,

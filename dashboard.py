@@ -28,14 +28,19 @@ KEYNAME = {
     "tensordock": "TENSORDOCK_API_TOKEN",
     "salad": "SALAD_API_KEY",
 }
-COMMON_KEYS = ["image", "prl_address", "prl_host", "worker_prefix",
-               "max_active_instances", "max_total_hourly_usd", "poll_seconds", "alert_url"]
+# 全局(跨账号批量)配置只保留真正共享、不会冲突的字段: 钱包 + 告警。
+# image / prl_host 是"池身份"(由各账号页「新抢矿池」决定, 镜像随 POOLS[pool] 自动选);
+# worker 前缀 / 最多同时租 / 时租上限 / 轮询 是账号级(各账号独立预算), 在账号页编辑(ACCOUNT_KEYS)。
+COMMON_KEYS = ["prl_address", "alert_url"]
+# 账号级顶层键(写在 config 顶层, 不在 cfg[plat] 里), 账号页「基础/高级设置」可编辑
+ACCOUNT_KEYS = ["prl_address", "worker_prefix", "max_active_instances", "max_total_hourly_usd", "poll_seconds"]
 # 每平台结构化暴露的特定字段: (key, type)  type in num/str/list/bool
 SPECIFIC = {
     "vast": [("max_offer_price_usd", "num"), ("min_offer_price_usd", "num"),
              ("min_reliability", "num"), ("disk_gb", "num"), ("prefer_countries", "list")],
     "runpod": [("cloud_types", "list"), ("country_codes", "list"), ("container_disk_gb", "num"),
-               ("create_observed_price_factor", "num"), ("short_exit_blacklist_seconds", "num")],
+               ("create_observed_price_factor", "num"), ("short_exit_blacklist_seconds", "num"),
+               ("allowed_cuda_versions", "list"), ("hashrate_watch_enabled", "bool")],
     "tensordock": [("excluded_states", "list"), ("storage_gb", "num"), ("vcpu_count", "num"),
                    ("ram_gb", "num"), ("seen_ttl_seconds", "num")],
     "salad": [("organization_name", "str"), ("project_name", "str"), ("include_container_groups", "list"),
@@ -420,6 +425,8 @@ def pool_of_image(image):
         return "pearlfortune"
     if "twpool" in s or "conishc" in s:
         return "twpool"
+    if "kryptex" in s or "krig" in s:
+        return "kryptex"
     return "pearlhash"
 
 
@@ -1342,12 +1349,61 @@ def _pearlfortune_view():
             "pending_balance": round(pending, 6), "credited_total": round(credited, 6),
             "shares": None, "pool_info": pool_info, "hashrate_series": _hr_series_pf(md), "pool_error": None}
 
+# ---------- Kryptex 池(PF miner)----------
+_kryptex = {"data": None, "ts": 0.0}
+KRYPTEX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+
+def kryptex_data(force=False):
+    """Kryptex 账户: 拉活跃 worker + 余额, serve-stale 缓存。Cloudflare 前置, 用浏览器 UA。"""
+    now = time.time()
+    if _kryptex["data"] is not None and not force and (now - _kryptex["ts"] < POOL_STALE_MAX):
+        return _kryptex["data"]
+    addr = prl_address()
+    data = {}
+    if addr:
+        try:
+            out = {}
+            for k, path in (("workers", f"/prl/api/v3/miner/workers/{urllib.parse.quote(addr)}"),
+                            ("balance", f"/prl/api/v1/miner/balance/{urllib.parse.quote(addr)}")):
+                req = urllib.request.Request("https://pool.kryptex.com" + path,
+                    headers={"User-Agent": KRYPTEX_UA, "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    out[k] = json.loads(r.read().decode("utf-8"))
+            data = out
+        except Exception as e:
+            data = {"_error": f"{type(e).__name__}: {e}"}
+    _kryptex["data"] = data
+    _kryptex["ts"] = now
+    return data
+
+def _kryptex_view():
+    """kryptex 视图: {workers, total_hashrate_th, pool_balance, pool_error}。hashrate 单位待真机校准。"""
+    d = kryptex_data()
+    err = d.get("_error") if isinstance(d, dict) else None
+    results = ((d.get("workers") or {}).get("results") or []) if isinstance(d, dict) else []
+    wlist, total = [], 0.0
+    for w in results:
+        wth = hashrate_th(w.get("hashrate"))
+        total += wth
+        wlist.append({"name": w.get("worker"), "th": round(wth, 2), "ip": None, "gpus": []})
+    bal = (d.get("balance") or {}) if isinstance(d, dict) else {}
+    pb = None
+    if bal:
+        try:
+            pb = float(bal.get("confirmed") or 0) + float(bal.get("unconfirmed") or 0)
+        except Exception:
+            pb = None
+    return {"workers": wlist, "total_hashrate_th": round(total, 2),
+            "pool_balance": pb, "pool_paid": None, "pool_error": err}
+
+
 # 池监控适配器注册表(方案 B): pool_id → {fetch, view}。新增矿池只在此登记 + POOLS 即可。
 POOL_MONITORS = {
     "pearlhash":    {"fetch": pool_data,         "view": _pearlhash_view},
     "twpool":       {"fetch": twpool_data,       "view": _twpool_view},
     "herominers":   {"fetch": herominers_data,   "view": _herominers_view},
     "pearlfortune": {"fetch": pearlfortune_data, "view": _pearlfortune_view},
+    "kryptex":      {"fetch": kryptex_data,      "view": _kryptex_view},
 }
 
 def pool_view(which):
@@ -1669,6 +1725,8 @@ def build_full_config():
             "rent_paused": rent_paused(acct),
             "raw": json.dumps(cfg, ensure_ascii=False, indent=2),
             "pool": S.active_pool(cfg),
+            "pool_label": (S.POOLS.get(S.active_pool(cfg)) or {}).get("label") or S.active_pool(cfg),
+            "account": {k: cfg.get(k) for k in ACCOUNT_KEYS},
         }
     return {"common": common, "common_diff": common_diff, "platforms": plats,
             "pools": [{"id": k, "label": v["label"], "image": v["image"], "reads_prl_host": v["reads_prl_host"]}
@@ -1689,6 +1747,13 @@ def save_platform_cfg(acct, patch):
     p = cfg_path(acct)
     cfg = read_json(p, {})
     sub = cfg.get(plat, {}) or {}
+    patch = dict(patch)
+    for k in ACCOUNT_KEYS:      # 账号级顶层键: 写 config 顶层, 不进 cfg[plat]
+        if k in patch:
+            v = patch.pop(k)
+            if v is None or v == "":
+                continue
+            cfg[k] = v
     if "balance_usd" in patch:  # 手填余额变化时自动记录时间, 供看板按消耗递减估算
         try:
             old = sub.get("balance_usd")
@@ -1775,8 +1840,8 @@ def restart_platform(acct):
 
 def do_rent_toggle(acct, paused):
     CONTROL_DIR.mkdir(exist_ok=True)
-    # sniper 按平台名读 control/<平台>.rent-paused, 故暂停是平台级(同平台账号联动)
-    flag = CONTROL_DIR / f"{platform_of(acct)}.rent-paused"
+    # 按账号隔离: sniper 按自身账号名读 control/<账号>.rent-paused(账 1 的账号名即平台名, 与旧文件兼容)
+    flag = CONTROL_DIR / f"{acct}.rent-paused"
     launched = False
     if paused:
         flag.touch()
@@ -1816,55 +1881,7 @@ def do_terminate(acct, mid, group=None):
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-def do_migrate(data):
-    """一键迁移到 target_pool。confirm 必须 == 'MIGRATE'。platform 为账号 id 或 'all'。
-    逐账号: 注入该账号 key → 持久化 pool(save_pool_cfg)→ 调 sniper.migrate_account 实际迁移现有机器。
-    state 传 {}(运行中的监控自管 state, 双池监控保护迁移机器, 避免写 state 竞争)。
-    注: 新抢机器用新池需重启该账号监控才生效(migrate 只改现有机器 + 落盘 pool)。"""
-    import sniper as S
-    if str(data.get("confirm", "")) != "MIGRATE":
-        return {"error": "需输入确认词 MIGRATE"}
-    target = str(data.get("target_pool", "")).strip()
-    if target not in S.POOLS:
-        return {"error": f"未知矿池: {target}"}
-    platform = str(data.get("platform", ""))
-    if platform == "all":
-        accts = list_accounts()
-    elif platform in list_accounts():
-        accts = [platform]
-    else:
-        return {"error": "账号无效"}
-    results = []
-    for acct in accts:
-        try:
-            plat = platform_of(acct)
-            kv = read_env().get(key_var_for(acct), "")
-            std = KEYNAME.get(plat, "")
-            if kv and std:
-                os.environ[std] = kv
-            sp = save_pool_cfg(acct, target)            # 先落盘 pool
-            if isinstance(sp, dict) and sp.get("error"):
-                # 落盘失败则不迁移该账号(避免配置与实际不一致), 但不中断其它账号
-                results.append({"account": acct, "result": {"error": f"落盘 pool 失败: {sp.get('error')}"}})
-                continue
-            # vast 迁移特殊: 镜像创建时烧死, 迁移=销毁重租, 靠监控用新池镜像重租。
-            # 监控只在启动时读 config → 必须先重启监控加载新池, 否则销毁后用旧池镜像重租(白干)。
-            # 重启成功才销毁; 监控没起来则取消(避免销毁后无监控重租导致机器丢失)。runpod/salad 直接换镜像, 无需重启。
-            restarted = False
-            if plat == "vast":
-                rp = restart_platform(acct)
-                if not (isinstance(rp, dict) and rp.get("process_running")):
-                    results.append({"account": acct, "result": {"error": "vast 监控重启失败, 已取消迁移(避免销毁后无监控重租)"}})
-                    continue
-                restarted = True
-            cfg = read_config(acct)
-            r = S.migrate_account(cfg, {}, acct, target, live=True)
-            if isinstance(r, dict):
-                r["monitor_restarted"] = restarted
-        except Exception as e:
-            r = {"error": f"{type(e).__name__}: {e}"}
-        results.append({"account": acct, "result": r})
-    return {"ok": True, "target_pool": target, "accounts": results}
+# 「迁移现有机器到新池」功能已下线(改在跑 pod 镜像不稳); sniper.migrate_account 库函数保留, 切池只影响新租(save_pool_cfg)。
 
 
 # ---------- HTTP ----------
@@ -2005,8 +2022,6 @@ class H(BaseHTTPRequestHandler):
             if plat not in list_accounts():
                 return self._send(400, {"error": "账号无效"})
             return self._send(200, do_terminate(plat, str(data.get("id", "")), str(data.get("group", "")) or None))
-        if path == "/api/migrate":
-            return self._send(200, do_migrate(data))
         if path == "/api/set-pool":
             return self._send(200, save_pool_cfg(str(data.get("platform", "")), data.get("pool")))
         if path == "/api/save-platform":
@@ -2143,6 +2158,14 @@ details{margin-top:13px;border-top:1px solid var(--bd);padding-top:11px}
 summary{cursor:pointer;color:var(--mut);font-size:11.5px;letter-spacing:.4px}
 summary:hover{color:var(--acc)}
 .divider{border:0;border-top:1px solid var(--bd);margin:11px 0}
+.ovtw{overflow-x:auto;margin-top:6px}.ovt{width:100%;border-collapse:collapse;font-size:12.5px}
+.ovt th{text-align:left;color:var(--mut);font-weight:500;font-size:11px;letter-spacing:.3px;padding:6px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
+.ovt td{padding:8px;border-bottom:1px solid var(--bd);vertical-align:middle;white-space:nowrap}
+.ovt td.gpul{white-space:normal;min-width:200px;line-height:1.6}.ovt tr:last-child td{border-bottom:0}
+.ovt a{color:var(--acc);text-decoration:none;font-weight:600}.ovt .pill{margin-right:4px}
+details details{border-top:0;margin-top:10px;padding-top:0}details .grid2{margin-top:10px}
+.ckrow{display:flex;align-items:center;gap:10px;min-height:34px}.ckrow input{margin:0;width:16px;height:16px;flex:0 0 auto}.ckrow .hint{margin:0}
+.stepn{display:inline-block;min-width:18px;height:18px;line-height:18px;text-align:center;border-radius:2px;background:var(--acc);color:#fff;font-size:11px;font-weight:600;margin-right:6px}
 .toast{position:fixed;bottom:22px;right:22px;background:var(--card);border:1px solid var(--g2);color:var(--acc);padding:12px 17px;border-radius:11px;font-size:12px;z-index:30;display:none;box-shadow:0 18px 50px -20px rgba(63,224,197,.4)}
 /* ===== Pearl Login v2 · 纯海洋浪花 + 玻璃拟态 ===== */
 #login{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:48px 32px;overflow:hidden;font-family:'IBM Plex Sans',"Noto Sans SC",system-ui,-apple-system,"PingFang SC",sans-serif;color:#1d2c3a;-webkit-font-smoothing:antialiased;--lblue:#2f6fe4;--lteal:#34b6a0;--lcyan:#56d4d8}
@@ -2383,7 +2406,7 @@ th{font-family:'IBM Plex Sans','Noto Sans SC',sans-serif;text-transform:none;let
 <div class="ni on" data-nav=ov onclick="nav('ov')">仪表盘</div>
 <div class="ni" data-nav=lk onclick="nav('lk')">工具集</div>
 <div class="nigrp adm">配置工作台</div>
-<div class="ni sub adm" data-nav=cf:common onclick="nav('cf:common')">全局配置</div>
+<div class="ni sub adm" data-nav=cf:common onclick="nav('cf:common')">配置总览</div>
 <div id=cfaccts></div>
 <div class="nigrp">文档</div>
 <div class="ni sub" data-nav=doc:guide onclick="nav('doc:guide')">工具说明</div>
@@ -2437,7 +2460,7 @@ let phUrl='https://pearlhash.xyz/account/'+encodeURIComponent(d.wallet);
 let twUrl='https://tw-pool.com/workers/'+encodeURIComponent(d.wallet);
 let pvk=d.pool_view||'merged';
 let PL={};(d.pools||[]).forEach(o=>PL[o.id]=o.label);
-let POOL_URL={pearlhash:phUrl, twpool:twUrl, herominers:'https://pearl.herominers.com/', pearlfortune:'https://pearlfortune.org/#miner='+encodeURIComponent(d.wallet||'')};
+let POOL_URL={pearlhash:phUrl, twpool:twUrl, herominers:'https://pearl.herominers.com/', pearlfortune:'https://pearlfortune.org/#miner='+encodeURIComponent(d.wallet||''), kryptex:'https://pool.kryptex.com/zh-cn/prl/miner/stats/'+encodeURIComponent(d.wallet||'')+'?source=search'};
 let poolLinks=(pvk=='merged'?(d.pools||[]).map(o=>o.id):[pvk]).filter(id=>POOL_URL[id]).map(id=>`<div class=go title="在 ${esc(PL[id]||id)} 打开本钱包地址的矿池面板(算力/收益, 新标签)" onclick="window.open('${POOL_URL[id]}','_blank')">${esc(PL[id]||id)} →</div>`).join('');
 let pe=d.pool_error?`<div class=muted style="color:var(--warn);margin-top:10px">POOL_API: ${esc(d.pool_error)}</div>`:'';
 let bp=Object.entries(d.running_by_platform).map(([k,v])=>`${k} ${v}`).join('  ·  ');
@@ -2658,65 +2681,82 @@ async function renderConfigTab(){let d;try{d=await api('/api/full-config')}catch
 let nv=Object.keys(d.platforms).map(a=>`<div class="ni sub adm${subtab==a?' on':''}" data-nav=cf:${a} onclick="nav('cf:${a}')">${esc(d.platforms[a].label||a)}</div>`).join('');
 let ce=document.getElementById('cfaccts');if(ce)ce.innerHTML=nv;
 document.getElementById('cf').innerHTML=subtab=='common'?commonHtml(d):platformHtml(d.platforms[subtab],subtab);}
-function commonHtml(d){let c=d.common;let diff=d.common_diff||{};
+function commonHtml(d){let c=d.common;let diff=d.common_diff||{};let P=d.platforms||{};let n=Object.keys(P).length;
 let cf=(k,label,req,ph)=>{let w='';
 if(diff[k]){let dv=Object.entries(diff[k]).map(([p,v])=>p+'='+(v==null||v===''?'∅':v)).join('   |   ');
-w=` <span class=cdiff title="${esc(dv)}">⚠ 各平台当前不一致, 保存将统一覆盖</span>`;}
+w=` <span class=cdiff title="${esc(dv)}">⚠ 各账号当前不一致, 保存将统一覆盖</span>`;}
 return `<div class=fld>${label}${req?' <span class=req>必填</span>':''}${w}</div><input id="cm_${k}" value="${esc(c[k]==null?'':c[k])}" placeholder="${ph||''}">`;};
-return `<div class=lbl>全局配置 · COMMON</div>
-<div class=row style="margin-bottom:10px;gap:8px;align-items:center"><button class=b-warn onclick="migrateAll()">⇄ 一键全部账号迁移到</button>
-<select id=migrateAllPool>${(d.pools||[]).map(o=>`<option value="${esc(o.id)}">${esc(o.label)}</option>`).join('')}</select></div>
-<div class=platbox><div class=top><b>COMMON</b><span class=muted>当前值取自 vast · 保存会写入全部 4 个 config(覆盖各平台同名字段)</span></div>
+let rows=Object.entries(P).map(([a,v])=>{let ac=v.account||{};
+let st=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?'<span class="pill warn">RENT PAUSED</span>':'')+(v.key_set?'':'<span class="pill bad">KEY 未设置</span>')+(v.enabled?'':'<span class="pill mut">未启用</span>');
+let gp=(v.gpus||[]).map(g=>esc(g.gpu||'')+(g.max_price!=null?' ≤$'+g.max_price:'')+(g.min_hashrate!=null?' ≥'+g.min_hashrate+'TH':'')).join('<span class=muted> / </span>')||'—';
+let w=ac.prl_address||'';let ws=w?(w.slice(0,8)+'…'+w.slice(-4)):'∅';
+let warn=(c.prl_address&&w!==c.prl_address)?' <span class=cdiff title="与全局钱包不一致, 请检查">⚠</span>':'';
+let lim=(ac.max_active_instances==null?'—':ac.max_active_instances)+' 台 · $'+(ac.max_total_hourly_usd==null?'—':ac.max_total_hourly_usd)+'/h';
+return `<tr><td><a href=# onclick="nav('cf:${esc(a)}');return false">${esc(v.label||a)}</a></td><td>${st}</td><td>${esc(v.pool_label||v.pool||'')}</td><td>${lim}</td><td class=gpul>${gp}</td><td title="${esc(w)}"><code style="font-size:11px">${esc(ws)}</code>${warn}</td></tr>`;}).join('');
+let sumH=Object.values(P).reduce((t,v)=>t+(parseFloat((v.account||{}).max_total_hourly_usd)||0),0);
+return `<div class=lbl>配置总览</div>
+<div class=platbox><div class=top><b>各账号配置一览</b><span class=muted>点账号名进入编辑 · 最坏每小时花费 = 各账号时租上限之和 ≈ $${sumH.toFixed(2)}/h</span></div>
+<div class=ovtw><table class=ovt><thead><tr><th>账号</th><th>状态</th><th>矿池</th><th>最多同时租 · 时租上限</th><th>GPU 档 (型号 ≤最高出价 ≥最低算力)</th><th>钱包</th></tr></thead><tbody>${rows||'<tr><td colspan=6 class=muted>还没有账号 config: 复制 configs/config.<平台>.example.json 为 config.<平台>.json 后刷新</td></tr>'}</tbody></table></div></div>
+<div class=platbox><div class=top><b>全局 · 钱包与告警</b><span class=muted>保存会写入全部 ${n} 个账号 config(其余参数在各账号页单独设置)</span></div>
 <div class=grid2>
 ${cf('prl_address','钱包地址 prl_address',1,'你的 $pearl 钱包, 否则挖给别人')}
-${cf('prl_host','矿池 prl_host <span class=muted style="font-size:11px;font-weight:400">· 仅 PearlHash 读, TW Pool 不读</span>',0,'pool.pearlhash.xyz:9000')}
-${cf('worker_prefix','worker 前缀',0,'auto')}
-${cf('image','矿机镜像 image <span class=muted style="font-size:11px;font-weight:400">· 仅未选矿池时兜底</span>',0,'docker.io/kuzigmgm/pearl-miner:v11')}
-${cf('max_active_instances','最多同时租 (台)',0,'1')}
-${cf('max_total_hourly_usd','总时租上限 ($/h)',0,'1.0')}
 ${cf('alert_url','告警 URL (可空)',0,'ntfy 等')}
 </div>
-<div class=lbl style=margin-top:14px>矿池参考 <span class=muted style="font-size:11px;font-weight:400">· 镜像由所选矿池自动决定, 切池/迁移无需改上面的 image/prl_host</span></div>
-<div style="font-size:12px;color:var(--mut);line-height:1.9">
-${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="font-size:11px">${esc(o.image||'')}</code> · ${o.reads_prl_host?'读 PRL_HOST(连上方 prl_host)':'不读 host(池写死在镜像内)'}</div>`).join('')}
-</div>
 <div class=row style=margin-top:12px><button class=b-acc onclick=saveCommon()>保存全局配置</button>
-<span class=hint>保存后各平台需「重启应用」生效</span></div></div>
+<span class=hint>保存后各账号需「重启应用」生效</span></div>
+<div class=lbl style=margin-top:14px>矿池参考 <span class=muted style="font-size:11px;font-weight:400">· 镜像由各账号所选矿池自动决定, 无需手填 image</span></div>
+<div style="font-size:12px;color:var(--mut);line-height:1.9">
+${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="font-size:11px">${esc(o.image||'')}</code> · ${o.reads_prl_host?'读 PRL_HOST(账号 config 的 prl_host)':'不读 host(池写死在镜像内)'}</div>`).join('')}
+</div></div>
 <div class=platbox><div class=top><b>账户 · 看板登录</b></div>
 <div class=grid2>
 <div class=fld>用户名</div><input value="admin" disabled>
 <div class=fld>新密码</div><input id=newpw type=password placeholder="至少 4 位">
 </div><div class=row style=margin-top:12px><button class=b-acc onclick=savePw()>更新密码</button>
 <span class=hint>立即生效, 下次登录用新密码</span></div></div>`;}
-function platformHtml(v,p){
+function platformHtml(v,p){let ac=v.account||{};
 let proc=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?'<span class="pill warn">RENT PAUSED</span>':'');
 let key=v.key_set?`<span class="pill ok">已设置 ${esc(v.key_mask)}</span>`:'<span class="pill bad">未设置</span>';
 let gpus=(v.gpus||[]).map((g,i)=>gpuRowHtml(p,i,g)).join('');
 let spec=(v.specific||[]).map(s=>specHtml(p,s)).join('');
 let rentBtn=v.rent_paused?`<button class=b-acc onclick="toggle('${p}',false)">▶ 启动租用</button>`:`<button class=b-warn onclick="toggle('${p}',true)">⏸ 暂停租用</button>`;
-return `<div class=lbl>${esc(v.label||p)} · 平台配置</div>
+let av=k=>esc(ac[k]==null?'':ac[k]);let N=n=>`<span class=stepn>${n}</span>`;
+return `<div class=lbl>${esc(v.label||p)} · 账号配置</div>
 <div class=platbox id=box_${p}><div class=top><b>${esc(v.label||p)}</b>${proc}</div>
+<div class=lbl style=margin-top:2px>基础设置 <span class=muted style="font-size:11px;font-weight:400">· 从上到下填完 → 保存配置 → 重启应用</span></div>
+<div class=fld style=margin-bottom:6px>${N(1)}API KEY · <b>${esc(v.key_name)}</b> ${key} <span class=req>必填</span></div>
+<div class=row><input id="k_${p}" type=password placeholder="粘贴 ${esc(v.key_name)}, 点存 KEY 立即写入 .env"><button onclick="savekey('${p}')">存 KEY</button></div>
+<div class=hint style="margin:4px 0 10px">没设 key 的账号 start-all 会直接跳过, 不会抢租</div>
 <div class=grid2>
-<div class=fld>启用 enabled</div><div><input type=checkbox id="en_${p}" ${v.enabled?'checked':''}></div>
-${v.has_create?`<div class=fld>自动建机 create_enabled</div><div><input type=checkbox id="ce_${p}" ${v.create_enabled?'checked':''}></div>`:''}
-<div class=fld>新抢矿池 pool</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}</option>`).join('')}</select> <button class=b-warn onclick="migrateAcct('${esc(p)}')">⇄ 迁移现有机器到所选池</button></div>
+<div class=fld>${N(2)}启用本账号</div><label class=ckrow><input type=checkbox id="en_${p}" ${v.enabled?'checked':''}><span class=hint>关掉则不扫描不租用</span></label>
+${v.has_create?`<div class=fld>自动建机</div><label class=ckrow><input type=checkbox id="ce_${p}" ${v.create_enabled?'checked':''}><span class=hint>价格达标自动下单; 关掉只观察不租</span></label>`:''}
+<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}</option>`).join('')}</select> <span class=hint>只影响之后新租的机器, 镜像随矿池自动决定</span></div>
+<div class=fld>${N(4)}最多同时租 (台)</div><input id="ac_${p}_max_active_instances" value="${av('max_active_instances')}" placeholder="1">
+<div class=fld>总时租上限 ($/h)</div><input id="ac_${p}_max_total_hourly_usd" value="${av('max_total_hourly_usd')}" placeholder="1.0">
 </div>
-<div class=lbl style=margin-top:14px>GPU 型号 · 最高 $/h · 最低 TH/s</div>
-<div class=gpurow style=color:var(--mut);font-size:11px><div>GPU</div><div>最高 $/h</div><div>最低 TH/s</div><div></div></div>
+<div class=hint style=margin-top:4px>本账号在租机器的总时租不会超过上限; 所有账号上限之和 = 最坏每小时花费</div>
+<div class=lbl style=margin-top:14px>${N(5)}GPU 档 <span class=muted style="font-size:11px;font-weight:400">· 型号 / 最高出价 $/h / 最低算力 TH/s</span></div>
+<div class=gpurow style=color:var(--mut);font-size:11px><div>GPU 型号</div><div>最高出价 $/h</div><div>最低算力 TH/s</div><div></div></div>
 <div id="gpus_${p}">${gpus}</div>
 <button onclick="addGpu('${p}')" style=margin-top:4px>+ 增加 GPU</button>
-${spec?`<div class=lbl style=margin-top:16px>平台特定参数</div><div class=grid2>${spec}</div>`:''}
-<hr class=divider>
-<div class=fld style=margin-bottom:6px>API KEY · <b>${esc(v.key_name)}</b> ${key} <span class=req>必填</span></div>
-<div class=row><input id="k_${p}" type=password placeholder="填入/更新 ${esc(v.key_name)}"><button onclick="savekey('${p}')">存 KEY</button></div>
+<div class=hint style=margin-top:4px>报价低于最高出价才租; 实测算力持续低于最低算力会自动回收换机</div>
 <div class=row style=margin-top:14px>
 <button class=b-acc onclick="savePlat('${p}')">保存配置</button>
 <button onclick="restart('${p}')">重启应用</button>
 ${rentBtn}
 <span class=hint>保存后点「重启应用」才生效</span></div>
-<details><summary>高级 · raw JSON (config.${p}.json 全文)</summary>
+<details><summary>高级设置 · worker 前缀 / 轮询 / 性价比门槛 / 平台特定参数 / raw JSON(默认值通常无需改)</summary>
+<div class=grid2>
+<div class=fld>worker 前缀 <span class=muted>worker_prefix</span></div><input id="ac_${p}_worker_prefix" value="${av('worker_prefix')}" placeholder="auto">
+<div class=fld>轮询间隔 (秒) <span class=muted>poll_seconds</span></div><input id="ac_${p}_poll_seconds" value="${av('poll_seconds')}" placeholder="20">
+<div class=fld>最低性价比 TH/s per $/h <span class=muted>min_th_per_usd_hour</span></div><input id="mt_${p}" value="${esc(v.min_th_per_usd_hour==null?'':v.min_th_per_usd_hour)}" placeholder="334">
+</div>
+${spec?`<div class=lbl style=margin-top:14px>平台特定参数</div><div class=grid2>${spec}</div>`:''}
+<div class=hint style=margin-top:8px>改完同样点上方「保存配置」→「重启应用」</div>
+<details><summary>raw JSON (config.${p}.json 全文)</summary>
 <textarea id="raw_${p}">${esc(v.raw)}</textarea>
 <div class=row style=margin-top:8px><button class=b-acc onclick="saveRaw('${p}')">保存 raw JSON</button><span class=hint>整体覆盖该文件, 写前自动 .bak</span></div></details>
+</details>
 <hr class=divider>
 <div class=row><button onclick="loadLog('${p}')">📜 查看后台日志</button>
 <select id="loglines_${p}" onchange="loadLog('${p}')"><option value=100>最近 100 行</option><option value=300 selected>最近 300 行</option><option value=500>最近 500 行</option></select>
@@ -2731,58 +2771,20 @@ function setPoolView(v){localStorage.setItem('pool_view',v);renderOverview();}
 async function loadLog(p){let n=document.getElementById('loglines_'+p).value;let pre=document.getElementById('log_'+p);
 pre.style.display='';pre.textContent='加载中…';
 try{let r=await api('/api/logs?platform='+p+'&lines='+n);pre.textContent=r.log||'(空)';pre.scrollTop=pre.scrollHeight;}catch(e){pre.textContent='加载失败';}}
-async function _migrateConfirm(label,target,cntText){
-  let word=prompt('【一键迁移】将把 '+label+' 迁移到矿池 ['+target+']。\n'+cntText+'\n迁移期间这些机器会停机重启几分钟(runpod 原地换镜像/vast 销毁重租/salad 重建)。\n\n输入 MIGRATE 确认:');
-  return word==='MIGRATE';
-}
-async function _countAffected(aid){
-  try{
-    let rt=await api('/api/rentals');
-    let total=0,lines=[];
-    Object.entries(rt||{}).forEach(([acct,v])=>{
-      if(aid!=='all'&&acct!==aid)return;
-      let n=(v.machines||[]).length||0;total+=n;
-      if(n)lines.push(acct+': '+n+' 台');
-    });
-    return total?('受影响约 '+total+' 台 ('+lines.join(', ')+')'):'当前无在租机器(只切换配置)';
-  }catch(e){return '(获取在租信息失败, 请谨慎确认)';}
-}
-async function migrateAcct(aid){
-  let sel=document.getElementById('pool_'+aid);if(!sel){toast('找不到矿池选择');return;}
-  let target=sel.value;
-  let cnt=await _countAffected(aid);
-  if(!await _migrateConfirm(aid,target,cnt)){toast('已取消(确认词不符)');return;}
-  toast('迁移中…(请稍候)');
-  let r;try{r=await api('/api/migrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:aid,target_pool:target,confirm:'MIGRATE'})});}catch(e){toast('迁移请求失败');return;}
-  _migrateToast(r);renderConfigTab();
-}
-async function migrateAll(){
-  let pools=(CFG&&CFG.pools)||[];
-  let sel=document.getElementById('migrateAllPool');
-  let target=sel?sel.value:'';
-  if(!target||!pools.some(o=>o.id===target)){toast('请选择目标矿池');return;}
-  let cnt=await _countAffected('all');
-  if(!await _migrateConfirm('全部账号',target,cnt)){toast('已取消(确认词不符)');return;}
-  toast('全部迁移中…(请稍候)');
-  let r;try{r=await api('/api/migrate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:'all',target_pool:target,confirm:'MIGRATE'})});}catch(e){toast('迁移请求失败');return;}
-  _migrateToast(r);renderConfigTab();
-}
-function _migrateToast(r){
-  if(!r||!r.ok){toast('迁移失败: '+((r&&r.error)||'未知'));return;}
-  let parts=(r.accounts||[]).map(a=>{let res=a.result||{};if(res.error)return a.account+': 错误';let sm=res.summary||{};let ok=(sm.runpod||0)+(sm.vast||0)+(sm.salad||0);let f=sm.failed||0;return a.account+': '+ok+'台'+(f?(' / '+f+'失败'):'');});
-  toast('迁移完成 → '+r.target_pool+': '+parts.join(' | ')+'。重启对应监控后新抢才用新池。');
-}
-
 function gpuRowHtml(p,i,g){return `<div class=gpurow data-gpu>
 <input value="${esc(g.gpu||'')}" placeholder="RTX 4090" data-f=gpu>
 <input value="${esc(g.max_price==null?'':g.max_price)}" placeholder="0.4" data-f=price>
 <input value="${esc(g.min_hashrate==null?'':g.min_hashrate)}" placeholder="220" data-f=hash>
 <button class=b-bad onclick="this.parentNode.remove()">×</button></div>`;}
 function addGpu(p){document.getElementById('gpus_'+p).insertAdjacentHTML('beforeend',gpuRowHtml(p,0,{}));}
-function specHtml(p,s){let id=`sp_${p}_${s.key}`;
-if(s.type=='bool')return `<div class=fld>${s.key}</div><div><input type=checkbox id="${id}" ${s.value?'checked':''}></div>`;
+const SPEC_LABELS={max_offer_price_usd:'最高报价 $/h (粗筛)',min_offer_price_usd:'最低报价 $/h (滤异常低价)',min_reliability:'最低可靠度 0-1',disk_gb:'磁盘 GB',prefer_countries:'优先国家',
+cloud_types:'云类型 COMMUNITY/SECURE',country_codes:'国家代码',container_disk_gb:'容器磁盘 GB',create_observed_price_factor:'观测价保守系数 (1=按观测价)',short_exit_blacklist_seconds:'短命退出拉黑秒数',allowed_cuda_versions:'允许宿主 CUDA 版本 (空=不限; CUDA 原生矿机需 13.0)',hashrate_watch_enabled:'零算力监控回收',
+excluded_states:'排除州/地区',storage_gb:'存储 GB',vcpu_count:'vCPU 数',ram_gb:'内存 GB',seen_ttl_seconds:'已看过 offer 记忆秒数',
+organization_name:'组织名',project_name:'项目名',include_container_groups:'纳入的容器组',default_min_hashrate_th:'默认最低算力 TH/s',per_model_threshold_enabled:'按型号门槛',treat_missing_log_as_zero:'无日志视为 0 算力',low_efficiency_stop_seconds:'低效持续秒数后回收',reallocate_cooldown_seconds:'重分配冷却秒数',hashrate_watch_interval_seconds:'算力检查间隔秒',log_lookback_seconds:'日志回看秒数',missing_worker_as_zero:'矿池无 worker 视为 0',alphapool_worker_api_enabled:'AlphaPool worker API',alphapool_reallocate_enabled:'AlphaPool 自动重分配',balance_usd:'手填余额 $'};
+function specHtml(p,s){let id=`sp_${p}_${s.key}`;let lb=(SPEC_LABELS[s.key]||s.key)+` <span class=muted>${s.key}</span>`;
+if(s.type=='bool')return `<div class=fld>${lb}</div><div><input type=checkbox id="${id}" ${s.value?'checked':''}></div>`;
 let val=Array.isArray(s.value)?s.value.join(', '):(s.value==null?'':s.value);
-return `<div class=fld>${s.key}${s.type=='list'?' (逗号分隔)':''}</div><input id="${id}" value="${esc(val)}">`;}
+return `<div class=fld>${lb}${s.type=='list'?' <span class=muted>(逗号分隔)</span>':''}</div><input id="${id}" value="${esc(val)}">`;}
 
 function collectGpus(p){let rows=document.querySelectorAll('#gpus_'+p+' [data-gpu]');let th={},mh={};
 rows.forEach(r=>{let gpu=r.querySelector('[data-f=gpu]').value.trim();if(!gpu)return;
@@ -2794,6 +2796,12 @@ return {thresholds:th,min_hashrate_th:mh};}
 async function savePlat(p){const v=CFG.platforms[p];let patch={enabled:document.getElementById('en_'+p).checked};
 if(v.has_create)patch.create_enabled=document.getElementById('ce_'+p).checked;
 let g=collectGpus(p);patch.thresholds=g.thresholds;patch.min_hashrate_th=g.min_hashrate_th;
+let gv=id=>{let el=document.getElementById(id);return el?el.value.trim():'';};
+let mai=parseInt(gv('ac_'+p+'_max_active_instances'));if(!isNaN(mai))patch.max_active_instances=mai;
+let mth=parseFloat(gv('ac_'+p+'_max_total_hourly_usd'));if(!isNaN(mth))patch.max_total_hourly_usd=mth;
+let wp=gv('ac_'+p+'_worker_prefix');if(wp)patch.worker_prefix=wp;
+let ps=parseInt(gv('ac_'+p+'_poll_seconds'));if(!isNaN(ps))patch.poll_seconds=ps;
+let mt=parseFloat(gv('mt_'+p));if(!isNaN(mt))patch.min_th_per_usd_hour=mt;
 (v.specific||[]).forEach(s=>{let el=document.getElementById('sp_'+p+'_'+s.key);if(!el)return;
 if(s.type=='bool')patch[s.key]=el.checked;
 else if(s.type=='num'){let n=parseFloat(el.value);if(!isNaN(n))patch[s.key]=n;}
@@ -2801,17 +2809,17 @@ else if(s.type=='list')patch[s.key]=el.value.split(',').map(x=>x.trim()).filter(
 else patch[s.key]=el.value;});
 let r=await api('/api/save-platform',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:p,data:patch})});
 toast(r.error?('保存失败: '+r.error):p+' 配置已保存, 点重启生效');}
-async function saveCommon(){let data={};['prl_address','prl_host','worker_prefix','image','alert_url'].forEach(k=>{let el=document.getElementById('cm_'+k);if(el)data[k]=el.value.trim();});
-['max_active_instances','max_total_hourly_usd'].forEach(k=>{let n=parseFloat(document.getElementById('cm_'+k).value);if(!isNaN(n))data[k]=n;});
+async function saveCommon(){let data={};['prl_address','alert_url'].forEach(k=>{let el=document.getElementById('cm_'+k);if(el)data[k]=el.value.trim();});
+if(!data.prl_address){toast('钱包地址必填');return;}
 // P2-E: 若有字段当前各平台不一致, 覆盖前确认
 let diff=(CFG&&CFG.common_diff)||{};let clash=Object.keys(data).filter(k=>diff[k]);
 if(clash.length){let detail=clash.map(k=>{
 let perp=Object.entries(diff[k]).map(([p,v])=>'    '+p+': '+(v==null||v===''?'(空)':v)).join('\n');
 let nv=(data[k]===''||data[k]==null)?'(空)':data[k];
-return '• '+k+'  → 4 平台统一为: '+nv+'\n'+perp;}).join('\n\n');
-if(!confirm('以下字段当前各平台不一致，保存全局配置会把 4 个平台覆盖成同一值:\n\n'+detail+'\n\n确定覆盖？')) return;}
+return '• '+k+'  → 全部账号统一为: '+nv+'\n'+perp;}).join('\n\n');
+if(!confirm('以下字段当前各账号不一致，保存全局配置会把全部账号覆盖成同一值:\n\n'+detail+'\n\n确定覆盖？')) return;}
 let r=await api('/api/save-common',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:data})});
-toast(r.error?('失败: '+r.error):'全局配置已写入全部 config, 各平台点重启生效');}
+toast(r.error?('失败: '+r.error):'全局配置已写入全部账号 config, 各账号点重启生效');}
 async function saveRaw(p){let raw=document.getElementById('raw_'+p).value;
 let r=await api('/api/save-raw',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:p,json:raw})});
 toast(r.error?('JSON 拒绝: '+r.error):p+' raw 已保存, 点重启生效');}
@@ -2886,7 +2894,7 @@ function docGuide(){return `<div class=doc>
 <li><b>仪表盘</b> —— 钱包地址、在跑机器数、总算力(矿池实测)、累计租金、累计产出(PRL+折合USD)、累计折合利润;可改币价、重置统计、按平台暂停租用 / 关闭单台。</li>
 <li><b>工具集</b> —— 官网 / 浏览器 / 钱包 / 矿池 / 租卡平台 / 交易平台 / 计算器 的快捷入口。<span class=jump onclick="nav('lk')">→ 打开</span></li>
 <li><b>文档</b> —— 本说明 + 挖珠教程。<span class=jump onclick="nav('doc:tutorial')">→ 挖珠教程</span></li>
-<li><b>配置工作台</b>(仅管理员)—— 全局配置 + 各平台配置,见下。</li>
+<li><b>配置工作台</b>(仅管理员)—— 配置总览(钱包/告警 + 各账号一览)+ 各账号配置(基础 / 高级),见下。</li>
 </ul></div>
 <div class=lcard><h3>🔧 关键参数(配置工作台)</h3>
 <ul>
@@ -2917,8 +2925,8 @@ function docTutorial(){return `<div class=doc>
 <div class=tip>💡 新手建议:先从 1 个平台、小预算试跑,跑通了再加平台、加预算。</div></div>
 <div class=lcard><h3><span class=step>c</span>配置参数,启动 miner</h3>
 <ul>
-<li>回到本面板 → <b>全局配置</b>(需管理员登录):填第 a 步的<b>钱包地址</b>;设<b>总时租上限</b>、<b>最大在跑数</b>控制预算;确认矿机镜像、矿池地址。</li>
-<li>到 <b>各平台配置</b> 填对应 <b>API Key</b>、出价上限、GPU 档筛选。</li>
+<li>回到本面板 → <b>配置总览</b>(需管理员登录):填第 a 步的<b>钱包地址</b>(写入全部账号), 告警 URL 可留空。</li>
+<li>到左栏对应<b>账号配置</b>页, 按「基础设置」从上到下: ① 粘贴 <b>API Key</b> → ② 勾选启用 → ③ 选矿池(默认 PearlHash) → ④ 设<b>最多同时租</b>与<b>总时租上限</b>控制预算 → ⑤ 填 GPU 档(型号 / 最高出价 / 最低算力) → <b>保存配置</b> → <b>重启应用</b>。其余参数在「高级设置」里, 默认值通常无需改。</li>
 <li>各平台点 <b>重启</b> 生效。之后 sniper 自动租卡、起矿机挖 PRL,<b>仪表盘</b>开始出算力和累计产出。</li>
 <li>每个参数啥意思?见 <span class=jump onclick="nav('doc:guide')">工具说明</span>。</li>
 </ul></div>

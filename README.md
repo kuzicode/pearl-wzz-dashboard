@@ -15,7 +15,7 @@
 - **行情图表**:总览内嵌可折叠 **PRL/USDT K 线图**(Candlestick + EMA20/EMA60 + 成交量,周期 15m/1h/4h/1d,hover tooltip);实时币价自动从 SafeTrade 拉取,看板顶部显示「● 实时」。
 - **Salad 真实 GPU/余额**:通过浏览器会话从 Salad portal 抓每台**真实单卡型号、单价、实时余额**(Salad 公共 API 不返回 GPU,portal 是唯一来源;一次性登录后 headless 静默续期)。**scid 缺失/过期时自动弹窗引导重登**(检测到连续抓空 → 弹有头浏览器,你过完 Turnstile/OTP 自动续上,无需手动重跑脚本;无 GUI 环境则降级为提示)。
 - **逐实例低效治理**:salad 按**矿池权威算力逐实例**判定,某台低于其卡型号阈值并持续超时即自动 reallocate 换机(弹性多卡组按实例真实 GPU 取对应阈值)。
-- **配置**:左侧栏「公共配置」+ **按账号**列出(可分别改每个账号)——网页直接改 **API key、钱包、GPU 型号与价格/算力门槛、各项参数**(结构化表单 + 高级 raw JSON),**暂停/启动租用**,**重启应用**,以及**修改看板登录密码**。
+- **配置**:左侧栏「配置总览」(钱包/告警 + 各账号一览:状态 / 矿池 / 上限 / GPU 档 / 钱包)+ **按账号**列出——账号页分「**基础设置**」(① API key → ② 启用 → ③ 矿池 → ④ 最多同时租 / 时租上限 → ⑤ GPU 型号与价格/算力门槛,从上到下填完即可跑)与「**高级设置**」(worker 前缀 / 轮询 / 平台特定参数 / raw JSON,默认值通常无需改),**暂停/启动租用**,**重启应用**,以及**修改看板登录密码**。
 - **多账号**:同一平台可配多个账号(如 2 个 Salad + 2 个 RunPod),各自独立监控/抢卡(见下「多账号」章节)。
 - core 纯 Python 标准库(Salad GPU/余额功能需 **Playwright**,项目用 **uv** 管理);密码门保护。
 
@@ -55,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File scripts\stop-all.ps1
 #    登录 admin / 你设的 DASHBOARD_PASSWORD
 ```
 
-> 钱包、key、密码、GPU 门槛等都能在看板**配置页**里改;改完点「重启应用」生效。
+> 钱包、key、密码、GPU 门槛等都能在看板**配置页**里改:「配置总览」填钱包 → 各账号页按「基础设置」①→⑤ 填完 → 保存 → 「重启应用」生效。
 > 看板里还能**查看各平台后台日志**、暂停/启动租用、一键关闭某台机器。
 
 ---
@@ -99,7 +99,7 @@ bash scripts/stop-all.sh && bash scripts/start-all.sh        # 重启, 看板自
 
 - 看板在 `服务器:端口` 上、能填 key + 启停真实租机,**唯一防线是密码——务必改掉 `.env` 里默认的 `DASHBOARD_PASSWORD=123456`**。
 - `.gitignore` 已保护 `.env`(含 key + 看板密码)/ `keys/` / 真实 `config.*.json`(含钱包)/ `state.*.json` / `logs/` / `docs/`,不会被提交。
-- 实际挖矿用矿机镜像(`kuzigmgm/pearl-miner:v12-wildrig`,基于 PearlHash 官方推荐的 **WildRig Multi**;在 PearlHash 池 0% 抽水),使用即信任该来源与 PearlHash 项目。
+- 实际挖矿用矿机镜像(`kuzigmgm/pearl-miner:v13-wildrig`,基于 PearlHash 官方推荐的 **WildRig Multi**;在 PearlHash 池 0% 抽水),使用即信任该来源与 PearlHash 项目。
 - **访客预览模式**:非管理员进入看板仅见演示占位页,实时数据(钱包/算力/收益/在跑机器)前后端均不下发,需部署自己的看板并登录管理员才可见——公开域名部署时保护隐私。
 
 ---

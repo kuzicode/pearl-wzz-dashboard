@@ -2,6 +2,35 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [配置页产品化: 配置总览 + 基础/高级分层 + 迁移下线] — 2026-09-20
+
+### Changed — 变更
+- **「全局配置」→「配置总览」**:全局只保留真正共享的 **钱包地址 + 告警 URL**(`COMMON_KEYS`);新增各账号一览表(状态 / 矿池 / 最多同时租·时租上限 / GPU 档一行 / 钱包,点账号名进入编辑),并显示各账号时租上限之和(最坏每小时花费)。
+- **账号配置页分层**:「基础设置」按上手顺序 ① API KEY → ② 启用/自动建机 → ③ 新抢矿池 → ④ 最多同时租 / 总时租上限(账号级,写 config 顶层 `ACCOUNT_KEYS`)→ ⑤ GPU 档(型号 / 最高出价 / 最低算力)→ 保存 → 重启;其余(worker 前缀 / 轮询 / 最低性价比 `min_th_per_usd_hour` / 平台特定参数 / raw JSON)收进「高级设置」折叠。平台特定参数补中文说明(`SPEC_LABELS`),runpod 增 `allowed_cuda_versions`、`hashrate_watch_enabled`。
+- 文档教程步骤同步(配置总览填钱包 → 账号页 ①→⑤)。
+
+### Removed — 移除
+- **矿池迁移功能下线**:全局「一键全部账号迁移」与各账号「迁移现有机器到所选池」按钮、`/api/migrate` 接口、`do_migrate` 全部移除(改在跑 pod 镜像不稳)。各账号「新抢矿池」下拉保留,只影响新租机器。
+
+## [WildRig 镜像 v13-wildrig: 修 RunPod 崩溃循环 + 设为默认] — 2026-09-20
+
+### Fixed — 修复
+- **v12-wildrig 在部分 RunPod 宿主崩溃循环**(`Failed to find devices`):entrypoint 无条件传 `--opencl-platforms nvidia`,宿主平台名不匹配时过滤为空。v13 默认**不传**平台过滤(`PRL_OPENCL_PLATFORMS` 非空才传);启动打印 OpenCL ICD / 库 / nvidia-smi 诊断;wildrig 退出后 10s→60s 退避重试、容器不退出。
+- PearlHash 池默认镜像与 4 个 config 的 `image` → `docker.io/kuzigmgm/pearl-miner:v13-wildrig`(新租生效,在跑机器不动)。
+
+## [Kryptex 池接入 + RunPod 第二账号 + CUDA 版本过滤] — 2026-09-20
+
+### Added — 新增
+- **Kryptex 矿池**:`POOLS["kryptex"]`(KRig 1.5.1 镜像 `kuzigmgm/pearl-miner:krig-1.5.1`,stratum+ssl://prl.kryptex.network:8048)+ sniper 回收适配器 `kryptex_worker_hashrates`(`/prl/api/v3/miner/workers/{addr}`)+ 看板 `POOL_MONITORS["kryptex"]`(workers / balance);`pool_of_image` 识别 kryptex 镜像;池面板链接直接带钱包地址跳到 Kryptex 个人 stats 页。Kryptex API 走 Cloudflare,请求需带浏览器 UA。
+- **RunPod `allowed_cuda_versions`**(per-account 配置,runpod 块):创建 pod 时传 `allowedCudaVersions`,只租宿主驱动 CUDA 版本在列表内的机器。CUDA 原生 miner(KRig/PearlFortune)在旧驱动宿主上报 `CUDA: runtime loaded but init failed`,OpenCL 的 WildRig 不受影响;不配则不过滤。
+- 多账号:`config.runpod-2.json`(gitignore)用 `api_key_env: RUNPOD_API_KEY_2`,独立 state/log,与账 1(WildRig + PearlHash)同钱包并行做 A/B 对比。
+
+### Changed — 变更
+- **全局配置收缩**:`COMMON_KEYS` 去掉 `image`、`prl_host`(镜像/矿池地址由各账号配置页按池决定,全局页只留钱包、worker 前缀、并发/预算上限、轮询、告警)。
+
+### Fixed — 修复
+- **「暂停租用」误伤同平台其它账号**:看板开关写的是平台级 `control/runpod.rent-paused`,sniper 也按平台名读 → 在 runpod-账2 上点暂停会把账 1 的 RunPod 租用一起停掉(监控照常、日志无提示)。改为按账号隔离:sniper 从 `--config` 文件名推出账号名(`ACCOUNT`),读 `control/<账号>.rent-paused`;看板开关同样按账号写。账 1 账号名即平台名,与旧文件兼容。
+
 ## [回退访客数据屏蔽] — 2026-09-20
 
 按需求恢复:访客(偷窥模式)照常查看仪表盘实时数据,不再显示演示占位。
