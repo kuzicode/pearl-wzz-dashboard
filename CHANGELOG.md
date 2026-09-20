@@ -2,6 +2,13 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Kryptex 在 Salad 跑通: 算力字段校准 + 回收权威] — 2026-09-21
+
+### Fixed — 修复
+- **KRig + Kryptex 在 Salad 实测跑通**(RTX 4070 SUPER 约 70-88 TH/s, share accepted)。Kryptex workers API 实际字段是 `avg_hashrate_30m / 3h / 24h`(字符串 H/s)且无 `hashrate`,之前适配器一直读到 None;新增 `kryptex_rate()`(看板同名 `_kx_rate`),offline 视为 0。30m 均值开机前半小时偏低,回收靠 grace 兜底。
+- Salad 回收把 `kryptex` 纳入"矿池权威"池(之前退回容器日志判定,KRig 日志格式不识别 → 算力恒 0)。
+- Salad 同一 tag 缓存旧 digest:镜像改动后需换新 tag(`krig-1.5.1-r2`)并在组停止、上一个版本铺完(`pending_update_in_progress` 消失)后 PATCH image 再 Start。
+
 ## [Kryptex 在 Salad 跑通前的两处修正: 官方入口 + 短 rig 名] — 2026-09-21
 
 ### Fixed — 修复

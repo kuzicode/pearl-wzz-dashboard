@@ -1384,6 +1384,19 @@ def kryptex_data(force=False):
     _kryptex["ts"] = now
     return data
 
+def _kx_rate(w):
+    """Kryptex workers API: avg_hashrate_30m / 3h / 24h(字符串 H/s), 无 'hashrate'; status 非 online → 0。"""
+    if str(w.get("status") or "online").lower() != "online":
+        return 0
+    for k in ("hashrate", "avg_hashrate_30m", "avg_hashrate_3h", "avg_hashrate_24h"):
+        try:
+            v = w.get(k)
+            if v is not None and float(v) > 0:
+                return float(v)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
 def _kryptex_view():
     """kryptex 视图: {workers, total_hashrate_th, pool_balance, pool_error}。hashrate 单位待真机校准。"""
     d = kryptex_data()
@@ -1391,7 +1404,7 @@ def _kryptex_view():
     results = ((d.get("workers") or {}).get("results") or []) if isinstance(d, dict) else []
     wlist, total = [], 0.0
     for w in results:
-        wth = hashrate_th(w.get("hashrate"))
+        wth = hashrate_th(_kx_rate(w))   # 实测字段 avg_hashrate_30m(H/s), 无 'hashrate'; offline → 0
         total += wth
         wlist.append({"name": w.get("worker"), "th": round(wth, 2), "ip": None, "gpus": []})
     bal = (d.get("balance") or {}) if isinstance(d, dict) else {}

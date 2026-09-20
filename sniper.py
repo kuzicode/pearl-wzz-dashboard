@@ -274,9 +274,24 @@ def pearl_worker_hashrates(config):
 # Kryptex API 走 Cloudflare, 必须用浏览器 UA(否则 error 1010 拦截)
 KRYPTEX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
+def kryptex_rate(w):
+    """Kryptex workers API 实测字段: avg_hashrate_30m / avg_hashrate_3h / avg_hashrate_24h(字符串, 单位 H/s; 实测 4070S 约 8.8e13),
+    没有 'hashrate' 字段; status 非 online 视为 0。30m 均值在开机前 30 分钟会偏低, 回收判定需留 grace。"""
+    if str(w.get("status") or "online").lower() != "online":
+        return 0
+    for k in ("hashrate", "avg_hashrate_30m", "avg_hashrate_3h", "avg_hashrate_24h"):
+        v = w.get(k)
+        try:
+            if v is not None and float(v) > 0:
+                return float(v)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
 def kryptex_worker_hashrates(config):
     """Kryptex 池逐-worker 算力。GET /prl/api/v3/miner/workers/{addr} → {worker: {hashrate_th, gpu_info}}。
-    注意: Kryptex 的 hashrate 单位待真机校准(首版按 H/s 用 hashrate_to_th); 首轮 hashrate_watch_enabled=false 不回收。"""
+    单位已校准: avg_hashrate_* 为 H/s(kryptex_rate)。"""
     address = str(config.get("prl_address") or "").strip()
     if not address:
         return {}
@@ -286,7 +301,7 @@ def kryptex_worker_hashrates(config):
     for w in (data or {}).get("results", []):
         name = str(w.get("worker") or "")
         if name:
-            workers[name] = {"hashrate_th": hashrate_to_th(w.get("hashrate")), "gpu_info": []}
+            workers[name] = {"hashrate_th": hashrate_to_th(kryptex_rate(w)), "gpu_info": []}
     return workers
 
 
@@ -2851,7 +2866,7 @@ def run_salad_cycle(config, state, live):
         log_by_machine = {e.get("machine_id"): e for e in log_rates.values() if e.get("machine_id")}  # 按 machine_id 索引日志算力(instance_id 不稳时用)
         current_pool = pool_of_image(str(((group.get("container") or {}).get("image") or ""))) or "unknown"
         # 池权威 = 有可靠 TH 刻度 worker 算力的池(pearlhash/twpool/pearlfortune); herominers(share×vardiff 指标不可靠) / unknown → 强制容器日志判定
-        pool_authoritative = current_pool in ("pearlhash", "twpool", "pearlfortune")
+        pool_authoritative = current_pool in ("pearlhash", "twpool", "pearlfortune", "kryptex")   # kryptex: workers API 按 rig 名(kx-<machine id 前 8 位>)命中
         for instance in running_instances:
             instance_id = str(instance.get("instance_id") or instance.get("id") or "")
             machine_id = str(instance.get("machine_id") or "")
