@@ -1404,6 +1404,8 @@ def _kryptex_view():
     results = ((d.get("workers") or {}).get("results") or []) if isinstance(d, dict) else []
     wlist, total = [], 0.0
     for w in results:
+        if str(w.get("status") or "online").lower() != "online":
+            continue   # Kryptex 会长期保留离线 rig(换机后旧 rig 名), 不列入 worker 表
         wth = hashrate_th(_kx_rate(w))   # 实测字段 avg_hashrate_30m(H/s), 无 'hashrate'; offline → 0
         total += wth
         wlist.append({"name": w.get("worker"), "th": round(wth, 2), "ip": None, "gpus": []})
