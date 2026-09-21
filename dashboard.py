@@ -415,7 +415,7 @@ def account_machine_images(acct, force=False):
             for i in (S.list_vast_instances() or []):
                 iid = str(i.get("id") or "")
                 if iid:
-                    data[iid] = i.get("image")
+                    data[iid] = i.get("image") or i.get("image_uuid")   # v1 instances 接口字段是 image_uuid
     except Exception:
         data = {}
     _machine_images[acct] = {"data": data, "ts": now}
