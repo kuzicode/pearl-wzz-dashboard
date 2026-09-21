@@ -2632,16 +2632,21 @@ def salad_query_instance_hashrates(config, group_name, lookback_seconds):
     data = request_json("POST", salad_logs_url(config, "/log-entries"), headers, body, timeout=30)
     items = (data or {}).get("items") or []
     by_instance = {}
+    gpu_by_instance = {}   # 型号可能只出现在别的行(KRig: "GPU0 01:00.0 RTX 4070" 启动行 / 逐卡行), 独立收集后补进结果
     for item in items:
         text = str(item.get("text_log") or item.get("log") or item.get("message") or "")
-        hashrate = parse_latest_hashrate(text)
-        if hashrate is None:
-            continue
         labels = ((item.get("resource") or {}).get("labels") or {})
         instance_id = labels.get("instance_id") or labels.get("container_group_instance_id") or item.get("instance_id")
         if not instance_id:
             continue
         instance_id = str(instance_id)
+        if instance_id not in gpu_by_instance:
+            g = parse_log_gpu_name(text)
+            if g:
+                gpu_by_instance[instance_id] = g
+        hashrate = parse_latest_hashrate(text)
+        if hashrate is None:
+            continue
         if instance_id in by_instance:
             continue
         by_instance[instance_id] = {
@@ -2651,6 +2656,9 @@ def salad_query_instance_hashrates(config, group_name, lookback_seconds):
             "gpu_name": parse_log_gpu_name(text),
             "text": text,
         }
+    for iid, entry in by_instance.items():
+        if not entry.get("gpu_name") and gpu_by_instance.get(iid):
+            entry["gpu_name"] = gpu_by_instance[iid]
     return by_instance
 
 
