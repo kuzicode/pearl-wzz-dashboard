@@ -1611,12 +1611,18 @@ def build_summary(pool_key="merged"):
         "ts": int(time.time()),
     }
 
+def _S():
+    import sniper as S
+    return S
+
+
 def build_rentals():
     now = time.time()
     res = {}
     for acct in list_accounts():
         plat = platform_of(acct)
-        cfg = read_config(acct).get(plat, {})
+        full_cfg = read_config(acct)
+        cfg = full_cfg.get(plat, {})
         items = []
         imgs = account_machine_images(acct) if plat in ("runpod", "vast") else {}
         for r in active_rentals(acct):
@@ -1638,6 +1644,10 @@ def build_rentals():
             "thresholds": cfg.get("thresholds"),
             "min_hashrate_th": cfg.get("min_hashrate_th"),
             "machines": items,
+            "pool": _S().active_pool(full_cfg),
+            "pool_label": (_S().POOLS.get(_S().active_pool(full_cfg)) or {}).get("label") or _S().active_pool(full_cfg),
+            "max_active_instances": full_cfg.get("max_active_instances"),
+            "max_total_hourly_usd": full_cfg.get("max_total_hourly_usd"),
         }
         bal = platform_balance(acct)
         burn = sum(float(m.get("price") or 0) for m in items)
@@ -2525,9 +2535,14 @@ if(d.hashrate_series && (d.hashrate_series.points||[]).length){
   hrPanel=`<div class="kpanel" id=hrpanel><div class=khead onclick="toggleHr()"><span>算力趋势 / HASHRATE <span class=muted style=font-size:11px>· ${ulabel}</span></span><span class=karr>▼</span></div><div class=kbody id=hrbody><div class=kcanvas-wrap><canvas class=kc id=hrcanvas height=300></canvas></div></div></div>`;
 }
 let poolName=q=>q=='unknown'?'未知':(PL[q]||q);
+let acctRows=Object.keys(r).map(aid=>{const v=r[aid]||{};const ms=(v.machines||[]);const run=ms.filter(m=>m.state==null||m.state=='running');const th=run.reduce((s,m)=>s+(parseFloat(m.hashrate_th)||0),0);
+const st=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${v.platform=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'')+(v.enabled===false?'<span class="pill mut">未启用</span>':'');
+const name=ROLE=='admin'?`<a href=# onclick="nav('cf:${esc(aid)}');return false">${esc(v.label||aid)}</a>`:esc(v.label||aid);
+const lim=v.platform=='salad'?'<span class=muted>由容器组决定</span>':`${v.max_active_instances==null?'—':v.max_active_instances} 台 · $${v.max_total_hourly_usd==null?'—':v.max_total_hourly_usd}/h`;
+return `<tr><td>${name}</td><td>${st}</td><td>${esc(v.pool_label||v.pool||'')}</td><td>${run.length}${ms.length!=run.length?' <span class=muted>/ '+ms.length+'</span>':''}</td><td>${th?fnum(th)+' TH/s':'<span class=muted>—</span>'}</td><td>$${fnum(v.burn_hourly||0,2)}/h</td><td>${lim}</td></tr>`;}).join('')||'<tr><td colspan=7 class=muted>还没有账号</td></tr>';
 let plat='';for(const aid of Object.keys(r)){const v=r[aid];const p=v.platform||aid;
 let badges=`<span class="pill ${v.process_running?'ok':'bad'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${(v.platform||p)=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'');
-let balTxt;if(v.balance!=null){let t=(v.hours_left!=null)?('约 '+fnum(v.hours_left,1)+'h 花完'):(v.burn_hourly>0?'':'当前无消耗');let lab=v.balance_estimated?'估算余额':(v.balance_real?'实时余额':'余额');balTxt=`${lab} $${fnum(v.balance,2)}${t?' · '+t:''}`;}else{balTxt='余额 —';}
+let balTxt;{let lab=v.balance_estimated?'估算余额':(v.balance_real?'实时余额':'余额');let parts=[v.balance!=null?`${lab} $${fnum(v.balance,2)}`:'余额 —',`$${fnum(v.burn_hourly||0,2)}/h`];if(v.balance!=null){if(v.hours_left!=null)parts.push('约 '+fnum(v.hours_left,1)+'h 花完');else if(!(v.burn_hourly>0))parts.push('当前无消耗');}balTxt=parts.join(' ｜ ');}
 let bh;if(v.balance_editable){BALVAL[aid]=(v.balance_usd!=null?v.balance_usd:'');bh=`<span class="bal editable" id="bal_${esc(aid)}" onclick="editBal('${esc(aid)}')" title="点击填写/修改余额(此平台无余额 API, 手动维护)">${balTxt} <span class=ed-pen>✎</span></span>`;}else{bh=`<span class=bal>${balTxt}</span>`;}
 let sstat='';if(p=='salad'){let s=v.salad_status||{};let pr=[];if(s.running_count!=null)pr.push('运行 '+s.running_count);if(s.allocating_count)pr.push('分配中 '+s.allocating_count);let gc=(v.salad_gpu_classes||[]).join(' / ');let serr=(v.salad_error&&!(v.machines||[]).length)?' · '+esc(v.salad_error):'';sstat=`<div class=muted style=margin-bottom:9px>SALAD 实时 · ${pr.join(' · ')||'-'}${gc?' · GPU 档 '+esc(gc):''}${serr}</div>`;}
 
@@ -2544,7 +2559,7 @@ let gpu=(m.gpu&&m.gpu!='?')?esc(m.gpu):'<span class=muted>—</span>';
 let idcell=p=='salad'?`<td title="实例 ${esc(m.id)}${m.machine_id?(' · 机器(worker 后缀) '+esc(m.machine_id)):''}">${esc(m.machine_id||m.id)}</td>`:`<td>${esc(m.id)}</td>`;
 return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${(()=>{const c=cpt(m);if(c==null)return '<span class=muted title="无算力数据(宽限中/未连池)">—</span>';const bad=cptMed!=null&&c>cptMed*1.15;return `<span style="${bad?'color:var(--bad);font-weight:600':''}" title="每 100 TH/s 每小时花费; 红色 = 比本账号中位数贵 15% 以上">$${fnum(c,3)}</span>`;})()}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?9:8} class=muted>无符合机器</td></tr>`;
 let _pt=v.console_url?`<b><a class=platlink href="${esc(v.console_url)}" target=_blank rel=noopener title="打开 ${esc(v.label||aid)} 后台 ↗">${esc(v.label||aid)} ↗</a></b>`:`<b>${esc(v.label||aid)}</b>`;
-plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}<span class=muted style="font-size:11px;margin-left:8px">$${fnum(acctBurn,3)}/h${pv!='merged'?' ('+poolName(pv)+')':''}</span></div>${sstat}
+plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}${pv!='merged'?`<span class=muted style="font-size:11px;margin-left:8px">本池 $${fnum(acctBurn,3)}/h (${poolName(pv)})</span>`:''}</div>${sstat}
 <div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th title="单价 ÷ 算力 × 100: 每 100 TH/s 每小时花费, 按此降序(最贵在上)">$/100TH·h ▼</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
@@ -2581,7 +2596,7 @@ ${ssl?`<span class=muted style="font-size:12px">统计自 ${ssl} 起算</span>`:
 </div>
 </div>
 ${hrPanel}
-<div class=sec><div class=lbl>矿池在挖 WORKER</div><div class=tscroll><table><tr><th>Worker</th><th>GPU</th><th>算力</th><th>IP</th></tr>${wk}</table></div></div>
+<div class=sec><div class=lbl>账号总览</div><div class=platbox><div class=ovtw><table class=ovt><thead><tr><th>账号</th><th>状态</th><th>矿池</th><th>在跑</th><th>总算力</th><th>时租</th><th>最多同时租 · 时租上限</th></tr></thead><tbody>${acctRows}</tbody></table></div></div></div>
 <div class=sec><div class=lbl>各平台租用情况</div>${plat}</div>`;
 let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=pv;
 // renderOverview 每次重建 DOM 后恢复 K线展开状态
@@ -2717,16 +2732,8 @@ let cf=(k,label,req,ph)=>{let w='';
 if(diff[k]){let dv=Object.entries(diff[k]).map(([p,v])=>p+'='+(v==null||v===''?'∅':v)).join('   |   ');
 w=` <span class=cdiff title="${esc(dv)}">⚠ 各账号当前不一致, 保存将统一覆盖</span>`;}
 return `<div class=fld>${label}${req?' <span class=req>必填</span>':''}${w}</div><input id="cm_${k}" value="${esc(c[k]==null?'':c[k])}" placeholder="${ph||''}">`;};
-let rows=Object.entries(P).map(([a,v])=>{let ac=v.account||{};
-let st=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${(v.platform||p)=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'')+(v.key_set?'':'<span class="pill bad">KEY 未设置</span>')+(v.enabled?'':'<span class="pill mut">未启用</span>');
-let w=ac.prl_address||'';let ws=w?(w.slice(0,8)+'…'+w.slice(-4)):'∅';
-let warn=(c.prl_address&&w!==c.prl_address)?' <span class=cdiff title="与全局钱包不一致, 请检查">⚠</span>':'';
-let lim=(ac.max_active_instances==null?'—':ac.max_active_instances)+' 台 · $'+(ac.max_total_hourly_usd==null?'—':ac.max_total_hourly_usd)+'/h';
-return `<tr><td><a href=# onclick="nav('cf:${esc(a)}');return false">${esc(v.label||a)}</a></td><td>${st}</td><td>${esc(v.pool_label||v.pool||'')}</td><td>${lim}</td><td title="${esc(w)}"><code style="font-size:11px">${esc(ws)}</code>${warn}</td></tr>`;}).join('');
-let sumH=Object.values(P).reduce((t,v)=>t+(parseFloat((v.account||{}).max_total_hourly_usd)||0),0);
 return `<div class=lbl>配置总览</div>
-<div class=platbox><div class=top><b>各账号配置一览</b><span class=muted>点账号名进入编辑 · 最坏每小时花费 = 各账号时租上限之和 ≈ $${sumH.toFixed(2)}/h</span></div>
-<div class=ovtw><table class=ovt><thead><tr><th>账号</th><th>状态</th><th>矿池</th><th>最多同时租 · 时租上限</th><th>钱包</th></tr></thead><tbody>${rows||'<tr><td colspan=5 class=muted>还没有账号 config: 复制 configs/config.<平台>.example.json 为 config.<平台>.json 后刷新</td></tr>'}</tbody></table></div></div>
+<div class=hint style="margin:-4px 0 10px">各账号的状态 / 矿池 / 在跑台数 / 算力 / 上限一览已移到「仪表盘」顶部; 点账号名可进入对应账号页编辑。</div>
 <div class=platbox><div class=top><b>全局 · 钱包与告警</b><span class=muted>保存会写入全部 ${n} 个账号 config(其余参数在各账号页单独设置)</span></div>
 <div class=grid2>
 ${cf('prl_address','钱包地址 prl_address',1,'你的 $pearl 钱包, 否则挖给别人')}
