@@ -2533,15 +2533,19 @@ let sstat='';if(p=='salad'){let s=v.salad_status||{};let pr=[];if(s.running_coun
 
 let mlist=(v.machines||[]).filter(m=>pv=='merged'||m.pool==pv);
 let acctBurn=mlist.reduce((s,m)=>s+(parseFloat(m.price)||0),0);
+// 性价比 = 每 100 TH/s 每小时花多少 $(越高越差); 无算力(宽限中/未测)排最前, 其后按性价比降序 → 从上往下就是最该先关的
+let cpt=m=>{const pr=parseFloat(m.price),th=parseFloat(m.hashrate_th);return (isFinite(pr)&&pr>0&&isFinite(th)&&th>0)?pr/th*100:null;};
+mlist=mlist.slice().sort((x,y)=>{const a=cpt(x),b=cpt(y);if(a==null&&b==null)return 0;if(a==null)return -1;if(b==null)return 1;return b-a;});
+let cpts=mlist.map(cpt).filter(x=>x!=null);let cptMed=cpts.length?cpts.slice().sort((a,b)=>a-b)[Math.floor(cpts.length/2)]:null;
 let rows=mlist.map(m=>{let a=(ROLE=='admin'&&m.id)?`<button class=b-bad onclick="term('${aid}','${p}','${esc(m.id)}','${esc(m.group||'')}')">关闭</button>`:'';
 
 let price=m.price_label?esc(m.price_label):(m.price==null?'-':'$'+fnum(m.price,3)+'/h');
 let gpu=(m.gpu&&m.gpu!='?')?esc(m.gpu):'<span class=muted>—</span>';
 let idcell=p=='salad'?`<td title="实例 ${esc(m.id)}${m.machine_id?(' · 机器(worker 后缀) '+esc(m.machine_id)):''}">${esc(m.machine_id||m.id)}</td>`:`<td>${esc(m.id)}</td>`;
-return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?8:7} class=muted>无符合机器</td></tr>`;
+return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${(()=>{const c=cpt(m);if(c==null)return '<span class=muted title="无算力数据(宽限中/未连池)">—</span>';const bad=cptMed!=null&&c>cptMed*1.15;return `<span style="${bad?'color:var(--bad);font-weight:600':''}" title="每 100 TH/s 每小时花费; 红色 = 比本账号中位数贵 15% 以上">$${fnum(c,3)}</span>`;})()}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?9:8} class=muted>无符合机器</td></tr>`;
 let _pt=v.console_url?`<b><a class=platlink href="${esc(v.console_url)}" target=_blank rel=noopener title="打开 ${esc(v.label||aid)} 后台 ↗">${esc(v.label||aid)} ↗</a></b>`:`<b>${esc(v.label||aid)}</b>`;
 plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}<span class=muted style="font-size:11px;margin-left:8px">$${fnum(acctBurn,3)}/h${pv!='merged'?' ('+poolName(pv)+')':''}</span></div>${sstat}
-<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
+<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th title="单价 ÷ 算力 × 100: 每 100 TH/s 每小时花费, 按此降序(最贵在上)">$/100TH·h ▼</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
 <div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addrrow><span class=addr>${esc(d.wallet)}</span><span class=copyi title="复制钱包地址" onclick="copyAddr('${esc(d.wallet)}')"><svg viewBox="0 0 24 24" width=16 height=16 fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round aria-hidden=true><rect x=9 y=9 width=13 height=13 rx=2 ry=2/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span></div></div>
