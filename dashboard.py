@@ -2188,6 +2188,7 @@ textarea{resize:vertical;min-height:150px;line-height:1.5;font-family:var(--mono
 .grid2{display:grid;grid-template-columns:160px 1fr;gap:10px 13px;align-items:center}
 .fld{color:var(--mut);font-size:11.5px}
 .gpurow{display:grid;grid-template-columns:1fr 110px 110px 34px;gap:8px;margin-bottom:8px}
+.gpurow.nop,.nop .gpurow{grid-template-columns:1fr 110px 34px}.nop .gpurow [data-f=price]{display:none}
 .hint{color:var(--mut);font-size:11px;margin:4px 0 0}
 details{margin-top:13px;border-top:1px solid var(--bd);padding-top:11px}
 summary{cursor:pointer;color:var(--mut);font-size:11.5px;letter-spacing:.4px}
@@ -2518,7 +2519,7 @@ if(d.hashrate_series && (d.hashrate_series.points||[]).length){
 }
 let poolName=q=>q=='unknown'?'未知':(PL[q]||q);
 let plat='';for(const aid of Object.keys(r)){const v=r[aid];const p=v.platform||aid;
-let badges=`<span class="pill ${v.process_running?'ok':'bad'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?'<span class="pill warn">RENT PAUSED</span>':'');
+let badges=`<span class="pill ${v.process_running?'ok':'bad'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${(v.platform||p)=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'');
 let balTxt;if(v.balance!=null){let t=(v.hours_left!=null)?('约 '+fnum(v.hours_left,1)+'h 花完'):(v.burn_hourly>0?'':'当前无消耗');let lab=v.balance_estimated?'估算余额':(v.balance_real?'实时余额':'余额');balTxt=`${lab} $${fnum(v.balance,2)}${t?' · '+t:''}`;}else{balTxt='余额 —';}
 let bh;if(v.balance_editable){BALVAL[aid]=(v.balance_usd!=null?v.balance_usd:'');bh=`<span class="bal editable" id="bal_${esc(aid)}" onclick="editBal('${esc(aid)}')" title="点击填写/修改余额(此平台无余额 API, 手动维护)">${balTxt} <span class=ed-pen>✎</span></span>`;}else{bh=`<span class=bal>${balTxt}</span>`;}
 let sstat='';if(p=='salad'){let s=v.salad_status||{};let pr=[];if(s.running_count!=null)pr.push('运行 '+s.running_count);if(s.allocating_count)pr.push('分配中 '+s.allocating_count);let gc=(v.salad_gpu_classes||[]).join(' / ');let serr=(v.salad_error&&!(v.machines||[]).length)?' · '+esc(v.salad_error):'';sstat=`<div class=muted style=margin-bottom:9px>SALAD 实时 · ${pr.join(' · ')||'-'}${gc?' · GPU 档 '+esc(gc):''}${serr}</div>`;}
@@ -2706,7 +2707,7 @@ if(diff[k]){let dv=Object.entries(diff[k]).map(([p,v])=>p+'='+(v==null||v===''?'
 w=` <span class=cdiff title="${esc(dv)}">⚠ 各账号当前不一致, 保存将统一覆盖</span>`;}
 return `<div class=fld>${label}${req?' <span class=req>必填</span>':''}${w}</div><input id="cm_${k}" value="${esc(c[k]==null?'':c[k])}" placeholder="${ph||''}">`;};
 let rows=Object.entries(P).map(([a,v])=>{let ac=v.account||{};
-let st=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?'<span class="pill warn">RENT PAUSED</span>':'')+(v.key_set?'':'<span class="pill bad">KEY 未设置</span>')+(v.enabled?'':'<span class="pill mut">未启用</span>');
+let st=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${(v.platform||p)=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'')+(v.key_set?'':'<span class="pill bad">KEY 未设置</span>')+(v.enabled?'':'<span class="pill mut">未启用</span>');
 let w=ac.prl_address||'';let ws=w?(w.slice(0,8)+'…'+w.slice(-4)):'∅';
 let warn=(c.prl_address&&w!==c.prl_address)?' <span class=cdiff title="与全局钱包不一致, 请检查">⚠</span>':'';
 let lim=(ac.max_active_instances==null?'—':ac.max_active_instances)+' 台 · $'+(ac.max_total_hourly_usd==null?'—':ac.max_total_hourly_usd)+'/h';
@@ -2733,11 +2734,13 @@ ${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="
 </div><div class=row style=margin-top:12px><button class=b-acc onclick=savePw()>更新密码</button>
 <span class=hint>立即生效, 下次登录用新密码</span></div></div>`;}
 function platformHtml(v,p){let ac=v.account||{};
-let proc=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?'<span class="pill warn">RENT PAUSED</span>':'');
+let proc=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${(v.platform||p)=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'');
 let key=v.key_set?`<span class="pill ok">已设置 ${esc(v.key_mask)}</span>`:'<span class="pill bad">未设置</span>';
 let gpus=(v.gpus||[]).map((g,i)=>gpuRowHtml(p,i,g)).join('');
 let spec=(v.specific||[]).map(s=>specHtml(p,s)).join('');
-let rentBtn=v.rent_paused?`<button class=b-acc onclick="toggle('${p}',false)">▶ 启动租用</button>`:`<button class=b-warn onclick="toggle('${p}',true)">⏸ 暂停租用</button>`;
+let isS=(v.platform||p)=='salad';
+let rentBtn=isS?(v.rent_paused?`<button class=b-acc onclick="toggle('${p}',false)">▶ 启动换机</button>`:`<button class=b-warn onclick="toggle('${p}',true)">⏸ 暂停换机</button>`)
+ :(v.rent_paused?`<button class=b-acc onclick="toggle('${p}',false)">▶ 启动租用</button>`:`<button class=b-warn onclick="toggle('${p}',true)">⏸ 暂停租用</button>`);
 let av=k=>esc(ac[k]==null?'':ac[k]);let N=n=>`<span class=stepn>${n}</span>`;
 return `<div class=lbl>${esc(v.label||p)} · 账号配置</div>
 <div class=platbox id=box_${p}><div class=top><b>${esc(v.label||p)}</b>${proc}</div>
@@ -2746,23 +2749,23 @@ return `<div class=lbl>${esc(v.label||p)} · 账号配置</div>
 <div class=row><input id="k_${p}" type=password placeholder="粘贴 ${esc(v.key_name)}, 点存 KEY 立即写入 .env"><button onclick="savekey('${p}')">存 KEY</button></div>
 <div class=hint style="margin:4px 0 10px">没设 key 的账号 start-all 会直接跳过, 不会抢租</div>
 <div class=grid2>
-<div class=fld>${N(2)}启用本账号</div><label class=ckrow><input type=checkbox id="en_${p}" ${v.enabled?'checked':''}><span class=hint>关掉则不扫描不租用</span></label>
+<div class=fld>${N(2)}启用本账号</div><label class=ckrow><input type=checkbox id="en_${p}" ${v.enabled?'checked':''}><span class=hint>${isS?'关掉则不监控 Salad 容器组(不影响容器组本身运行)':'关掉则不扫描不租用'}</span></label>
 ${v.has_create?`<div class=fld>自动建机</div><label class=ckrow><input type=checkbox id="ce_${p}" ${v.create_enabled?'checked':''}><span class=hint>价格达标自动下单; 关掉只观察不租</span></label>`:''}
-<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}</option>`).join('')}</select> <span class=hint>只影响之后新租的机器, 镜像随矿池自动决定</span></div>
+${isS?`<div class=fld>机器数 / 矿池</div><div class=hint style="padding-top:9px">由 Salad portal 里的容器组决定: replicas = 台数, 镜像 = 矿池(krig → Kryptex, wildrig → PearlHash); 本页不设租用上限与出价</div>`:`<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}</option>`).join('')}</select> <span class=hint>只影响之后新租的机器, 镜像随矿池自动决定</span></div>
 <div class=fld>${N(4)}最多同时租 (台)</div><input id="ac_${p}_max_active_instances" value="${av('max_active_instances')}" placeholder="1">
-<div class=fld>总时租上限 ($/h)</div><input id="ac_${p}_max_total_hourly_usd" value="${av('max_total_hourly_usd')}" placeholder="1.0">
+<div class=fld>总时租上限 ($/h)</div><input id="ac_${p}_max_total_hourly_usd" value="${av('max_total_hourly_usd')}" placeholder="1.0">`}
 </div>
-<div class=hint style=margin-top:4px>本账号在租机器的总时租不会超过上限; 所有账号上限之和 = 最坏每小时花费</div>
-<div class=lbl style=margin-top:14px>${N(5)}GPU 档 <span class=muted style="font-size:11px;font-weight:400">· 型号 / 最高出价 $/h / 最低算力 TH/s</span></div>
-<div class=gpurow style=color:var(--mut);font-size:11px><div>GPU 型号</div><div>最高出价 $/h</div><div>最低算力 TH/s</div><div></div></div>
-<div id="gpus_${p}">${gpus}</div>
+${isS?'':'<div class=hint style=margin-top:4px>本账号在租机器的总时租不会超过上限; 所有账号上限之和 = 最坏每小时花费</div>'}
+<div class=lbl style=margin-top:14px>${N(isS?3:5)}GPU 档 <span class=muted style="font-size:11px;font-weight:400">${isS?'· 型号 / 最低算力 TH/s(低于门槛持续一段时间自动换机; 未列型号用高级设置里的 default_min_hashrate_th)':'· 型号 / 最高出价 $/h / 最低算力 TH/s'}</span></div>
+<div class="gpurow${isS?' nop':''}" style=color:var(--mut);font-size:11px><div>GPU 型号</div>${isS?'':'<div>最高出价 $/h</div>'}<div>最低算力 TH/s</div><div></div></div>
+<div id="gpus_${p}" class="${isS?'nop':''}">${gpus}</div>
 <button onclick="addGpu('${p}')" style=margin-top:4px>+ 增加 GPU</button>
-<div class=hint style=margin-top:4px>报价低于最高出价才租; 实测算力持续低于最低算力会自动回收换机</div>
+<div class=hint style=margin-top:4px>${isS?'实测算力持续低于最低算力会自动 reallocate 换机(需「启动换机」)':'报价低于最高出价才租; 实测算力持续低于最低算力会自动回收换机'}</div>
 <div class=row style=margin-top:14px>
 <button class=b-acc onclick="savePlat('${p}')">保存配置</button>
 <button onclick="restart('${p}')">重启应用</button>
 ${rentBtn}
-<span class=hint>保存后点「重启应用」才生效</span></div>
+<span class=hint>${isS?'保存后点「重启应用」才生效 · 暂停换机 = 只监控不 reallocate':'保存后点「重启应用」才生效'}</span></div>
 <details><summary>高级设置 · worker 前缀 / 轮询 / 性价比门槛 / 平台特定参数 / raw JSON(默认值通常无需改)</summary>
 <div class=grid2>
 <div class=fld>worker 前缀 <span class=muted>worker_prefix</span></div><input id="ac_${p}_worker_prefix" value="${av('worker_prefix')}" placeholder="auto">
