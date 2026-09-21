@@ -1636,6 +1636,7 @@ def build_rentals():
             "platform": plat,
             "account_id": acct,
             "label": account_label(acct),
+            "label_custom": full_cfg.get("account_label") or "",
             "console_url": account_console_url(acct),
             "enabled": cfg.get("enabled"),
             "create_enabled": cfg.get("create_enabled"),
@@ -1803,6 +1804,20 @@ def save_platform_cfg(acct, patch):
     cfg[plat] = sub
     backup_and_write(p, cfg)
     return {"ok": True, "platform": acct}
+
+def save_account_label(acct, label):
+    """改账号备注(config 顶层 account_label): 侧栏 / 总览 / 卡片 / 配置页标题统一显示 平台-备注; 空 = 恢复默认(账号N / salad 组织名)。"""
+    if acct not in list_accounts():
+        return {"error": "账号无效"}
+    label = re.sub(r"\s+", " ", str(label or "")).strip()[:40]
+    p = cfg_path(acct)
+    cfg = read_json(p, {})
+    if label:
+        cfg["account_label"] = label
+    else:
+        cfg.pop("account_label", None)
+    backup_and_write(p, cfg)
+    return {"ok": True, "platform": acct, "label": account_label(acct)}
 
 def save_pool_cfg(acct, pool):
     """切换某账号'新抢机器用哪个矿池'(顶层 config['pool'], 只影响新 create, 不迁移老机器)。"""
@@ -2084,6 +2099,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, save_raw_cfg(str(data.get("platform", "")), str(data.get("json", ""))))
         if path == "/api/restart":
             return self._send(200, restart_platform(str(data.get("platform", ""))))
+        if path == "/api/account-label":
+            return self._send(200, save_account_label(str(data.get("platform", "")), data.get("label", "")))
         if path == "/api/dashboard-password":
             return self._send(200, set_dashboard_password(data.get("password", "")))
         if path == "/api/reset-stats":
@@ -2176,6 +2193,7 @@ tr:last-child td{border-bottom:none}td{font-size:12.5px}
 .bal.editable{cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:8px;border:1px solid transparent;transition:.15s}
 .bal.editable:hover{color:var(--hi);background:var(--acc2);border-color:rgba(63,224,197,.32)}
 .ed-pen{font-size:10.5px;opacity:.45;transition:.15s}
+.lbl-pen{cursor:pointer;margin-left:4px}.ovt tr:hover .lbl-pen{opacity:1;color:var(--acc)}
 .bal.editable:hover .ed-pen{opacity:1;color:var(--acc)}
 .bal-edit{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono)}
 .bal-edit .cur{color:var(--mut);font-size:13px}
@@ -2535,9 +2553,10 @@ if(d.hashrate_series && (d.hashrate_series.points||[]).length){
   hrPanel=`<div class="kpanel" id=hrpanel><div class=khead onclick="toggleHr()"><span>算力趋势 / HASHRATE <span class=muted style=font-size:11px>· ${ulabel}</span></span><span class=karr>▼</span></div><div class=kbody id=hrbody><div class=kcanvas-wrap><canvas class=kc id=hrcanvas height=300></canvas></div></div></div>`;
 }
 let poolName=q=>q=='unknown'?'未知':(PL[q]||q);
+RENTALS=r;
 let acctRows=Object.keys(r).map(aid=>{const v=r[aid]||{};const ms=(v.machines||[]);const run=ms.filter(m=>m.state==null||m.state=='running');const th=run.reduce((s,m)=>s+(parseFloat(m.hashrate_th)||0),0);
 const st=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${v.platform=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'')+(v.enabled===false?'<span class="pill mut">未启用</span>':'');
-const name=ROLE=='admin'?`<a href=# onclick="nav('cf:${esc(aid)}');return false">${esc(v.label||aid)}</a>`:esc(v.label||aid);
+const name=ROLE=='admin'?`<a href=# onclick="nav('cf:${esc(aid)}');return false">${esc(v.label||aid)}</a> <span class="ed-pen lbl-pen" title="改账号备注(侧栏/卡片/配置页同步)" onclick="editLabel('${esc(aid)}',this)">✎</span>`:esc(v.label||aid);
 const lim=v.platform=='salad'?'<span class=muted>由容器组决定</span>':`${v.max_active_instances==null?'—':v.max_active_instances} 台 · $${v.max_total_hourly_usd==null?'—':v.max_total_hourly_usd}/h`;
 // 矿池列按机器实际所在池汇总(镜像推断); 配置里的"新租矿池"仅在与实际不同或无机器时以灰字标注, 避免 Salad(池由容器组决定)/切池后老机器仍在旧池时误导
 const pc={};run.forEach(m=>{const k=m.pool||'unknown';pc[k]=(pc[k]||0)+1;});
@@ -2727,7 +2746,7 @@ function attachCrosshair(cc,vc,data,px,xc,step,PAD,CH,W,candleW){
   cc.onmouseleave=()=>{const t=document.getElementById('ktip');if(t)t.style.display='none';};
 }
 
-let CFG=null;
+let CFG=null;let RENTALS=null;
 async function renderConfigTab(){let d;try{d=await api('/api/full-config')}catch(e){return}CFG=d;
 let nv=Object.keys(d.platforms).map(a=>`<div class="ni sub adm${subtab==a?' on':''}" data-nav=cf:${a} onclick="nav('cf:${a}')">${esc(d.platforms[a].label||a)}</div>`).join('');
 let ce=document.getElementById('cfaccts');if(ce)ce.innerHTML=nv;
@@ -2882,6 +2901,10 @@ async function term(aid,plat,id,group){let label=plat=='salad'?'迁移(reallocat
 if(!confirm('确定要'+label+'这台机器吗?\n'+aid+' · '+id))return;
 let r=await api('/api/terminate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:aid,id:id,group:group})});
 toast(r.error?('失败: '+r.error):(r.note?r.note:'已执行 '+id));renderOverview();}
+async function editLabel(aid,el){const r=(RENTALS&&RENTALS[aid])||{};const cur=r.label_custom||'';const plat=r.platform||aid.replace(/-\d+$/,'');
+const val=prompt('账号备注(显示为「'+plat+'-备注」, 用于侧栏 / 总览 / 卡片 / 配置页; 留空恢复默认):',cur);if(val===null)return;
+let res;try{res=await api('/api/account-label',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:aid,label:val.trim()})});}catch(e){toast('保存失败');return;}
+if(res&&res.ok){toast('已更新: '+res.label);refresh();}else toast('失败: '+((res&&res.error)||'未知'));}
 function editBal(aid){EDITING=aid;const el=document.getElementById('bal_'+aid);if(!el)return;el.classList.remove('editable');el.removeAttribute('onclick');el.removeAttribute('title');const cur=(BALVAL[aid]!=null?BALVAL[aid]:'');el.innerHTML=`<span class=bal-edit><span class=cur>$</span><input id="bali_${esc(aid)}" type=number step=0.01 min=0 value="${cur}" placeholder="0.00" onkeydown="balKey(event,'${esc(aid)}')"><button class="bb ok" title=保存 onclick="saveBal('${esc(aid)}')">✓</button><button class="bb x" title=取消 onclick="cancelBal()">✕</button></span>`;const inp=document.getElementById('bali_'+aid);inp.focus();inp.select();}
 function balKey(e,aid){if(e.key=='Enter'){e.preventDefault();saveBal(aid);}else if(e.key=='Escape'){e.preventDefault();cancelBal();}}
 function cancelBal(){EDITING=null;renderOverview();}

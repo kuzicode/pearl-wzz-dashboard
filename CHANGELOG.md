@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [账号备注可在仪表盘直接编辑] — 2026-09-21
+
+### Added — 新增
+- 仪表盘「账号总览」账号名旁 ✎ 按钮:改账号备注(config 顶层 `account_label`),侧栏 / 总览 / 各平台租用卡片 / 配置页标题统一显示「平台-备注」;留空恢复默认(账号N / Salad 组织名)。新增 `POST /api/account-label`;`/api/rentals` 增 `label_custom`。点账号名仍跳转到该账号配置页。
+
 ## [仪表盘: 账号总览表 + 余额栏格式 + 去 worker 明细] — 2026-09-21
 
 ### Changed — 变更
