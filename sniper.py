@@ -648,9 +648,19 @@ def pool_of_image(image):
     return "pearlhash"
 
 
-def make_env(config, provider, gpu, external_id):
+def make_worker_name(config, provider, gpu, external_id):
+    """矿池侧 worker 名。Kryptex 对 rig 名限 32 字符(实测 32 过 / 36 拒 "Invalid login"), 且镜像还会追加 "-<主机名前 8 位>",
+    故 kryptex 池用短名 <prefix>-<provider 前 2 位>-<external_id 末 8 位>(≤23 字符); 其它池沿用长名(≤63)。"""
+    prefix = str(config.get("worker_prefix", "auto"))
+    if active_pool(config) == "kryptex":
+        tail = re.sub(r"[^A-Za-z0-9]", "", str(external_id))[-8:] or "0"
+        return f"{prefix}-{provider[:2]}-{tail}"[:23]
     safe_gpu = re.sub(r"[^A-Za-z0-9]+", "-", gpu).strip("-").lower()
-    worker = f"{config.get('worker_prefix', 'auto')}-{provider}-{safe_gpu}-{external_id}"
+    return f"{prefix}-{provider}-{safe_gpu}-{external_id}"[:63]
+
+
+def make_env(config, provider, gpu, external_id):
+    worker = make_worker_name(config, provider, gpu, external_id)
     provider_cfg = config.get(provider, {}) if isinstance(config.get(provider, {}), dict) else {}
     price = float(provider_cfg.get("_current_price", 0) or 0)
     min_hashrate = gpu_map_value(gpu, provider_cfg.get("min_hashrate_th", {}), 0) or 0
@@ -669,8 +679,7 @@ def make_env(config, provider, gpu, external_id):
 
 
 def make_worker(config, provider, gpu, external_id):
-    safe_gpu = re.sub(r"[^A-Za-z0-9]+", "-", gpu).strip("-").lower()
-    return f"{config.get('worker_prefix', 'auto')}-{provider}-{safe_gpu}-{external_id}"[:63]
+    return make_worker_name(config, provider, gpu, external_id)
 
 
 def find_vast_offers(config, state):

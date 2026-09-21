@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Kryptex 短 worker 名 + runpod-2 单机重测] — 2026-09-21
+
+### Fixed — 修复
+- Kryptex 矿池 rig 名限 32 字符(stratum 探测: 32 过 / 36 拒 "Invalid login"),而 sniper 给 RunPod 注入的 `kx-runpod-nvidia-geforce-rtx-4090-<时间戳>` 加镜像后缀超 50 字符 → 之前 CUDA 13.0 过滤后的 RunPod 宿主很可能是登录被拒而非驱动问题。新增 `make_worker_name()`:kryptex 池用 `<prefix>-<平台前2位>-<id 末8位>`(≤23 字符),其它池不变;回收按前缀匹配不受影响。
+
 ## [Kryptex 在 Salad 跑通: 算力字段校准 + 回收权威] — 2026-09-21
 
 ### Fixed — 修复
