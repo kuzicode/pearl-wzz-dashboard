@@ -2539,7 +2539,12 @@ let acctRows=Object.keys(r).map(aid=>{const v=r[aid]||{};const ms=(v.machines||[
 const st=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${v.platform=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'')+(v.enabled===false?'<span class="pill mut">未启用</span>':'');
 const name=ROLE=='admin'?`<a href=# onclick="nav('cf:${esc(aid)}');return false">${esc(v.label||aid)}</a>`:esc(v.label||aid);
 const lim=v.platform=='salad'?'<span class=muted>由容器组决定</span>':`${v.max_active_instances==null?'—':v.max_active_instances} 台 · $${v.max_total_hourly_usd==null?'—':v.max_total_hourly_usd}/h`;
-return `<tr><td>${name}</td><td>${st}</td><td>${esc(v.pool_label||v.pool||'')}</td><td>${run.length}${ms.length!=run.length?' <span class=muted>/ '+ms.length+'</span>':''}</td><td>${th?fnum(th)+' TH/s':'<span class=muted>—</span>'}</td><td>$${fnum(v.burn_hourly||0,2)}/h</td><td>${lim}</td></tr>`;}).join('')||'<tr><td colspan=7 class=muted>还没有账号</td></tr>';
+// 矿池列按机器实际所在池汇总(镜像推断); 配置里的"新租矿池"仅在与实际不同或无机器时以灰字标注, 避免 Salad(池由容器组决定)/切池后老机器仍在旧池时误导
+const pc={};run.forEach(m=>{const k=m.pool||'unknown';pc[k]=(pc[k]||0)+1;});
+const pcs=Object.entries(pc).sort((a,b)=>b[1]-a[1]).map(([k,n])=>`${poolName(k)}${Object.keys(pc).length>1?' ×'+n:''}`).join(' · ');
+const cfgPool=v.pool_label||v.pool||'';const onlyCfg=Object.keys(pc).length==1&&Object.keys(pc)[0]==v.pool;
+const poolCell=pcs?`${pcs}${(!onlyCfg&&cfgPool&&v.platform!='salad')?` <span class=muted title="配置的新抢矿池(只影响之后新租)">· 新租 ${esc(cfgPool)}</span>`:''}`:(v.platform=='salad'?'<span class=muted>由容器组决定</span>':`<span class=muted title="配置的新抢矿池">新租 ${esc(cfgPool)}</span>`);
+return `<tr><td>${name}</td><td>${st}</td><td>${poolCell}</td><td>${run.length}${ms.length!=run.length?' <span class=muted>/ '+ms.length+'</span>':''}</td><td>${th?fnum(th)+' TH/s':'<span class=muted>—</span>'}</td><td>$${fnum(v.burn_hourly||0,2)}/h</td><td>${lim}</td></tr>`;}).join('')||'<tr><td colspan=7 class=muted>还没有账号</td></tr>';
 let plat='';for(const aid of Object.keys(r)){const v=r[aid];const p=v.platform||aid;
 let badges=`<span class="pill ${v.process_running?'ok':'bad'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${(v.platform||p)=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'');
 let balTxt;{let lab=v.balance_estimated?'估算余额':(v.balance_real?'实时余额':'余额');let parts=[v.balance!=null?`${lab} $${fnum(v.balance,2)}`:'余额 —',`$${fnum(v.burn_hourly||0,2)}/h`];if(v.balance!=null){if(v.hours_left!=null)parts.push('约 '+fnum(v.hours_left,1)+'h 花完');else if(!(v.burn_hourly>0))parts.push('当前无消耗');}balTxt=parts.join(' ｜ ');}
