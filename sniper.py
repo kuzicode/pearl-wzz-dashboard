@@ -240,7 +240,7 @@ def parse_hashrate_text(value):
 
 def parse_log_gpu_name(log_text):
     text = str(log_text or "")
-    match = re.search(r"RTX\s+5070\s+Ti|RTX\s+4070\s+Ti\s+Super|RTX\s+\d{4}\s+Super|RTX\s+3090\s+Ti|RTX\s+3080\s+Ti|RTX\s+\d{4}", text, re.I)
+    match = re.search(r"RTX\s+\d{4}\s+Ti\s+Super|RTX\s+\d{4}\s+Super|RTX\s+\d{4}\s+Ti|RTX\s+\d{4}", text, re.I)
     if not match:
         return ""
     return " ".join(match.group(0).upper().replace("RTX", "RTX ").split())
@@ -2640,7 +2640,8 @@ def salad_query_instance_hashrates(config, group_name, lookback_seconds):
         if not instance_id:
             continue
         instance_id = str(instance_id)
-        if instance_id not in gpu_by_instance:
+        # 多卡节点(KRig 逐卡行 GPU0/GPU1…)以 GPU0 为准; 其它行只在还没拿到型号时兜底
+        if instance_id not in gpu_by_instance or re.search(r"\bGPU0\b", text):
             g = parse_log_gpu_name(text)
             if g:
                 gpu_by_instance[instance_id] = g
