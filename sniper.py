@@ -22,6 +22,7 @@ LOG_PATH = Path(os.environ.get("SNIPER_LOG_PATH") or (ROOT / "sniper.log"))
 
 
 ACCOUNT = None  # 本进程账号名(由 --config 文件名推出: config.runpod-2.json → runpod-2), main() 里赋值
+ACTIVE_POOL = None  # 本进程活跃矿池(main() 里 active_pool(config)), 租用记录写入 pool 用
 
 
 def account_platform(account):
@@ -422,12 +423,27 @@ _POOL_HASHRATE_FN = {
     "kryptex": kryptex_worker_hashrates,
 }
 
-def merged_worker_hashrates_ex(config):
+def monitored_pools(config, state=None):
+    """监控池 = 配置 monitor_pools ∪ 活跃池 ∪ 在租机器所属池: 切池后老机器仍在旧池, 必须继续查旧池, 否则被当 0 算力误杀。"""
+    pools = list((config or {}).get("monitor_pools") or [])
+    ap = active_pool(config)
+    if ap in POOLS and ap not in pools:
+        pools.append(ap)
+    for r in (state or {}).get("rented", []) or []:
+        if not r.get("active", True):
+            continue
+        rp = rental_pool(r)
+        if rp in POOLS and rp not in pools:
+            pools.append(rp)
+    return pools or list(POOLS.keys())
+
+
+def merged_worker_hashrates_ex(config, state=None):
     """同 merged_worker_hashrates, 另返回 pool_ok: 是否"至少一个被监控池查询成功(未抛异常)"。
     单池函数在 API 失败时会抛异常(见 request_json), 故"未抛异常"即该池查询成功(空结果=真的没 worker)。
     pool_ok=False 表示全部被监控池查询都失败 → "worker 不在池" 应视为未知(不回收), 防矿池 API 抖动误杀。
     返回 (merged, pool_ok)。"""
-    pools = (config or {}).get("monitor_pools") or list(POOLS.keys())
+    pools = monitored_pools(config, state)
     merged = {}
     pool_ok = False
     for pool in pools:
@@ -592,13 +608,18 @@ def record_rent(state, provider, external_id, gpu, price, result):
         "price": float(price),
         "result": result,
         "active": True,
+        "pool": ACTIVE_POOL,   # 租用时的矿池(切池后老机器仍按此池监控/回收)
     })
 
 
 POOLS = {
+    # platforms: 该池矿机验证可跑的平台; requires: 租宿主时的硬性要求(min_cuda→Vast cuda_max_good / RunPod allowedCudaVersions,
+    # min_reliability→Vast 可靠度下限, grace_seconds_min→回收宽限下限, 矿池只给 30m 均值时防误杀); note: 配置页提示。
     "pearlhash": {"label": "PearlHash",
                   "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
-                  "reads_prl_host": True},
+                  "reads_prl_host": True,
+                  "platforms": ["vast", "runpod", "tensordock", "salad"], "requires": {},
+                  "note": "WildRig(OpenCL), 对宿主驱动容错好; 池 0% 抽水; API 给实时算力"},
     "twpool":    {"label": "TW Pool (小幣礦池)",
                   "image": "docker.io/mrkidbk/pearl-miner-twpool:v1.9.1",
                   "reads_prl_host": False},
@@ -610,7 +631,10 @@ POOLS = {
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
                   "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.1-r4",
-                  "reads_prl_host": True},  # KRig(Kryptex 官方 miner)+ Kryptex 池(镜像内 KRIG_URL 默认, 不读 PRL_HOST)
+                  "reads_prl_host": True,
+                  "platforms": ["vast", "salad", "runpod"],
+                  "requires": {"min_cuda": 13.0, "min_reliability": 0.98, "grace_seconds_min": 1800},
+                  "note": "KRig(CUDA 13): 宿主驱动需支持 CUDA ≥ 13 且显存独占; 只认官方 TLS 入口; 矿池只给 30 分钟均值, 新机前 30 分钟算力偏低; RunPod 社区机部分宿主 cuInit 失败(实测约半数), 靠回收换机"},  # KRig(Kryptex 官方 miner)+ Kryptex 池(镜像内 KRIG_URL 默认, 不读 PRL_HOST)
 }
 
 def _raw_pool(config):
@@ -624,6 +648,43 @@ def active_pool(config):
         return p
     guess = pool_of_image((config or {}).get("image"))
     return guess if guess in POOLS else "pearlhash"
+
+_unsup_last = {}
+def _unsupported_pool_log(provider, pool_id):
+    """平台不支持该池的矿机(如 RunPod + Kryptex/KRig) → 不下单, 每 5 分钟提示一次。账号配置 allow_unsupported_pool=true 可强制。"""
+    now_ts = time.monotonic()
+    if now_ts - _unsup_last.get(provider, 0) >= 300:
+        _unsup_last[provider] = now_ts
+        log(f"{provider} 不支持矿池 {pool_id} 的矿机(见 POOLS.platforms), 跳过建机; 如需强制请在账号配置 {provider}.allow_unsupported_pool=true")
+
+
+def pool_requires(pool_id):
+    return dict((POOLS.get(pool_id) or {}).get("requires") or {})
+
+
+def pool_supports(pool_id, platform):
+    """该池矿机是否在此平台验证可跑; 未声明 platforms 的池视为全平台。"""
+    plats = (POOLS.get(pool_id) or {}).get("platforms")
+    return True if not plats else platform in plats
+
+
+def rental_pool(entry):
+    """租用记录所属矿池: 新记录带 pool; 老记录按 env.PRL_HOST / 镜像推断; 再无 → 本进程活跃池。"""
+    p = str((entry or {}).get("pool") or "")
+    if p in POOLS:
+        return p
+    env = (entry or {}).get("env") or {}
+    host = str(env.get("PRL_HOST") or "").lower()
+    for k in POOLS:
+        if k in host:
+            return k
+    return pool_of_image((entry or {}).get("image")) or ACTIVE_POOL or "pearlhash"
+
+
+def effective_grace(cfg, pool_id, default=300):
+    """回收宽限 = max(账号配置, 池要求下限)。Kryptex 只给 30m 均值 → 至少 1800s。"""
+    return max(int((cfg or {}).get("hashrate_grace_seconds", default)), int(pool_requires(pool_id).get("grace_seconds_min", 0)))
+
 
 def effective_image(config):
     """新抢机器用的镜像: 优先按配置的 pool 镜像; pool 未知/未配则回退 config['image']。"""
@@ -688,6 +749,7 @@ def find_vast_offers(config, state):
         log("Vast skipped: VAST_API_KEY is not set")
         return []
     cfg = config["vast"]
+    req = pool_requires(active_pool(config))
     headers = {"Authorization": f"Bearer {api_key}"}
     body = {
         "limit": 500,
@@ -695,9 +757,11 @@ def find_vast_offers(config, state):
         "rentable": {"eq": True},
         "rented": {"eq": False},
         "num_gpus": {"eq": 1},
-        "reliability": {"gte": float(cfg.get("min_reliability", 0.95))},
+        "reliability": {"gte": max(float(cfg.get("min_reliability", 0.95)), float(req.get("min_reliability", 0)))},
         "dph_total": {"lte": float(cfg.get("max_offer_price_usd", 0.8))},
     }
+    if req.get("min_cuda"):   # 池要求宿主驱动 CUDA 版本(Vast offer 的 cuda_max_good), 如 Kryptex/KRig 需 ≥ 13
+        body["cuda_max_good"] = {"gte": float(req["min_cuda"])}
     data = request_json("POST", "https://console.vast.ai/api/v0/bundles/", headers, body, timeout=45)
     offers = data.get("offers", []) if isinstance(data, dict) else []
     matches = []
@@ -724,6 +788,8 @@ def find_vast_offers(config, state):
             continue
         if float(offer.get("disk_space") or 0) < float(cfg.get("min_disk_gb", 0)):
             continue
+        if req.get("min_cuda") and float(offer.get("cuda_max_good") or 0) < float(req["min_cuda"]):
+            continue   # 查询端过滤兜底
         if not is_preferred_location(offer, cfg):
             continue
         matches.append({
@@ -884,7 +950,7 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
     cfg = config.get("vast", {})
     if not cfg.get("hashrate_watch_enabled", True):
         return False
-    if age < int(cfg.get("hashrate_grace_seconds", 300)):
+    if age < effective_grace(cfg, rental_pool(rented)):
         return False
     now_ts = epoch_now()
     last_check = float(rented.get("hashrate_last_check_epoch") or 0)
@@ -899,9 +965,10 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
     except Exception as exc:
         log(f"Vast hashrate log check failed: contract={contract_id} error={exc}; falling back to pool worker API (merged across monitor_pools, incl active pool)")
     if hashrate_th is None:
-        worker = make_worker(config, "vast", rented.get("gpu"), rented.get("external_id"))
+        # 用租用时真正注入的 worker 名(env.PRL_WORKER); 按当前 config 重算会在切池后得到另一种命名(如 kx-va-… vs auto-vast-…)而查不到
+        worker = ((rented.get("env") or {}).get("PRL_WORKER")) or make_worker(config, "vast", rented.get("gpu"), rented.get("external_id"))
         try:
-            merged, pool_ok = merged_worker_hashrates_ex(config)
+            merged, pool_ok = merged_worker_hashrates_ex(config, state)
         except Exception as exc:
             log(f"Vast pool worker check failed: contract={contract_id} worker={worker} error={type(exc).__name__}: {exc}")
             merged, pool_ok = {}, False
@@ -1507,7 +1574,7 @@ def reconcile_runpod_instances(config, state):
         if worker_hashrates is None:
             try:
                 # pool_ok=False 表示全部被监控池查询都失败 → worker_api_failed, 跳过不按 0 杀(防 API 抖动误杀全体)。
-                worker_hashrates, pool_ok = merged_worker_hashrates_ex(config)
+                worker_hashrates, pool_ok = merged_worker_hashrates_ex(config, state)
                 worker_api_failed = not pool_ok
             except Exception as exc:
                 log(f"RunPod pool worker check failed: {type(exc).__name__}: {exc}")
@@ -1637,6 +1704,9 @@ def try_runpod_create(config, state, live):
     if not cfg.get("create_enabled", False):
         log("RunPod create disabled in config; not attempting Pod creation")
         return
+    if not pool_supports(active_pool(config), "runpod") and not cfg.get("allow_unsupported_pool", False):
+        _unsupported_pool_log("runpod", active_pool(config))
+        return
     if not live:
         log("Dry run: RunPod create would be attempted only with --live")
         return
@@ -1709,6 +1779,9 @@ def try_runpod_create(config, state, live):
             # 可选: 只租宿主驱动 CUDA 版本在列表内的机器(RunPod allowedCudaVersions, 可选值 13.0/12.9/12.8/.../11.8)。
             # CUDA 原生 miner(KRig/PF)在旧驱动宿主上 cuInit 失败; 按账号配置, 不配则不传(任意版本)。
             acv = cfg.get("allowed_cuda_versions")
+            if not acv and pool_requires(active_pool(config)).get("min_cuda"):
+                mc = float(pool_requires(active_pool(config))["min_cuda"])
+                acv = [v for v in ("13.0", "12.9", "12.8", "12.7", "12.6", "12.5", "12.4") if float(v) >= mc]
             if acv:
                 body["allowedCudaVersions"] = [str(x) for x in acv]
             registry_auth_id = cfg.get("container_registry_auth_id") or os.environ.get("RUNPOD_CONTAINER_REGISTRY_AUTH_ID")
@@ -2469,7 +2542,7 @@ def reconcile_tensordock_instances(config, state):
             rented["ssh_ready"] = True
             rented["ssh_host"] = host
             rented["ssh_port"] = port
-            if cfg.get("hashrate_watch_enabled", True) and age >= int(cfg.get("hashrate_grace_seconds", 300)):
+            if cfg.get("hashrate_watch_enabled", True) and age >= effective_grace(cfg, rental_pool(rented)):
                 now_ts = epoch_now()
                 last_check = float(rented.get("hashrate_last_check_epoch") or 0)
                 if now_ts - last_check >= int(cfg.get("hashrate_watch_interval_seconds", 30)):
@@ -2524,6 +2597,9 @@ def try_tensordock_create(config, state, live):
     if renting_paused("tensordock"):
         return
     if not cfg.get("create_enabled", False):
+        return
+    if not pool_supports(active_pool(config), "tensordock") and not cfg.get("allow_unsupported_pool", False):
+        _unsupported_pool_log("tensordock", active_pool(config))
         return
     for match in find_tensordock_offers(config, state):
         if rent_tensordock(config, match, state, live):
@@ -2767,7 +2843,7 @@ def run_salad_cycle(config, state, live):
     worker_hashrates = {}
     if use_worker_fallback:
         try:
-            worker_hashrates = merged_worker_hashrates(config)
+            worker_hashrates = merged_worker_hashrates_ex(config, state)[0]
         except Exception as exc:
             log(f"Salad PearlHash worker check failed: {type(exc).__name__}: {exc}")
     # 按型号判健康: 从矿池按 machine_id 解析每台真实 GPU, 取该型号的 min_hashrate_th 门槛
@@ -3176,6 +3252,8 @@ def main():
     global ACCOUNT
     m = re.match(r"^config\.(.+)\.json$", config_path.name)
     ACCOUNT = m.group(1) if m else None
+    global ACTIVE_POOL
+    ACTIVE_POOL = active_pool(config)
     state = load_json(STATE_PATH, {"seen": {}, "rented": []})
     reset_n = reset_low_eff_timers(state)  # 重启后重置观测窗口, 避免继承旧计时器一启动就误杀
     mode = "LIVE" if args.live else "DRY-RUN"

@@ -2,6 +2,18 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [矿池注册表带宿主要求 + 切池不影响在跑机器 + Vast/Kryptex 纳入自动化] — 2026-09-21
+
+### Added — 新增
+- `POOLS` 每池新增 `platforms`(验证可跑的平台)/`requires`(`min_cuda`→Vast `cuda_max_good` 过滤与 RunPod `allowedCudaVersions` 自动填充、`min_reliability`→Vast 可靠度下限、`grace_seconds_min`→回收宽限下限)/`note`。Kryptex:CUDA ≥ 13、可靠度 ≥ 0.98、宽限 ≥ 1800s,平台 vast/salad/runpod(RunPod 部分宿主 cuInit 失败靠回收换机)。
+- 租用记录写入 `pool`;监控池 = 配置 `monitor_pools` ∪ 活跃池 ∪ 在租机器所属池(`monitored_pools`),切池后老机器仍按原池查算力,不再被当 0 算力误杀;看板切池自动把新池并入 `monitor_pools`。
+- 回收宽限按池取大(`effective_grace`);平台不支持的池不下单并每 5 分钟提示(`allow_unsupported_pool` 可强制)。
+- 配置页:矿池下拉标注 "(该平台不支持)",下拉下方显示该池租用要求与说明;总览「矿池参考」列平台支持与要求;Vast/RunPod 高级设置增 宽限秒数 / 低效持续秒数。
+
+### Fixed — 修复
+- Vast 回收按 `env.PRL_WORKER`(租用时真正注入的名字)查矿池,不再按当前 config 重算(切池后命名不同查不到 → 0 算力误判)。
+- 手动租的 Vast Kryptex 实例 51847099 已登记进 sniper 状态,由自动化接管(4090 门槛 220 TH,宽限 30 分钟)。
+
 ## [Kryptex 短 worker 名 + runpod-2 单机重测] — 2026-09-21
 
 ### Fixed — 修复

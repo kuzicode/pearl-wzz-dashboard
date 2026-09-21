@@ -40,10 +40,12 @@ ACCOUNT_KEYS = ["prl_address", "worker_prefix", "max_active_instances", "max_tot
 # 每平台结构化暴露的特定字段: (key, type)  type in num/str/list/bool
 SPECIFIC = {
     "vast": [("max_offer_price_usd", "num"), ("min_offer_price_usd", "num"),
-             ("min_reliability", "num"), ("disk_gb", "num"), ("prefer_countries", "list")],
+             ("min_reliability", "num"), ("disk_gb", "num"), ("prefer_countries", "list"),
+             ("hashrate_grace_seconds", "num"), ("low_efficiency_stop_seconds", "num")],
     "runpod": [("cloud_types", "list"), ("country_codes", "list"), ("container_disk_gb", "num"),
                ("create_observed_price_factor", "num"), ("short_exit_blacklist_seconds", "num"),
-               ("allowed_cuda_versions", "list"), ("hashrate_watch_enabled", "bool")],
+               ("allowed_cuda_versions", "list"), ("hashrate_watch_enabled", "bool"),
+               ("hashrate_grace_seconds", "num"), ("low_efficiency_stop_seconds", "num"), ("allow_unsupported_pool", "bool")],
     "tensordock": [("excluded_states", "list"), ("storage_gb", "num"), ("vcpu_count", "num"),
                    ("ram_gb", "num"), ("seen_ttl_seconds", "num")],
     "salad": [("organization_name", "str"), ("project_name", "str"), ("include_container_groups", "list"),
@@ -1753,7 +1755,8 @@ def build_full_config():
             "account": {k: cfg.get(k) for k in ACCOUNT_KEYS},
         }
     return {"common": common, "common_diff": common_diff, "platforms": plats,
-            "pools": [{"id": k, "label": v["label"], "image": v["image"], "reads_prl_host": v["reads_prl_host"]}
+            "pools": [{"id": k, "label": v["label"], "image": v["image"], "reads_prl_host": v["reads_prl_host"],
+                       "platforms": v.get("platforms") or [], "requires": v.get("requires") or {}, "note": v.get("note") or ""}
                       for k, v in available_pools(S)]}
 
 def backup_and_write(path, obj):
@@ -1802,8 +1805,12 @@ def save_pool_cfg(acct, pool):
     p = cfg_path(acct)
     cfg = read_json(p, {})
     cfg["pool"] = pool          # 顶层! 不是 cfg[plat]
+    mp = list(cfg.get("monitor_pools") or [])
+    if pool not in mp:          # 新池并入监控池(保留旧池: 在跑机器仍在旧池, 要继续查旧池才不会被当 0 算力回收)
+        mp.append(pool)
+    cfg["monitor_pools"] = mp
     backup_and_write(p, cfg)
-    return {"ok": True, "platform": acct, "pool": pool}
+    return {"ok": True, "platform": acct, "pool": pool, "monitor_pools": mp}
 
 def save_common_cfg(data):
     if not isinstance(data, dict):
@@ -2725,7 +2732,7 @@ ${cf('alert_url','告警 URL (可空)',0,'ntfy 等')}
 <span class=hint>保存后各账号需「重启应用」生效</span></div>
 <div class=lbl style=margin-top:14px>矿池参考 <span class=muted style="font-size:11px;font-weight:400">· 镜像由各账号所选矿池自动决定, 无需手填 image</span></div>
 <div style="font-size:12px;color:var(--mut);line-height:1.9">
-${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="font-size:11px">${esc(o.image||'')}</code> · ${o.reads_prl_host?'读 PRL_HOST(账号 config 的 prl_host)':'不读 host(池写死在镜像内)'}</div>`).join('')}
+${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="font-size:11px">${esc(o.image||'')}</code> · 平台: ${esc((o.platforms||[]).join(' / ')||'全部')}${poolReqText(o)?' · 要求: '+esc(poolReqText(o)):''}${o.note?'<br><span style="padding-left:14px">'+esc(o.note)+'</span>':''}</div>`).join('')}
 </div></div>
 <div class=platbox><div class=top><b>账户 · 看板登录</b></div>
 <div class=grid2>
@@ -2733,6 +2740,10 @@ ${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="
 <div class=fld>新密码</div><input id=newpw type=password placeholder="至少 4 位">
 </div><div class=row style=margin-top:12px><button class=b-acc onclick=savePw()>更新密码</button>
 <span class=hint>立即生效, 下次登录用新密码</span></div></div>`;}
+function poolOk(o,plat){return !(o.platforms||[]).length||(o.platforms||[]).includes(plat);}
+function poolReqText(o){const r=o.requires||{};const parts=[];if(r.min_cuda)parts.push('宿主 CUDA ≥ '+r.min_cuda);if(r.min_reliability)parts.push('可靠度 ≥ '+r.min_reliability);if(r.grace_seconds_min)parts.push('回收宽限 ≥ '+Math.round(r.grace_seconds_min/60)+' 分钟');return parts.join(' · ');}
+function poolReqHtml(pid,plat){const o=(CFG.pools||[]).find(x=>x.id==pid);if(!o)return '';const ok=poolOk(o,plat);const req=poolReqText(o);
+return `<div class=hint style="margin-top:6px;${ok?'':'color:var(--bad)'}">${ok?'':'⚠ 该矿池的矿机在 '+esc(plat)+' 上未验证可跑, 抢租会跳过(高级设置 allow_unsupported_pool 可强制)。 '}${req?'租用要求: '+esc(req)+'。 ':''}${o.note?esc(o.note):''}</div>`;}
 function platformHtml(v,p){let ac=v.account||{};
 let proc=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${(v.platform||p)=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'');
 let key=v.key_set?`<span class="pill ok">已设置 ${esc(v.key_mask)}</span>`:'<span class="pill bad">未设置</span>';
@@ -2751,7 +2762,7 @@ return `<div class=lbl>${esc(v.label||p)} · 账号配置</div>
 <div class=grid2>
 <div class=fld>${N(2)}启用本账号</div><label class=ckrow><input type=checkbox id="en_${p}" ${v.enabled?'checked':''}><span class=hint>${isS?'关掉则不监控 Salad 容器组(不影响容器组本身运行)':'关掉则不扫描不租用'}</span></label>
 ${v.has_create?`<div class=fld>自动建机</div><label class=ckrow><input type=checkbox id="ce_${p}" ${v.create_enabled?'checked':''}><span class=hint>价格达标自动下单; 关掉只观察不租</span></label>`:''}
-${isS?`<div class=fld>机器数 / 矿池</div><div class=hint style="padding-top:9px">由 Salad portal 里的容器组决定: replicas = 台数, 镜像 = 矿池(krig → Kryptex, wildrig → PearlHash); 本页不设租用上限与出价</div>`:`<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}</option>`).join('')}</select> <span class=hint>只影响之后新租的机器, 镜像随矿池自动决定</span></div>
+${isS?`<div class=fld>机器数 / 矿池</div><div class=hint style="padding-top:9px">由 Salad portal 里的容器组决定: replicas = 台数, 镜像 = 矿池(krig → Kryptex, wildrig → PearlHash); 本页不设租用上限与出价</div>`:`<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}${poolOk(o,v.platform||p)?'':' (该平台不支持)'}</option>`).join('')}</select> <span class=hint>只影响之后新租的机器, 镜像随矿池自动决定; 在跑机器保持原池, 照常监控回收</span>${poolReqHtml(v.pool,v.platform||p)}</div>
 <div class=fld>${N(4)}最多同时租 (台)</div><input id="ac_${p}_max_active_instances" value="${av('max_active_instances')}" placeholder="1">
 <div class=fld>总时租上限 ($/h)</div><input id="ac_${p}_max_total_hourly_usd" value="${av('max_total_hourly_usd')}" placeholder="1.0">`}
 </div>
@@ -2799,7 +2810,7 @@ function gpuRowHtml(p,i,g){return `<div class=gpurow data-gpu>
 <button class=b-bad onclick="this.parentNode.remove()">×</button></div>`;}
 function addGpu(p){document.getElementById('gpus_'+p).insertAdjacentHTML('beforeend',gpuRowHtml(p,0,{}));}
 const SPEC_LABELS={max_offer_price_usd:'最高报价 $/h (粗筛)',min_offer_price_usd:'最低报价 $/h (滤异常低价)',min_reliability:'最低可靠度 0-1',disk_gb:'磁盘 GB',prefer_countries:'优先国家',
-cloud_types:'云类型 COMMUNITY/SECURE',country_codes:'国家代码',container_disk_gb:'容器磁盘 GB',create_observed_price_factor:'观测价保守系数 (1=按观测价)',short_exit_blacklist_seconds:'短命退出拉黑秒数',allowed_cuda_versions:'允许宿主 CUDA 版本 (空=不限; CUDA 原生矿机需 13.0)',hashrate_watch_enabled:'零算力监控回收',
+cloud_types:'云类型 COMMUNITY/SECURE',country_codes:'国家代码',container_disk_gb:'容器磁盘 GB',create_observed_price_factor:'观测价保守系数 (1=按观测价)',short_exit_blacklist_seconds:'短命退出拉黑秒数',allowed_cuda_versions:'允许宿主 CUDA 版本 (空=不限; CUDA 原生矿机需 13.0)',hashrate_watch_enabled:'零算力监控回收',hashrate_grace_seconds:'新机宽限秒数 (期间不判低效; 池有下限时取大)',low_efficiency_stop_seconds:'低效持续秒数后回收',allow_unsupported_pool:'强制在本平台跑未验证的矿池矿机',
 excluded_states:'排除州/地区',storage_gb:'存储 GB',vcpu_count:'vCPU 数',ram_gb:'内存 GB',seen_ttl_seconds:'已看过 offer 记忆秒数',
 organization_name:'组织名',project_name:'项目名',include_container_groups:'纳入的容器组',default_min_hashrate_th:'默认最低算力 TH/s',per_model_threshold_enabled:'按型号门槛',treat_missing_log_as_zero:'无日志视为 0 算力',low_efficiency_stop_seconds:'低效持续秒数后回收',reallocate_cooldown_seconds:'重分配冷却秒数',hashrate_watch_interval_seconds:'算力检查间隔秒',log_lookback_seconds:'日志回看秒数',missing_worker_as_zero:'矿池无 worker 视为 0',alphapool_worker_api_enabled:'AlphaPool worker API',alphapool_reallocate_enabled:'AlphaPool 自动重分配',balance_usd:'手填余额 $'};
 function specHtml(p,s){let id=`sp_${p}_${s.key}`;let lb=(SPEC_LABELS[s.key]||s.key)+` <span class=muted>${s.key}</span>`;
