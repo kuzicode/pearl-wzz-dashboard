@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [KRig 升级 1.5.2] — 2026-09-21
+
+### Changed — 变更
+- Kryptex 池镜像 → `kuzigmgm/pearl-miner:krig-1.5.2`(KRig 1.5.2,入口脚本不变:短 rig 名、官方 TLS 入口、缺钱包拒启);`POOLS["kryptex"]` 与 vast-账号2 配置已指向新 tag,Salad 容器组 kuzi-miner-2-salad 同步换镜像。在跑的 Vast 机器不动,新租用 1.5.2。
+
 ## [账号备注可在仪表盘直接编辑] — 2026-09-21
 
 ### Added — 新增

@@ -630,7 +630,7 @@ POOLS = {
                      "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
-                  "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.1-r4",
+                  "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.2",
                   "reads_prl_host": True,
                   "platforms": ["vast", "salad", "runpod"],
                   "requires": {"min_cuda": 13.0, "min_reliability": 0.98, "grace_seconds_min": 1800},
