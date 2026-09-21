@@ -203,6 +203,12 @@ def parse_latest_hashrate(log_text):
         if match:
             latest = float(match.group(1)) * _HASHRATE_UNIT_MULT.get(match.group(2).upper(), 1)
             continue
+        # KRig(kryptex 镜像): "Total: 87.85 TH/s shares: ..." / "GPU0 01:00.0 RTX 4070: 109.07 TH/s 17/0/0 ..."
+        match = (re.search(r"Total:\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?H)/s", line, re.I)
+                 or re.search(r"GPU\d+\s+[0-9a-f]+:[0-9a-f]+\.[0-9]\s+.+?:\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?H)/s", line, re.I))
+        if match:
+            latest = float(match.group(1)) * _HASHRATE_UNIT_MULT.get(match.group(2).upper(), 1)
+            continue
         # twpool 镜像: "... | 134.6 TH/s window | 135.2 TH/s avg | shares: ..." → 取 window(当前), 无则退 avg
         match = (re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?H)/s\s*window", line, re.I)
                  or re.search(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?H)/s\s*avg", line, re.I))
@@ -234,7 +240,7 @@ def parse_hashrate_text(value):
 
 def parse_log_gpu_name(log_text):
     text = str(log_text or "")
-    match = re.search(r"RTX\s+5070\s+Ti|RTX\s+4070\s+Ti\s+Super|RTX\s+3090\s+Ti|RTX\s+3080\s+Ti|RTX\s+\d{4}", text, re.I)
+    match = re.search(r"RTX\s+5070\s+Ti|RTX\s+4070\s+Ti\s+Super|RTX\s+\d{4}\s+Super|RTX\s+3090\s+Ti|RTX\s+3080\s+Ti|RTX\s+\d{4}", text, re.I)
     if not match:
         return ""
     return " ".join(match.group(0).upper().replace("RTX", "RTX ").split())
