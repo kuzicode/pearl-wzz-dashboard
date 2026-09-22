@@ -785,7 +785,7 @@ POOLS = {
                      "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
-                  "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.2",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
+                  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r2",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
                   "reads_prl_host": True,
                   "platforms": ["vast", "salad", "runpod"],
                   "requires": {"min_reliability": 0.98, "grace_seconds_min": 1800},   # 池级要求; 矿机相关(min_cuda)在 miners[*].requires
@@ -798,8 +798,8 @@ POOLS = {
                                    "requires": {},
                                    "note": "pearlhash 不硬性要求 CUDA 13, 旧驱动宿主可跑(5000 系建议 ≥580); dev fee 2%; 无 TTY 不输出故镜像用 script 伪终端包裹, 每分钟打 hashrate_th_s= 行"},
                   },
-                  "default_miner": "krig",
-                  "note": "只认官方 TLS 入口; 矿池只给 30 分钟均值, 新机前 30 分钟算力偏低; 矿机可选 KRig(需 CUDA 13) / SRBMiner(旧驱动可跑)"},
+                  "default_miner": "srbminer",   # 2026-09-22 起默认 SRBMiner(RunPod 只有它跑得起来); 账号 config 顶层 miner=krig 可回退
+                  "note": "只认官方 TLS 入口; 矿池只给 30 分钟均值, 新机前 30 分钟算力偏低; 矿机默认 SRBMiner(旧驱动可跑, dev fee 2%), 可选 KRig(需 CUDA 13, 0% fee)"},
 }
 
 def _raw_pool(config):

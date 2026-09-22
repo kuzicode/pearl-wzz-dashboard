@@ -11,7 +11,8 @@
 - 测试 `tests/test_pool_miner_variant.py`。
 
 ### Changed — 变更
-- 运维:runpod-2 切到 `pool=kryptex, miner=srbminer`,`allowed_cuda_versions=[]`,先 1 台 / $0.6/h 试跑。
+- **Kryptex 默认矿机改为 SRBMiner**(`default_miner=srbminer`,`POOLS["kryptex"].image` 同步指向 `srb-3.6.9-r2`);要回 KRig 在账号 config 顶层设 `miner: "krig"`(配置页矿机下拉)。试跑通过:RunPod 4090 279 TH/s、份额 100% 接受。
+- 运维:runpod-2 试跑通过后放开到 10 台 / $5/h;runpod-1 / runpod-2 的 4090 出价上限 0.30 → 0.35(RunPod 社区价 $0.34,0.30 永远租不到)。
 
 ## [单机经济性 + 自动关停亏损机 + Kryptex 已付修正 + GPU 目录推荐] — 2026-09-22
 
