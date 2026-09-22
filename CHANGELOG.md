@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Kryptex 30m 均值按 worker 上线时长还原(ISS-022)] — 2026-09-22
+
+### Fixed — 修复
+- Kryptex 只给 `avg_hashrate_30m`,新 worker 不足 30 分钟时均值被窗口里的 0 拉低(pod 拉镜像 5–8 分钟才上池 → 宽限一到均值只有 240 TH,低于门槛 250 被误杀,一天 6 台好机)。新增 `kryptex_window_scale()`:按 `opened_at` 把均值放大 30/在线分钟(不足 10 分钟按 10 算,上限 ×3,≥30 分钟不变),sniper 回收判定与看板显示同口径。`tests/test_kryptex_window_scale.py`。
+
 ## [normalize_gpu 区分 Laptop 变体] — 2026-09-22
 
 ### Fixed — 修复

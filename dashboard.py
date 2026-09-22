@@ -1597,6 +1597,11 @@ def _kryptex_view():
         if str(w.get("status") or "online").lower() != "online":
             continue   # Kryptex 会长期保留离线 rig(换机后旧 rig 名), 不列入 worker 表
         wth = hashrate_th(_kx_rate(w))   # 实测字段 avg_hashrate_30m(H/s), 无 'hashrate'; offline → 0
+        try:                             # 上池不足 30 分钟的 worker 把 30m 均值按在线时长放大回真实算力(与 sniper.kryptex_window_scale 同口径)
+            import sniper as _S
+            wth = wth * _S.kryptex_window_scale(w)
+        except Exception:
+            pass
         total += wth
         wlist.append({"name": w.get("worker"), "th": round(wth, 2), "ip": None, "gpus": []})
     bal = (d.get("balance") or {}) if isinstance(d, dict) else {}

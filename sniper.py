@@ -411,11 +411,29 @@ def kryptex_worker_hashrates(config):
     url = f"https://pool.kryptex.com/prl/api/v3/miner/workers/{urllib.parse.quote(address)}"
     data = request_json("GET", url, {"User-Agent": KRYPTEX_UA, "Accept": "application/json"}, timeout=20)
     workers = {}
+    now_ms = epoch_now() * 1000.0
     for w in (data or {}).get("results", []):
         name = str(w.get("worker") or "")
         if name:
-            workers[name] = {"hashrate_th": hashrate_to_th(kryptex_rate(w)), "gpu_info": []}
+            workers[name] = {"hashrate_th": hashrate_to_th(kryptex_rate(w)) * kryptex_window_scale(w, now_ms), "gpu_info": []}
     return workers
+
+
+def kryptex_window_scale(w, now_ms=None):
+    """Kryptex 只给 avg_hashrate_30m(30 分钟滑窗均值): worker 上池不足 30 分钟时, 窗口里前面全是 0, 均值 ≈ 真实算力 × 在线分钟/30。
+    按 opened_at 把均值放大回真实算力(上限 ×3, 只在不足 30 分钟时生效), 否则新机 30 分钟宽限一到就被 30m 均值误判低效(实测 4090 240 TH < 门槛 250 被杀)。"""
+    try:
+        opened = float(w.get("opened_at") or 0)
+        if opened <= 0:
+            return 1.0
+        if now_ms is None:
+            now_ms = epoch_now() * 1000.0
+        age_min = (now_ms - opened) / 60000.0
+        if age_min <= 0 or age_min >= 30:
+            return 1.0
+        return min(3.0, 30.0 / max(age_min, 10.0))   # 不足 10 分钟按 10 分钟算, 避免刚上池的几个份额被放大到离谱
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def lookup_worker(worker_hashrates, worker_name):
