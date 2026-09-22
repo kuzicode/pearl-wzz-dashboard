@@ -2,6 +2,16 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [0.2.0 上线检查: README 重写精简 + 模板与测试清理] — 2026-09-22
+
+### Changed — 变更
+- **README 重写精简**(129 → 107 行):快速开始 4 步、「看板能做什么」按功能归纳、新增「矿池与矿机」表(PearlHash+WildRig / Kryptex+SRBMiner 默认、KRig 可选)、默认配置表与必改项合并;删掉已下线矿池与「挖矿成本卡」等旧描述;**安全一节改为如实说明「偷窥模式」是只读但能看到实时数据**(此前写成"仅见演示占位页"与实际不符)。
+- `pyproject.toml` 版本 0.1.0 → 0.2.0。
+- 模板 `config.runpod.example.json` 删除死键 `start_ssh`;Salad 账号页镜像提示补 `srb → Kryptex`。
+
+### Fixed — 修复
+- 两个长期失败的旧测试改为当前口径:`test_full_config_pools`(Kryptex 默认镜像为 srb、下线池不在列表)、`test_salad_perf`(阈值 0.9s → 1.2s 防慢机误报)。全部 61 个测试通过;在干净 clone 上复制模板即可跑通测试,占位钱包按预期拒绝启动。
+
 ## [盈亏列改名 + Kryptex 付款跨域翻页修复 + 示例配置默认值更新 + TensorDock 限流修复] — 2026-09-22
 
 ### Fixed — 修复

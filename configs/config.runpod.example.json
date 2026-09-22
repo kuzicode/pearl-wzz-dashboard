@@ -60,7 +60,6 @@
       "NVIDIA GeForce RTX 5090": 300
     },
     "create_observed_price_factor": 1.0,
-    "start_ssh": false,
     "short_exit_blacklist_seconds": 60,
     "cleanup_untracked_terminal_pods": false,
     "hashrate_watch_enabled": true

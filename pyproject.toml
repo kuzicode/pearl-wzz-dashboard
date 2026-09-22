@@ -1,6 +1,6 @@
 [project]
 name = "pearl-wzz-dashboard"
-version = "0.1.0"
+version = "0.2.0"
 description = "今晚挖珍珠 // PEARL_SNIPER: 多平台 GPU 自动租用 + 监控看板(stdlib + 可选 playwright)"
 requires-python = ">=3.11"
 dependencies = [
