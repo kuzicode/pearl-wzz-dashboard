@@ -19,6 +19,9 @@ D.read_json=lambda p, default=None: {"reset_epoch": time.time()-7200, "cumulativ
 D.pearlfortune_data=lambda force=False: {"miner":{"data":{"balances":None,"pending_shares":{"pending_estimate_amount_atomic":16000000}}},"connections":{"data":{"workers":[]}},"ledger":{"data":{"sum_payout_amount_atomic":"0","sum_credit_amount_atomic":"0"}}}
 D.herominers_data=lambda force=False: {"error":"Not found"}
 D.twpool_data=lambda force=False: {"balance":0.0,"paid":0.0,"reported":{}}
+D.kryptex_data=lambda force=False: {"_error":"skip"}   # 隔离真实外呼(否则慢请求拉长 hours 使均值偏差)
+D.kryptex_payouts_total=lambda force=False: None
+D.network_yield=lambda: None
 D.pool_data=lambda force=False: {"balance":0.0,"connected_workers":[]}
 
 s=D.build_summary("pearlfortune")

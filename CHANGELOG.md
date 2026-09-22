@@ -2,6 +2,22 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [单机经济性 + 自动关停亏损机 + Kryptex 已付修正 + GPU 目录推荐] — 2026-09-22
+
+### Added — 新增
+- **网络产率**:看板从 prlscan 最新区块(难度 + 出块奖励)算每 TH/s 每小时理论产币(`yield = 3600×reward/(difficulty×2^48/1e12)`,与 hashrate.no / Kryptex 全网算力校准;`YIELD_DIFF_SCALE` 可覆盖),10 分钟 serve-stale。`/api/summary` 新增 `yield_prl_per_th_h / yield_live / breakeven_usd_per_100th / value_usd_h_total`。
+- **机器表「产值 $/h」「回本」列**:产值 = 算力 × 产率 × 币价 × (1−池费);回本 = (产值−单价)/单价,绿 盈利 / 黄 成本线附近 / 红 亏超阈值;表头下红色**回本线**行(`$/100TH·h` 高于它 = 租金超过产值),`$/100TH·h` 高于回本线也标红。总览卡片下新增一行:网络产率 · 回本线 · 在跑产值 vs 时租 · 自动关停状态。`/api/rentals` 每台机器新增 `value_usd_h / margin_pct / breakeven_usd_per_100th`。
+- **自动关停亏损机**(默认开):看板每 60s 检查非-Salad 在跑机器,机龄 ≥30 分钟、产值 < 单价×(1−20%) 且持续 20 分钟才 terminate;币价/产率数据过期、账号进程没跑、成本线附近、新机一律不动;每 tick 最多关 2 台,候选超过在跑一半时暂停(防数据异常误杀)。`.env` `AUTO_STOP_ENABLED / AUTO_STOP_LOSS_PCT / AUTO_STOP_MIN_AGE_MIN / AUTO_STOP_PERSIST_MIN / AUTO_STOP_BLACKLIST_HOURS`,配置总览页「自动关停亏损机」可改(`POST /api/auto-stop-settings`,立即生效);总览新增「自动关停记录」。关停后写 `control/<账号>.blacklist-add` 交接给 sniper 拉黑该 offer/机器 6 小时(sniper 每轮 rename 后合并;拉黑条目支持 `expires_epoch` 过期)。
+- **数据分析 · 矿池能效对比**(总览可折叠面板,与行情面板同款):每池一列对比 在跑/实测算力/时租/每 100TH 租金/理论产值与盈亏/累计租金·产出·利润/成本 $/PRL/每 $ 产币/累计算力小时/**实测产率**(累计产出 ÷ 算力小时)/**矿池效率**(实测 ÷ 全网理论)/池费,行内更优者标绿。`tick_spend` 新增按池累计 `th_hours_by_pool`(矿池实测算力 × 时长,重置统计时清零);`/api/summary` 新增 `pool_analysis[]`、`theory_prl_per_th_day`。回本线本身是全网理论值(两池只差池费),池间差异看「矿池效率」。
+- **配置页 GPU 档下拉**:`GPU_CATALOG`(sniper.py,RTX 20/30/40/50 系 + A/H/L 系数据中心卡)+ `GET /api/gpu-catalog`:每型号参考算力(公开表;本池同型号 ≥3 台时用实测中位数)、建议出价(= 参考算力 × 产率 × 币价 × (1−池费) × (1−目标利润率),利润率 10–40% 可选)、建议最低算力(参考 × 75%)、市场参考价(RunPod 社区档 / Vast 典型 / RunPod 实时观测最低价);行下提示 + 「采用推荐」一键回填;仍可「自定义…」手填。`normalize_gpu` 补 3070/3060/20 系与 H100/A100/L40S/L4/RTX 6000 Ada/A6000/A5000/A4000/V100/T4。
+
+### Fixed — 修复
+- **Kryptex 已付款漏算(ISS-020)**:`_kryptex_view` 原硬编码 `pool_paid=None`,Kryptex 每小时自动付款后余额归零,自重置产出把已付全部漏掉(本次 14 笔 24.43 PRL,利润被低估约 $25)。现从 `/prl/api/v1/miner/payouts` 按 `next` 翻页求和(只计 FINISHED;任一页失败整体保留旧值),`kryptex_data` 进后台预热;`tick_output` 新增 `output_<pool>_paid_baseline`,旧基线首次拿到 paid 时只把重置前的付款并入基线,显示值不跳变。
+
+### Changed — 变更
+- `/api/rentals` 非-Salad 机器增加 `provider / external_id / machine_id`;`/api/full-config` 增加 `auto_stop`。
+- 运维:vast-2 / salad 账号已打「暂停租用」(Kryptex 换 miner 前不再新租;在跑机器保留)。
+
 ## [KRig 升级 1.5.2] — 2026-09-21
 
 ### Changed — 变更

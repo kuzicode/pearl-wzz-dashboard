@@ -160,6 +160,21 @@ _kline_cache: dict = {}  # {period_int: (data_list, ts)}
 KLINE_TTL = {15: 30, 60: 120, 240: 300, 1440: 600}  # 各周期缓存秒数
 _KLINE_BASE = "https://safetrade.com/api/v2/trade/public/markets/prlusdt/k-line"
 _KLINE_LIMITS = {15: 288, 60: 240, 240: 180, 1440: 180}  # 各周期拉取条数
+# ---- 网络产率(prlscan 最新区块: difficulty + reward) ----
+# PRL/TH·h = 3600 × reward / (difficulty × YIELD_DIFF_SCALE / 1e12) × (1 − 池费)。2^48 为经验校准常数
+# (与 hashrate.no 0.0281 PRL/TH/天、Kryptex 全网 44.76 EH/s 一致), 可用 env YIELD_DIFF_SCALE 覆盖。
+_PRLSCAN_BLOCKS = "https://api.prlscan.com/v1/blocks?limit=1"
+YIELD_TTL = 600.0          # 后台预热周期内视为新鲜
+YIELD_STALE_MAX = 1800.0   # 超此值请求线程兜底重拉; 自动关停要求产率不老于此
+YIELD_DIFF_SCALE = float(os.environ.get("YIELD_DIFF_SCALE") or 2 ** 48)
+_yield_cache: dict = {}    # {"v": {...}, "ts": float}
+POOL_FEE = {"pearlhash": 0.01, "kryptex": 0.02}   # PearlHash 1%; Kryptex PRL PPS+ 2%(SOLO 1%), 2026-09 官网
+POOL_FEE_DEFAULT = 0.01
+# ---- 自动关停亏损机(.env, 每 tick 重读, 改了无需重启) ----
+AUTO_STOP_DEFAULTS = {"AUTO_STOP_ENABLED": "1", "AUTO_STOP_LOSS_PCT": "20", "AUTO_STOP_MIN_AGE_MIN": "30",
+                      "AUTO_STOP_PERSIST_MIN": "20", "AUTO_STOP_BLACKLIST_HOURS": "6"}
+AUTO_STOP_MAX_PER_TICK = 2
+AUTO_STOP_HISTORY_MAX = 50
 
 
 # ---------- 读 ----------
@@ -400,7 +415,7 @@ def account_machine_images(acct, force=False):
     if slot and not force and (now - slot["ts"] < POOL_STALE_MAX):
         return slot["data"]
     plat = platform_of(acct)
-    data = {}
+    data, mids = {}, {}
     try:
         kv = read_env().get(key_var_for(acct), "")
         std = KEYNAME.get(plat, "")
@@ -411,15 +426,25 @@ def account_machine_images(acct, force=False):
                 pid = str(p.get("id") or "")
                 if pid:
                     data[pid] = p.get("imageName")
+                    mid = p.get("machineId") or (p.get("machine") or {}).get("id")
+                    if mid:
+                        mids[pid] = str(mid)
         elif plat == "vast":
             for i in (S.list_vast_instances() or []):
                 iid = str(i.get("id") or "")
                 if iid:
                     data[iid] = i.get("image") or i.get("image_uuid")   # v1 instances 接口字段是 image_uuid
+                    if i.get("machine_id"):
+                        mids[iid] = str(i.get("machine_id"))            # 自动关停拉黑交接用(state 里常缺 machine_id)
     except Exception:
-        data = {}
-    _machine_images[acct] = {"data": data, "ts": now}
+        data, mids = {}, {}
+    _machine_images[acct] = {"data": data, "mids": mids, "ts": now}
     return data
+
+def account_machine_ids(acct):
+    """{instance_id: machine_id}, 来自 account_machine_images 同一次拉取的缓存(不额外外呼)。"""
+    slot = _machine_images.get(acct) or {}
+    return dict(slot.get("mids") or {})
 
 
 def pool_of_image(image):
@@ -820,7 +845,9 @@ def active_rentals(account_id):
         out.append({"id": r.get("contract_id") or r.get("external_id"), "gpu": r.get("gpu"),
                     "price": r.get("price"), "hashrate_th": r.get("last_hashrate_th"),
                     "created_epoch": r.get("created_epoch"),
-                    "worker": (r.get("last_hashrate_lookup") or {}).get("worker")})
+                    "worker": (r.get("last_hashrate_lookup") or {}).get("worker"),
+                    "provider": r.get("provider"), "external_id": r.get("external_id"),  # 自动关停拉黑交接用
+                    "machine_id": r.get("machine_id")})
     return out
 
 
@@ -883,6 +910,29 @@ def tick_spend():
             prev[acct] = bal
         s["salad_balance_prev"] = prev
         s["cumulative_usd_by_pool"] = cbp
+        # 按池累计「算力小时」(矿池实测算力 × 时长), 供数据分析面板算实测产率 = 自重置产出 / 算力小时
+        # 起点(th_hours_start)记录开始累计时的时间与各池自重置产出, 实测产率 = (现产出 − 起点产出) / 算力小时, 口径对齐
+        if dt < 3600:
+            start = s.get("th_hours_start")
+            thh = (s.get("th_hours_by_pool") or {}) if start else {}   # 无起点(旧版累计)→ 从零重来, 保证与起点产出同口径
+            start = start or {"epoch": now, "output": {}}
+            for pk, mon in POOL_MONITORS.items():
+                try:
+                    v = mon["view"]()
+                    err = bool(v.get("pool_error"))
+                    th = float(v.get("total_hashrate_th") or 0) if not err else 0.0
+                except Exception:
+                    v, err, th = {}, True, 0.0
+                if pk not in start["output"] and not err:
+                    if pk == "pearlhash":
+                        start["output"][pk] = float(s.get("cumulative_output") or 0.0)
+                    else:
+                        _tot = float(v.get("pool_balance") or 0) + float(v.get("pool_paid") or 0) + float(v.get("pending_balance") or 0)
+                        start["output"][pk] = round(_tot - float(s.get(_baseline_key(pk)) or 0.0), 4)
+                if th > 0 and pk in start["output"]:
+                    thh[pk] = float(thh.get(pk, 0.0)) + th * dt / 3600.0
+            s["th_hours_by_pool"] = thh
+            s["th_hours_start"] = start
         s["last_epoch"] = now
         s["current_hourly_usd"] = hourly
         s["current_hourly_by_pool"] = hbp
@@ -922,6 +972,15 @@ def _refresh_once():
         pass
     try:
         pearlfortune_data(force=True)
+    except Exception:
+        pass
+    try:
+        kryptex_data(force=True)      # 此前不在预热里, 每 90s 在请求线程同步拉(ISS-020)
+        kryptex_payouts_total()
+    except Exception:
+        pass
+    try:
+        fetch_network_yield(force=True)
     except Exception:
         pass
     for acct in list_accounts():
@@ -987,6 +1046,10 @@ def _baseline_key(pool_id):
     """产出基线 stats 键名。twpool 沿用历史键 output_tw_baseline(向后兼容); 其它池 output_<pool>_baseline。"""
     return "output_tw_baseline" if pool_id == "twpool" else f"output_{pool_id}_baseline"
 
+def _paid_baseline_key(pool_id):
+    """该池设基线时已知的已付总额(记录用); 缺失 = 基线设定时拿不到 pool_paid(如 Kryptex 旧版), 见 ISS-020。"""
+    return f"output_{pool_id}_paid_baseline"
+
 
 def tick_output(pool=None):
     if pool is None:
@@ -1006,14 +1069,29 @@ def tick_output(pool=None):
             if _pk == "pearlhash":
                 continue
             _bk = _baseline_key(_pk)
-            if _bk in s:
+            _pbk = _paid_baseline_key(_pk)
+            if _bk in s and _pbk in s:
                 continue
             _v = POOL_MONITORS[_pk]["view"]()        # 归一化视图(含 pool_balance/pool_paid); error 不设(留待重试)
-            if not _v.get("pool_error"):
+            if _v.get("pool_error"):
+                continue
+            _p = _v.get("pool_paid")
+            if _bk not in s:
                 _b = _v.get("pool_balance") or 0.0
-                _p = _v.get("pool_paid") or 0.0
                 _pend = _v.get("pending_balance") or 0.0
-                s[_bk] = round(float(_b) + float(_p) + float(_pend), 4)
+                s[_bk] = round(float(_b) + float(_p or 0.0) + float(_pend), 4)
+                if _p is not None:
+                    s[_pbk] = round(float(_p), 4)
+            elif _p is not None:
+                # 基线已有但 paid 键缺失: 只有提供逐笔 pool_paid_items 的池(Kryptex, 旧版 pool_paid=None 设过 0 基线, ISS-020)
+                # 才迁移——把「重置之前」的付款并入基线, 重置后的付款是真产出不能被基线吃掉;
+                # 其它池(herominers/pearlfortune)基线设定时已含 paid, 只补记 paid 键, 基线不动。
+                _items = _v.get("pool_paid_items")
+                _reset = float(s.get("reset_epoch") or 0)
+                if isinstance(_items, list):
+                    _pre = sum(float(a) for (t, a) in _items if float(t) < _reset)
+                    s[_bk] = round(float(s.get(_bk) or 0.0) + _pre, 4)
+                s[_pbk] = round(float(_p), 4)
         if not s.get("output_init"):
             s["output_init"] = True
             s["output_last_credit_ts"] = max([ts for ts, _ in credits], default=0)
@@ -1109,6 +1187,67 @@ def kline_data(period=15, force=False):
     except Exception:
         pass
     return cached[0] if cached else []
+
+
+# ---------- 网络产率 / 单机经济性 ----------
+def fetch_network_yield(force=False):
+    """prlscan 最新区块 → 每 TH/s 每小时理论产币(未扣池费)。serve-stale: 后台预热, 超 YIELD_STALE_MAX 才同步重拉;
+    失败 / 数值不合理时保留旧值, 从未成功过返回 None。"""
+    now = time.time()
+    cached = _yield_cache.get("v")
+    if cached and not force and (now - _yield_cache.get("ts", 0) < YIELD_STALE_MAX):
+        return cached
+    try:
+        req = urllib.request.Request(_PRLSCAN_BLOCKS, headers={"User-Agent": "sniper-dashboard/1.0", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        b = (d.get("items") or [None])[0] or {}
+        diff = float(b.get("difficulty") or 0)
+        reward = float(b.get("reward_grains") or 0) / 1e8
+        y = 3600.0 * reward / (diff * YIELD_DIFF_SCALE / 1e12) if diff > 0 else 0.0
+        if not (1e-5 < y < 1e-1):
+            raise ValueError(f"implausible yield {y}")
+        if cached and cached.get("prl_per_th_h") and abs(y / cached["prl_per_th_h"] - 1) > 0.3:
+            print(f"[yield] jump {cached['prl_per_th_h']:.6f} -> {y:.6f} (diff={diff:.0f} reward={reward:.2f})", flush=True)
+        v = {"prl_per_th_h": y, "difficulty": diff, "reward_prl": reward, "height": b.get("height"), "ts": now}
+        _yield_cache["v"] = v
+        _yield_cache["ts"] = now
+        return v
+    except Exception:
+        return cached
+
+def network_yield():
+    return fetch_network_yield()
+
+def yield_fresh(max_age=None):
+    v = _yield_cache.get("v")
+    limit = float(max_age if max_age is not None else YIELD_STALE_MAX)
+    return bool(v) and (time.time() - float(v.get("ts") or 0)) < limit
+
+def pool_fee(pool):
+    return POOL_FEE.get(pool, POOL_FEE_DEFAULT)
+
+def machine_economics(price, th, y, cp, fee=POOL_FEE_DEFAULT):
+    """单机经济性: 产值 $/h = 算力 × 产率 × 币价 × (1−池费); 回本线 $/100TH·h = 产率 × 币价 × (1−池费) × 100;
+    margin_pct = (产值 − 单价) / 单价 × 100。缺任一输入 → 对应字段 None。"""
+    out = {"value_usd_h": None, "breakeven_usd_per_100th": None, "margin_pct": None}
+    try:
+        y = float(y or 0); cp = float(cp or 0)
+    except Exception:
+        return out
+    if y <= 0 or cp <= 0:
+        return out
+    ypc = y * cp * (1 - float(fee or 0))
+    out["breakeven_usd_per_100th"] = round(ypc * 100, 4)
+    try:
+        th = float(th); pr = float(price)
+    except Exception:
+        return out
+    if th > 0:
+        out["value_usd_h"] = round(th * ypc, 4)
+        if pr > 0:
+            out["margin_pct"] = round((th * ypc - pr) / pr * 100, 1)
+    return out
 
 def reset_stats():
     """累计租金/产出/利润全部清零, 从现在重新起算; 保留已设的币价。"""
@@ -1361,6 +1500,8 @@ def _pearlfortune_view():
 
 # ---------- Kryptex 池(PF miner)----------
 _kryptex = {"data": None, "ts": 0.0}
+_kryptex_paid = {"total": None, "ts": 0.0, "count": 0, "items": []}   # 已付总额(payouts 翻页求和), ISS-020
+KRYPTEX_PAID_TTL = 600.0
 KRYPTEX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
 def kryptex_data(force=False):
@@ -1380,11 +1521,48 @@ def kryptex_data(force=False):
                 with urllib.request.urlopen(req, timeout=15) as r:
                     out[k] = json.loads(r.read().decode("utf-8"))
             data = out
+            try:   # 余额 total 比上次下降 = 刚自动付款 → 让已付总额下次立即重拉, 避免产出短暂下凹
+                prev = ((_kryptex["data"] or {}).get("balance") or {}) if isinstance(_kryptex["data"], dict) else {}
+                if float((out.get("balance") or {}).get("total") or 0) < float(prev.get("total") or 0):
+                    _kryptex_paid["ts"] = 0.0
+            except Exception:
+                pass
         except Exception as e:
             data = {"_error": f"{type(e).__name__}: {e}"}
     _kryptex["data"] = data
     _kryptex["ts"] = now
     return data
+
+def kryptex_payouts_total(force=False):
+    """Kryptex 已付总额: /prl/api/v1/miner/payouts(DRF 分页, 跟 next 到底, ≤50 页)。只计 FINISHED;
+    任一页失败 → 整体保留旧值(绝不写部分和)。同时记逐笔 [ts, amount] 供基线迁移。返回 float 或 None(从未成功)。"""
+    now = time.time()
+    if _kryptex_paid["total"] is not None and not force and (now - _kryptex_paid["ts"] < KRYPTEX_PAID_TTL):
+        return _kryptex_paid["total"]
+    addr = prl_address()
+    if not addr:
+        return _kryptex_paid["total"]
+    url = f"https://pool.kryptex.com/prl/api/v1/miner/payouts/{urllib.parse.quote(addr)}"
+    total, items, pages = 0.0, [], 0
+    try:
+        while url and pages < 50:
+            if not str(url).startswith("https://pool.kryptex.com"):
+                break
+            req = urllib.request.Request(url, headers={"User-Agent": KRYPTEX_UA, "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            for it in (d.get("results") or []):
+                if str(it.get("status") or "").upper() != "FINISHED":
+                    continue
+                amt = float(it.get("amount") or 0)
+                total += amt
+                items.append([int(float(it.get("date") or 0)), amt])
+            url = d.get("next")
+            pages += 1
+    except Exception:
+        return _kryptex_paid["total"]
+    _kryptex_paid.update({"total": round(total, 8), "ts": now, "count": len(items), "items": items})
+    return _kryptex_paid["total"]
 
 def _kx_rate(w):
     """Kryptex workers API: avg_hashrate_30m / 3h / 24h(字符串 H/s), 无 'hashrate'; status 非 online → 0。"""
@@ -1418,8 +1596,10 @@ def _kryptex_view():
             pb = float(bal.get("confirmed") or 0) + float(bal.get("unconfirmed") or 0)
         except Exception:
             pb = None
+    paid = kryptex_payouts_total()   # serve-stale(后台预热), 未取到过为 None
     return {"workers": wlist, "total_hashrate_th": round(total, 2),
-            "pool_balance": pb, "pool_paid": None, "pool_error": err}
+            "pool_balance": pb, "pool_paid": paid, "pool_paid_items": list(_kryptex_paid.get("items") or []),
+            "pool_error": err}
 
 
 # 池监控适配器注册表(方案 B): pool_id → {fetch, view}。新增矿池只在此登记 + POOLS 即可。
@@ -1576,8 +1756,70 @@ def build_summary(pool_key="merged"):
     recent3h_output = update_output_snapshot(merged_out)
     cost_cumulative_usd = round(rent / output, 4) if (output and output > 0) else None              # 累计成本(自重置租金/产出, 视图)
     cost_recent3h_usd = round((burn_total * 3) / recent3h_output, 4) if (recent3h_output and recent3h_output > 0) else None  # 最近3h实时(全局: 全局每小时租金×3 / 最近3h产出)
+    _yv = network_yield() or {}
+    _y = _yv.get("prl_per_th_h")
+    _econ = machine_economics(None, None, _y, cp, pool_fee(pool_key) if pool_key in S.POOLS else POOL_FEE_DEFAULT)
+    _value_total = 0.0
+    for acct, info in rentals.items():
+        for m in info.get("machines", []):
+            if _is_running(m) and (pool_key == "merged" or m.get("pool") == pool_key):
+                _value_total += float(m.get("value_usd_h") or 0)
+    # 数据分析面板: 各池能效对比(当前 + 自重置累计 + 实测产率/矿池效率)
+    _thh = stats.get("th_hours_by_pool") or {}
+    _thstart = stats.get("th_hours_start") or {}
+    _th_since = float(_thstart.get("epoch") or 0)
+    _th_elapsed_h = (time.time() - _th_since) / 3600.0 if _th_since else 0.0
+    _pool_analysis = []
+    for _pk in S.POOLS:
+        _out = ph_output if _pk == "pearlhash" else sincere.get(_pk, 0.0)
+        _rent_pk = float(cbp.get(_pk, 0.0))
+        _run_pk = rbp.get(_pk, 0)
+        if not (_out or _rent_pk or _run_pk):
+            continue
+        _pvw = POOL_MONITORS[_pk]["view"]()
+        _th_now = float(_pvw.get("total_hashrate_th") or 0) if not _pvw.get("pool_error") else 0.0
+        _fee = pool_fee(_pk)
+        _hourly = float(bbp.get(_pk, 0.0))
+        _e = machine_economics(_hourly, _th_now, _y, cp, _fee)
+        _th_h = float(_thh.get(_pk, 0.0))
+        _out_since = _out - float((_thstart.get("output") or {}).get(_pk, 0.0))   # 起点以来的产出(与算力小时同口径)
+        _realized = (_out_since / _th_h) if (_th_h > 0 and _th_elapsed_h >= 1.0 and _out_since >= 0) else None   # PRL/TH·h 实测; 不足 1h 不算
+        _theory_net = float(_y) if _y else None                    # 未扣费理论
+        _pool_analysis.append({
+            "pool": _pk, "label": (S.POOLS.get(_pk) or {}).get("label") or _pk, "fee": _fee,
+            "running": _run_pk, "hashrate_th": round(_th_now, 2),
+            "hourly_usd": round(_hourly, 4),
+            "usd_per_100th": round(_hourly / _th_now * 100, 4) if _th_now > 0 else None,
+            "value_usd_h": _e["value_usd_h"], "margin_pct": _e["margin_pct"],
+            "breakeven_usd_per_100th": _e["breakeven_usd_per_100th"],
+            "rent_usd": round(_rent_pk, 4), "output_prl": round(_out, 4), "output_usd": round(_out * cp, 2),
+            "profit_usd": round(_out * cp - _rent_pk, 2),
+            "cost_usd_per_prl": round(_rent_pk / _out, 4) if _out > 0 else None,
+            "prl_per_usd": round(_out / _rent_pk, 4) if _rent_pk > 0 else None,
+            "th_hours": round(_th_h, 1), "output_since_th_start": round(max(_out_since, 0.0), 4),
+            "realized_prl_per_th_day": round(_realized * 24, 5) if _realized is not None else None,
+            "efficiency_pct": round(_realized / _theory_net * 100, 1) if (_realized is not None and _theory_net) else None,
+        })
+    _as = auto_stop_settings()
+    _as_watch = {}
+    for _k, _since in (stats.get("auto_stop_watch") or {}).items():
+        try:
+            _as_watch[_k] = {"since": int(float(_since)), "elapsed_min": round((time.time() - float(_since)) / 60, 1)}
+        except Exception:
+            pass
     return {
         "wallet": prl_address(),
+        "yield_prl_per_th_h": _y,
+        "yield_live": yield_fresh(),
+        "yield_ts": _yv.get("ts"),
+        "yield_height": _yv.get("height"),
+        "breakeven_usd_per_100th": _econ["breakeven_usd_per_100th"],
+        "value_usd_h_total": round(_value_total, 4),
+        "auto_stop": {**_as, "watch": _as_watch, "history": list(stats.get("auto_stop_history") or [])[-AUTO_STOP_HISTORY_MAX:]},
+        "pool_analysis": _pool_analysis,
+        "th_hours_since": int(_th_since) if _th_since else None,
+        "th_hours_elapsed_h": round(_th_elapsed_h, 2),
+        "theory_prl_per_th_day": round(float(_y) * 24, 5) if _y else None,
         "running_machines": running_machines,
         "running_by_pool": rbp,
         "running_by_platform": per_plat,
@@ -1619,18 +1861,24 @@ def _S():
 def build_rentals():
     now = time.time()
     res = {}
+    _y = (network_yield() or {}).get("prl_per_th_h")
+    _cp = coin_price()
     for acct in list_accounts():
         plat = platform_of(acct)
         full_cfg = read_config(acct)
         cfg = full_cfg.get(plat, {})
         items = []
         imgs = account_machine_images(acct) if plat in ("runpod", "vast") else {}
+        mids = account_machine_ids(acct) if plat in ("runpod", "vast") else {}
         for r in active_rentals(acct):
             dur = int(now - float(r["created_epoch"])) if r.get("created_epoch") else None
             d = dict(r)
             d["duration_seconds"] = dur
+            if not d.get("machine_id") and mids.get(str(d.get("id"))):
+                d["machine_id"] = mids[str(d.get("id"))]
             img = d.get("image") or (imgs.get(str(d.get("id"))) if plat in ("runpod", "vast") else None)
             d["pool"] = machine_pool(img, d.get("worker"))
+            d.update(machine_economics(d.get("price"), d.get("hashrate_th"), _y, _cp, pool_fee(d["pool"])))  # 产值/回本
             items.append(d)
         res[acct] = {
             "platform": plat,
@@ -1671,6 +1919,7 @@ def build_rentals():
         res[acct]["balance_editable"] = (plat in NO_BALANCE_API) and not real  # 无 API 平台手填; salad 有 portal 实时余额时隐藏手填(手填仅 portal 断连/未登录时回退)
         res[acct]["balance_usd"] = cfg.get("balance_usd")        # 原始手填值, 供编辑框预填
         res[acct]["burn_hourly"] = round(burn, 4)
+        res[acct]["value_usd_h"] = round(sum(float(m.get("value_usd_h") or 0) for m in items if _is_running(m)), 4)
         res[acct]["hours_left"] = round(bal / burn, 1) if (bal is not None and burn > 0) else None
         if plat == "salad":
             sl = salad_live(acct)
@@ -1719,7 +1968,72 @@ def gpu_rows(sub):
             r["max_price"] = th.get(k)
         if r["min_hashrate"] is None and mh.get(k) is not None:
             r["min_hashrate"] = mh.get(k)
+    try:
+        import sniper as S
+        for r in rows.values():
+            r["catalog_key"] = S.normalize_gpu(r["gpu"]) or r["gpu"]   # 配置页下拉按目录键选中
+    except Exception:
+        pass
     return list(rows.values())
+
+def build_gpu_catalog(margin=0.2):
+    """配置页 GPU 下拉数据: 每型号 参考算力(公开表; 当前 PearlHash 同型号 ≥3 台实测中位数覆盖) / 建议出价 /
+    建议最低算力 / 市场参考价(静态公开参考 + RunPod 实时观测最低价)。建议出价 = 参考算力 × 产率 × 币价 × (1−池费) × (1−目标利润率)。"""
+    import sniper as S
+    from statistics import median
+    yv = network_yield() or {}
+    y = float(yv.get("prl_per_th_h") or 0); cp = float(coin_price() or 0); fee = POOL_FEE_DEFAULT
+    ypc = y * cp * (1 - fee)
+    try:
+        margin = float(margin)
+    except Exception:
+        margin = 0.2
+    margin = min(max(margin, 0.0), 0.9)
+    obs = {}
+    try:
+        for w in ((pool_data() or {}).get("connected_workers") or []):
+            for g in (w.get("gpu_info") or []):
+                k = S.normalize_gpu(g.get("name") or "")
+                th = hashrate_th(g.get("hashrate") or 0)
+                if k and th > 0:
+                    obs.setdefault(k, []).append(th)
+    except Exception:
+        pass
+    rp = {}
+    for acct in list_accounts():
+        if platform_of(acct) != "runpod":
+            continue
+        for k, v in (read_state(acct).get("runpod_observed_prices") or {}).items():
+            try:
+                price = float((v or {}).get("price") or 0)
+            except Exception:
+                continue
+            if price <= 0:
+                continue
+            gid = k.split(":", 1)[1] if ":" in k else k
+            cloud = k.split(":", 1)[0] if ":" in k else "COMMUNITY"
+            cur = rp.get(gid)
+            if cur is None or price < cur["price"]:
+                rp[gid] = {"price": round(price, 4), "cloud": cloud, "time": (v or {}).get("time")}
+    models = []
+    for c in S.GPU_CATALOG:
+        samples = obs.get(c["key"]) or []
+        if len(samples) >= 3:
+            rec_th, src = round(median(samples), 1), f"本池实测中位 {len(samples)} 台"
+        else:
+            rec_th, src = c.get("ref_th"), c.get("ref_source") or ""
+        rec_bid = round(rec_th * ypc * (1 - margin), 3) if (rec_th and ypc > 0) else None
+        rec_min = int((rec_th * 0.75 + 5) // 10 * 10) if rec_th else None   # 75% 四舍五入到十位
+        rmk = None
+        for gid in c.get("runpod_ids") or []:
+            if gid in rp and (rmk is None or rp[gid]["price"] < rmk["price"]):
+                rmk = rp[gid]
+        models.append({"key": c["key"], "aliases": c.get("aliases") or [], "runpod_ids": c.get("runpod_ids") or [],
+                       "ref_th": rec_th, "ref_source": src, "observed_n": len(samples),
+                       "rec_bid": rec_bid, "rec_min_th": rec_min,
+                       "market_ref": dict(c.get("market_ref") or {}), "runpod_observed": rmk})
+    return {"yield_prl_per_th_h": y or None, "yield_live": yield_fresh(), "coin_price_usd": cp, "fee": fee,
+            "ypc": round(ypc, 6), "target_margin_default": margin, "market_ref_asof": S.GPU_MARKET_REF_ASOF, "models": models}
 
 def build_full_config():
     env = read_env()
@@ -1765,7 +2079,7 @@ def build_full_config():
             "pool_label": (S.POOLS.get(S.active_pool(cfg)) or {}).get("label") or S.active_pool(cfg),
             "account": {k: cfg.get(k) for k in ACCOUNT_KEYS},
         }
-    return {"common": common, "common_diff": common_diff, "platforms": plats,
+    return {"common": common, "common_diff": common_diff, "platforms": plats, "auto_stop": auto_stop_settings(),
             "pools": [{"id": k, "label": v["label"], "image": v["image"], "reads_prl_host": v["reads_prl_host"],
                        "platforms": v.get("platforms") or [], "requires": v.get("requires") or {}, "note": v.get("note") or ""}
                       for k, v in available_pools(S)]}
@@ -1951,6 +2265,151 @@ def do_terminate(acct, mid, group=None):
 # 「迁移现有机器到新池」功能已下线(改在跑 pod 镜像不稳); sniper.migrate_account 库函数保留, 切池只影响新租(save_pool_cfg)。
 
 
+# ---------- 自动关停亏损机 ----------
+def auto_stop_settings():
+    env = read_env()
+    def _f(k, cast):
+        try:
+            return cast(env.get(k, AUTO_STOP_DEFAULTS[k]))
+        except Exception:
+            return cast(AUTO_STOP_DEFAULTS[k])
+    en = str(env.get("AUTO_STOP_ENABLED", AUTO_STOP_DEFAULTS["AUTO_STOP_ENABLED"])).strip().lower()
+    return {"enabled": en in ("1", "true", "yes", "on"),
+            "loss_pct": _f("AUTO_STOP_LOSS_PCT", float),
+            "min_age_min": _f("AUTO_STOP_MIN_AGE_MIN", float),
+            "persist_min": _f("AUTO_STOP_PERSIST_MIN", float),
+            "blacklist_hours": _f("AUTO_STOP_BLACKLIST_HOURS", float)}
+
+def save_auto_stop_settings(data):
+    if not isinstance(data, dict):
+        return {"error": "参数无效"}
+    rng = {"loss_pct": (5, 90), "min_age_min": (5, 1440), "persist_min": (1, 240), "blacklist_hours": (0, 168)}
+    keys = {"loss_pct": "AUTO_STOP_LOSS_PCT", "min_age_min": "AUTO_STOP_MIN_AGE_MIN",
+            "persist_min": "AUTO_STOP_PERSIST_MIN", "blacklist_hours": "AUTO_STOP_BLACKLIST_HOURS"}
+    vals = {}
+    for k, (lo, hi) in rng.items():
+        if k in data and data[k] not in (None, ""):
+            try:
+                v = float(data[k])
+            except Exception:
+                return {"error": f"{k} 不是数字"}
+            if not (lo <= v <= hi):
+                return {"error": f"{k} 须在 {lo}–{hi}"}
+            vals[keys[k]] = str(int(v) if float(v).is_integer() else v)
+    if "enabled" in data:
+        vals["AUTO_STOP_ENABLED"] = "1" if data["enabled"] else "0"
+    try:
+        for k, v in vals.items():
+            set_env_key(k, v)
+    except Exception as e:
+        return {"error": f"写入失败: {e}"}
+    return {"ok": True, "auto_stop": auto_stop_settings()}
+
+def append_blacklist_handoff(acct, entry):
+    """看板→sniper 拉黑交接: 追加一行 JSON 到 control/<acct>.blacklist-add(sniper 每轮 rename 后读取合并)。
+    不直接写 state.<acct>.json: sniper 内存持有 state 并整文件覆盖, 看板写入会丢。"""
+    try:
+        CONTROL_DIR.mkdir(exist_ok=True)
+        with open(CONTROL_DIR / f"{acct}.blacklist-add", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True
+    except Exception as e:
+        print(f"[auto-stop] handoff write failed {acct}: {e}", flush=True)
+        return False
+
+def auto_stop_tick(now=None):
+    """每 60s: 关停「机龄够 + 持续明显亏损」的非-Salad 机器。产值 = 算力 × 产率 × 币价 × (1−池费)。
+    币价/产率不新鲜、机龄不足、亏损未超阈值或未持续够久、进程没跑(算力可能冻结) → 不动。返回 tick 摘要。"""
+    now = now or time.time()
+    st = auto_stop_settings()
+    summary = {"skipped": None, "watched": 0, "stopped": [], "candidates": 0}
+    if not st["enabled"]:
+        summary["skipped"] = "disabled"; return summary
+    pc = _price_cache.get("prl")
+    if not pc or (now - float(pc[1])) > 600:
+        summary["skipped"] = "price_stale"; return summary
+    if not network_yield() or not yield_fresh(YIELD_STALE_MAX):
+        summary["skipped"] = "yield_stale"; return summary
+    rentals = build_rentals()
+    loss = float(st["loss_pct"]); min_age = float(st["min_age_min"]) * 60; persist = float(st["persist_min"]) * 60
+    candidates, seen, running_n = [], set(), 0
+    with _lock:
+        s = read_json(STATS_PATH, {})
+        watch = dict(s.get("auto_stop_watch") or {})
+        for acct, info in rentals.items():
+            if info.get("platform") == "salad" or not info.get("process_running"):
+                continue
+            for m in info.get("machines", []):
+                if not _is_running(m) or not m.get("id"):
+                    continue
+                running_n += 1
+                key = f"{acct}:{m['id']}"
+                seen.add(key)
+                try:
+                    th = float(m.get("hashrate_th") or 0); pr = float(m.get("price") or 0)
+                    val = m.get("value_usd_h"); age = float(m.get("duration_seconds") or 0)
+                except Exception:
+                    continue
+                losing = th > 0 and pr > 0 and val is not None and float(val) < pr * (1 - loss / 100.0)
+                if not losing or age < min_age:
+                    watch.pop(key, None)
+                    continue
+                since = float(watch.get(key) or now)
+                watch[key] = since
+                if now - since >= persist:
+                    candidates.append((acct, m, since))
+        for k in list(watch):
+            if k not in seen:
+                watch.pop(k, None)
+        s["auto_stop_watch"] = watch
+        try:
+            json.dump(s, open(STATS_PATH, "w"))
+        except Exception:
+            pass
+    summary["watched"] = len(watch); summary["candidates"] = len(candidates)
+    if not candidates:
+        return summary
+    if len(candidates) > max(1, int(running_n * 0.5)):
+        print(f"[auto-stop] guard: {len(candidates)} candidates of {running_n} running, skipping (check yield/price)", flush=True)
+        summary["skipped"] = "mass_guard"; return summary
+    for acct, m, since in candidates[:AUTO_STOP_MAX_PER_TICK]:
+        r = do_terminate(acct, str(m["id"]))
+        if not r.get("ok"):
+            print(f"[auto-stop] terminate failed {acct} id={m['id']}: {r.get('error')}", flush=True)
+            continue
+        hours = float(st["blacklist_hours"])
+        if hours > 0:
+            append_blacklist_handoff(acct, {"provider": m.get("provider") or platform_of(acct), "offer_id": m.get("external_id"),
+                                            "machine_id": m.get("machine_id"), "reason": "auto_stop_unprofitable",
+                                            "details": {"gpu": m.get("gpu"), "price": m.get("price"), "th": m.get("hashrate_th"),
+                                                        "value_usd_h": m.get("value_usd_h")},
+                                            "expires_epoch": now + hours * 3600})
+        rec = {"ts": int(now), "acct": acct, "id": m.get("id"), "gpu": m.get("gpu"), "price": m.get("price"),
+               "th": m.get("hashrate_th"), "value_usd_h": m.get("value_usd_h"), "margin_pct": m.get("margin_pct"),
+               "since": int(since)}
+        with _lock:
+            s = read_json(STATS_PATH, {})
+            hist = list(s.get("auto_stop_history") or []); hist.append(rec)
+            s["auto_stop_history"] = hist[-AUTO_STOP_HISTORY_MAX:]
+            w = dict(s.get("auto_stop_watch") or {}); w.pop(f"{acct}:{m['id']}", None); s["auto_stop_watch"] = w
+            try:
+                json.dump(s, open(STATS_PATH, "w"))
+            except Exception:
+                pass
+        print(f"[auto-stop] {acct} id={m.get('id')} gpu={m.get('gpu')} ${m.get('price')}/h th={m.get('hashrate_th')} "
+              f"value=${m.get('value_usd_h')}/h margin={m.get('margin_pct')}% losing_since={int(since)}", flush=True)
+        summary["stopped"].append(rec)
+    return summary
+
+def auto_stop_loop():
+    while True:
+        try:
+            auto_stop_tick()
+        except Exception as e:
+            print(f"[auto-stop] tick error: {type(e).__name__}: {e}", flush=True)
+        time.sleep(60)
+
+
 # ---------- HTTP ----------
 def _secret():
     return hashlib.sha256(("pearl-dash::" + str(CONF.get("password", ""))).encode()).digest()
@@ -2043,6 +2502,9 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, build_config())
             if path == "/api/full-config":
                 return self._send(200, build_full_config())
+            if path == "/api/gpu-catalog":
+                qs = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                return self._send(200, build_gpu_catalog((qs.get("margin") or ["0.2"])[0]))
             if path == "/api/logs":
                 q = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
                 plat = (q.get("platform") or [""])[0]
@@ -2105,6 +2567,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, set_dashboard_password(data.get("password", "")))
         if path == "/api/reset-stats":
             return self._send(200, reset_stats())
+        if path == "/api/auto-stop-settings":
+            return self._send(200, save_auto_stop_settings(data.get("data") if isinstance(data.get("data"), dict) else data))
         return self._send(404, {"error": "not found"})
 
 
@@ -2223,6 +2687,11 @@ textarea{resize:vertical;min-height:150px;line-height:1.5;font-family:var(--mono
 .grid2{display:grid;grid-template-columns:160px 1fr;gap:10px 13px;align-items:center}
 .fld{color:var(--mut);font-size:11.5px}
 .gpurow{display:grid;grid-template-columns:1fr 110px 110px 34px;gap:8px;margin-bottom:8px}
+.gpurow .gsel{display:flex;gap:6px;min-width:0}.gpurow .gsel select{flex:1;min-width:0}.gpurow .gsel input{flex:1;min-width:0}
+.ghint{grid-column:1/-1;font-size:11px;color:var(--mut);margin:-4px 0 4px;line-height:1.6}.ghint a{color:var(--acc);font-weight:600;text-decoration:none}
+.beline td{color:var(--bad);font-weight:600;background:var(--badbg)}
+.econ{font-size:12px;color:var(--mut);margin:10px 0 2px;line-height:1.8}.econ b{color:var(--tx);font-family:var(--mono)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 2px;vertical-align:middle}
 .gpurow.nop,.nop .gpurow{grid-template-columns:1fr 110px 34px}.nop .gpurow [data-f=price]{display:none}
 .hint{color:var(--mut);font-size:11px;margin:4px 0 0}
 details{margin-top:13px;border-top:1px solid var(--bd);padding-top:11px}
@@ -2576,15 +3045,17 @@ let acctBurn=mlist.reduce((s,m)=>s+(parseFloat(m.price)||0),0);
 let cpt=m=>{const pr=parseFloat(m.price),th=parseFloat(m.hashrate_th);return (isFinite(pr)&&pr>0&&isFinite(th)&&th>0)?pr/th*100:null;};
 mlist=mlist.slice().sort((x,y)=>{const a=cpt(x),b=cpt(y);if(a==null&&b==null)return 0;if(a==null)return -1;if(b==null)return 1;return b-a;});
 let cpts=mlist.map(cpt).filter(x=>x!=null);let cptMed=cpts.length?cpts.slice().sort((a,b)=>a-b)[Math.floor(cpts.length/2)]:null;
+const AS=d.auto_stop||{};const LOSS=parseFloat(AS.loss_pct)||20;const BE=d.breakeven_usd_per_100th;const WATCH=AS.watch||{};
 let rows=mlist.map(m=>{let a=(ROLE=='admin'&&m.id)?`<button class=b-bad onclick="term('${aid}','${p}','${esc(m.id)}','${esc(m.group||'')}')">关闭</button>`:'';
 
 let price=m.price_label?esc(m.price_label):(m.price==null?'-':'$'+fnum(m.price,3)+'/h');
 let gpu=(m.gpu&&m.gpu!='?')?esc(m.gpu):'<span class=muted>—</span>';
 let idcell=p=='salad'?`<td title="实例 ${esc(m.id)}${m.machine_id?(' · 机器(worker 后缀) '+esc(m.machine_id)):''}">${esc(m.machine_id||m.id)}</td>`:`<td>${esc(m.id)}</td>`;
-return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${(()=>{const c=cpt(m);if(c==null)return '<span class=muted title="无算力数据(宽限中/未连池)">—</span>';const bad=cptMed!=null&&c>cptMed*1.15;return `<span style="${bad?'color:var(--bad);font-weight:600':''}" title="每 100 TH/s 每小时花费; 红色 = 比本账号中位数贵 15% 以上">$${fnum(c,3)}</span>`;})()}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?9:8} class=muted>无符合机器</td></tr>`;
+return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${(()=>{const c=cpt(m);if(c==null)return '<span class=muted title="无算力数据(宽限中/未连池)">—</span>';const bad=(BE!=null&&c>BE)||(cptMed!=null&&c>cptMed*1.15);return `<span style="${bad?'color:var(--bad);font-weight:600':''}" title="每 100 TH/s 每小时花费; 红色 = 高于回本线(租金超过产值)或比本账号中位数贵 15% 以上">$${fnum(c,3)}</span>`;})()}</td><td title="算力 × 网络产率 × 币价 × (1−池费)">${m.value_usd_h==null?'<span class=muted>—</span>':'$'+fnum(m.value_usd_h,3)+'/h'}</td><td>${(()=>{const mg=m.margin_pct;if(mg==null)return '<span class=muted title="无算力或产率/币价数据">—</span>';const col=mg>=0?'var(--ok)':(mg>-LOSS?'var(--warn)':'var(--bad)');const w=WATCH[aid+':'+m.id];return `<span style="color:${col};font-weight:600" title="(产值 − 单价) ÷ 单价; 红 = 亏损超过 ${LOSS}%(自动关停阈值), 黄 = 成本线附近${w?' · 自动关停观察中 '+fnum(w.elapsed_min,0)+'/'+fnum(AS.persist_min,0)+' 分钟':''}">${mg>=0?'+':''}${fnum(mg,1)}%</span>${w?`<span class=muted style="font-size:10px"> ⏱${fnum(w.elapsed_min,0)}/${fnum(AS.persist_min,0)}m</span>`:''}`;})()}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?11:10} class=muted>无符合机器</td></tr>`;
+let beRow=(BE!=null&&mlist.length)?`<tr class=beline><td colspan=${p=='salad'?6:5} style="text-align:right">回本线 ▶</td><td>$${fnum(BE,3)}</td><td colspan=4 style="font-weight:400;color:var(--mut)">$/100TH·h 高于此值 = 租金超过产值(币价 $${fnum(d.coin_price_usd,3)} · ${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)} PRL/TH·天)</td></tr>`:'';
 let _pt=v.console_url?`<b><a class=platlink href="${esc(v.console_url)}" target=_blank rel=noopener title="打开 ${esc(v.label||aid)} 后台 ↗">${esc(v.label||aid)} ↗</a></b>`:`<b>${esc(v.label||aid)}</b>`;
 plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}${pv!='merged'?`<span class=muted style="font-size:11px;margin-left:8px">本池 $${fnum(acctBurn,3)}/h (${poolName(pv)})</span>`:''}</div>${sstat}
-<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th title="单价 ÷ 算力 × 100: 每 100 TH/s 每小时花费, 按此降序(最贵在上)">$/100TH·h ▼</th><th>矿池</th><th></th></tr>${rows}</table></div></div>`;}
+<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th title="单价 ÷ 算力 × 100: 每 100 TH/s 每小时花费, 按此降序(最贵在上)">$/100TH·h ▼</th><th title="算力 × 网络产率 × 币价 × (1−池费)">产值 $/h</th><th title="(产值 − 单价) ÷ 单价; 红 = 亏超自动关停阈值, 黄 = 成本线附近, 绿 = 盈利">回本</th><th>矿池</th><th></th></tr>${beRow}${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
 <div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addrrow><span class=addr>${esc(d.wallet)}</span><span class=copyi title="复制钱包地址" onclick="copyAddr('${esc(d.wallet)}')"><svg viewBox="0 0 24 24" width=16 height=16 fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round aria-hidden=true><rect x=9 y=9 width=13 height=13 rx=2 ry=2/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span></div></div>
@@ -2598,6 +3069,7 @@ ${poolLinks}
 <div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
 <div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
 </div>
+<div class=econ>网络产率 <b>${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)}</b> PRL/TH·天<span class=dot style="background:${d.yield_live?'var(--ok)':'var(--warn)'}" title="${d.yield_live?'prlscan 实时':'产率数据过期(自动关停暂停)'}"></span> · 回本线 <b style="color:var(--bad)">${d.breakeven_usd_per_100th==null?'—':'$'+fnum(d.breakeven_usd_per_100th,3)}</b>/100TH·h · 在跑产值 <b>$${fnum(d.value_usd_h_total,3)}</b>/h vs 时租 <b>$${fnum(d.current_hourly_usd,3)}</b>/h · 自动关停 ${(d.auto_stop||{}).enabled?'<span style="color:var(--ok);font-weight:600">开</span>':'<span class=muted>关</span>'} <span class=muted>(亏 ≥${fnum((d.auto_stop||{}).loss_pct,0)}% 持续 ${fnum((d.auto_stop||{}).persist_min,0)} 分钟且机龄 ≥${fnum((d.auto_stop||{}).min_age_min,0)} 分钟才关; Salad 不参与)</span></div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
 <span class=muted style="font-size:12px">PRL/USDT <b style="color:var(--hi);font-family:var(--mono)">$${fnum(d.coin_price_usd,4)}</b>${d.coin_price_live?' <span style="color:var(--ok);font-size:10px;letter-spacing:.4px">● 实时</span>':' <span style="color:var(--warn);font-size:10px">离线</span>'}</span>
 <button class=b-bad onclick="resetStats()">重置统计</button>
@@ -2619,10 +3091,13 @@ ${ssl?`<span class=muted style="font-size:12px">统计自 ${ssl} 起算</span>`:
   <div class=kcanvas-wrap id=kwrap2 style=margin-top:4px><canvas class=kc id=kvcanvas height=70></canvas></div>
 </div>
 </div>
+${paPanel(d)}
 ${hrPanel}
 <div class=sec><div class=lbl>账号总览</div><div class=platbox><div class=ovtw><table class=ovt><thead><tr><th>账号</th><th>状态</th><th>矿池</th><th>在跑</th><th>总算力</th><th>时租</th><th>最多同时租 · 时租上限</th></tr></thead><tbody>${acctRows}</tbody></table></div></div></div>
-<div class=sec><div class=lbl>各平台租用情况</div>${plat}</div>`;
+<div class=sec><div class=lbl>各平台租用情况</div>${plat}</div>
+${(((d.auto_stop||{}).history)||[]).length?`<div class=sec><div class=lbl>自动关停记录 <span class=muted style="font-size:11px;font-weight:400">· 最近 ${Math.min(10,d.auto_stop.history.length)} 条 / 共 ${d.auto_stop.history.length}</span></div><div class=platbox><div class=tscroll><table class=rtab><tr><th>时间</th><th>账号</th><th>实例</th><th>GPU</th><th>单价</th><th>算力</th><th>产值</th><th>回本</th><th>亏损持续</th></tr>${d.auto_stop.history.slice(-10).reverse().map(h=>`<tr><td>${new Date(h.ts*1000).toLocaleString()}</td><td>${esc(h.acct)}</td><td>${esc(h.id)}</td><td>${esc(h.gpu||'')}</td><td>$${fnum(h.price,3)}/h</td><td>${fnum(h.th)} TH/s</td><td>$${fnum(h.value_usd_h,3)}/h</td><td style="color:var(--bad);font-weight:600">${fnum(h.margin_pct,1)}%</td><td>${h.since?dur(h.ts-h.since):'-'}</td></tr>`).join('')}</table></div></div></div>`:''}`;
 let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=pv;
+if(_paopen){const pp=document.getElementById('papanel');if(pp)pp.classList.add('open');}
 // renderOverview 每次重建 DOM 后恢复 K线展开状态
 if(_kopen){const kp=document.getElementById('kpanel');if(kp){kp.classList.add('open');if(_kdata)setTimeout(()=>drawKline(_kdata),0);else loadKline();}}
 if(_hropen){const hp=document.getElementById('hrpanel');if(hp){hp.classList.add('open');setTimeout(()=>{if(d.hashrate_series)drawHr(d.hashrate_series);},0);}}
@@ -2650,6 +3125,36 @@ function drawHr(series){
   ctx.fillText(fmt(minX),PAD,H-8);ctx.fillText(fmt(maxX),W-92,H-8);
 }
 let _kper='15m',_kopen=false,_kdata=null;
+let _paopen=localStorage.getItem('pa_open')=='1';
+function togglePa(){_paopen=!_paopen;localStorage.setItem('pa_open',_paopen?'1':'0');const p=document.getElementById('papanel');if(p)p.classList.toggle('open',_paopen);}
+// 数据分析面板: 各矿池能效对比。每行一个指标, 每池一列; better=行内更优者标绿(hi=越大越好 / lo=越小越好)
+function paPanel(d){const P=d.pool_analysis||[];if(!P.length)return '';
+const th=d.theory_prl_per_th_day;const be=d.breakeven_usd_per_100th;const since=d.th_hours_since?(()=>{const t=new Date(d.th_hours_since*1000);return (t.getMonth()+1)+'-'+t.getDate()+' '+String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0')+' 起 '+fnum(d.th_hours_elapsed_h,1)+'h';})():'—';
+const money=(v,dd)=>v==null?'—':'$'+fnum(v,dd==null?3:dd);const pct=v=>v==null?'—':(v>=0?'+':'')+fnum(v,1)+'%';
+const rows=[
+ {k:'在跑机器',f:p=>p.running,fmt:v=>v},
+ {k:'矿池实测算力',f:p=>p.hashrate_th,fmt:v=>fnum(v)+' TH/s'},
+ {k:'当前时租',f:p=>p.hourly_usd,fmt:v=>money(v,3)+'/h'},
+ {k:'每 100 TH/s 租金',f:p=>p.usd_per_100th,fmt:v=>money(v,4)+'/100TH·h',better:'lo',tip:'时租 ÷ 算力 × 100; 与回本线 '+(be==null?'—':'$'+fnum(be,4))+' 比'},
+ {k:'理论产值(当前算力)',f:p=>p.value_usd_h,fmt:v=>money(v,3)+'/h',tip:'算力 × 全网理论产率 × 币价 × (1−池费)'},
+ {k:'理论盈亏(产值 vs 时租)',f:p=>p.margin_pct,fmt:pct,better:'hi'},
+ {k:'累计租金(自重置)',f:p=>p.rent_usd,fmt:v=>money(v,2)},
+ {k:'累计产出(自重置)',f:p=>p.output_prl,fmt:v=>fnum(v,4)+' PRL'},
+ {k:'产出折合',f:p=>p.output_usd,fmt:v=>money(v,2)},
+ {k:'累计利润',f:p=>p.profit_usd,fmt:v=>money(v,2),better:'hi'},
+ {k:'成本 $/PRL',f:p=>p.cost_usd_per_prl,fmt:v=>money(v,4),better:'lo',tip:'累计租金 ÷ 累计产出; 低于币价才赚'},
+ {k:'每 $1 租金产币',f:p=>p.prl_per_usd,fmt:v=>fnum(v,4)+' PRL',better:'hi'},
+ {k:'算力小时(自 '+since+')',f:p=>p.th_hours,fmt:v=>fnum(v,0)+' TH·h',tip:'矿池实测算力 × 时长; 与下面「同期产出」同口径, 重置统计时清零'},
+ {k:'同期产出',f:p=>p.output_since_th_start,fmt:v=>fnum(v,4)+' PRL'},
+ {k:'实测产率',f:p=>p.realized_prl_per_th_day,fmt:v=>fnum(v,5)+' PRL/TH·天',better:'hi',tip:'同期产出 ÷ 算力小时 × 24(累计满 1 小时才显示); 全网理论 '+(th==null?'—':fnum(th,5))},
+ {k:'矿池效率(实测/理论)',f:p=>p.efficiency_pct,fmt:v=>fnum(v,1)+'%',better:'hi',tip:'含池费、运气(PPLNS)/PPS 折价、无效份额; 越接近 100% 越好'},
+ {k:'池费',f:p=>p.fee*100,fmt:v=>fnum(v,1)+'%',better:'lo'},
+];
+const trs=rows.map(r=>{const vals=P.map(r.f);let best=null;if(r.better){const nums=vals.map((v,i)=>[v,i]).filter(x=>x[0]!=null&&isFinite(x[0]));if(nums.length>1){const s=nums.slice().sort((a,b)=>r.better=='hi'?b[0]-a[0]:a[0]-b[0]);if(s[0][0]!=s[1][0])best=s[0][1];}}
+return `<tr><td class=muted title="${esc(r.tip||'')}">${r.k}${r.tip?' <span style="opacity:.6">ⓘ</span>':''}</td>${vals.map((v,i)=>`<td style="${i===best?'color:var(--ok);font-weight:600':''}">${v==null?'<span class=muted>—</span>':r.fmt(v)}</td>`).join('')}</tr>`;}).join('');
+return `<div class="kpanel" id=papanel><div class=khead onclick="togglePa()"><span class=ktit>📊 数据分析 · 矿池能效对比</span><span class=muted style="font-size:11px">全网理论产率 ${th==null?'—':fnum(th,5)} PRL/TH·天 · 回本线 ${be==null?'—':'$'+fnum(be,4)}/100TH·h 对两个池一样(只差池费), 差异看「矿池效率」</span><span class=karr>▼</span></div>
+<div class=kbody><div class=tscroll><table class=rtab><tr><th>指标</th>${P.map(p=>`<th>${esc(p.label)}</th>`).join('')}</tr>${trs}</table></div>
+<div class=muted style="font-size:11px;margin-top:8px">绿色 = 该行更优。「实测产率 / 矿池效率」需要累计算力小时, 刚上线时数据少, 跑几小时后才有参考价值; PearlHash 按小时 epoch 结算有运气波动, Kryptex 为 PPS 稳定但有折价。</div></div></div>`;}
 const _kperMap={'15m':15,'1h':60,'4h':240,'1d':1440};
 function toggleKline(){_kopen=!_kopen;const p=document.getElementById('kpanel');if(p)p.classList.toggle('open',_kopen);if(_kopen&&!_kdata)loadKline();}
 function setKPer(p){_kper=p;document.querySelectorAll('.kper').forEach(e=>e.classList.toggle('on',e.textContent==p));_kdata=null;if(_kopen)loadKline();}
@@ -2746,12 +3251,14 @@ function attachCrosshair(cc,vc,data,px,xc,step,PAD,CH,W,candleW){
   cc.onmouseleave=()=>{const t=document.getElementById('ktip');if(t)t.style.display='none';};
 }
 
-let CFG=null;let RENTALS=null;
+let CFG=null;let RENTALS=null;let CATALOG=null;
+function gpuMargin(){const m=parseFloat(localStorage.getItem('gpu_margin'));if(isFinite(m))return m;return (CATALOG&&CATALOG.target_margin_default)||0.2;}
 async function renderConfigTab(){let d;try{d=await api('/api/full-config')}catch(e){return}CFG=d;
+try{CATALOG=await api('/api/gpu-catalog?margin='+gpuMargin());}catch(e){CATALOG=null;}
 let nv=Object.keys(d.platforms).map(a=>`<div class="ni sub adm${subtab==a?' on':''}" data-nav=cf:${a} onclick="nav('cf:${a}')">${esc(d.platforms[a].label||a)}</div>`).join('');
 let ce=document.getElementById('cfaccts');if(ce)ce.innerHTML=nv;
 document.getElementById('cf').innerHTML=subtab=='common'?commonHtml(d):platformHtml(d.platforms[subtab],subtab);}
-function commonHtml(d){let c=d.common;let diff=d.common_diff||{};let P=d.platforms||{};let n=Object.keys(P).length;
+function commonHtml(d){let c=d.common;let diff=d.common_diff||{};let P=d.platforms||{};let n=Object.keys(P).length;let as=d.auto_stop||{};
 let cf=(k,label,req,ph)=>{let w='';
 if(diff[k]){let dv=Object.entries(diff[k]).map(([p,v])=>p+'='+(v==null||v===''?'∅':v)).join('   |   ');
 w=` <span class=cdiff title="${esc(dv)}">⚠ 各账号当前不一致, 保存将统一覆盖</span>`;}
@@ -2769,6 +3276,16 @@ ${cf('alert_url','告警 URL (可空)',0,'ntfy 等')}
 <div style="font-size:12px;color:var(--mut);line-height:1.9">
 ${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="font-size:11px">${esc(o.image||'')}</code> · 平台: ${esc((o.platforms||[]).join(' / ')||'全部')}${poolReqText(o)?' · 要求: '+esc(poolReqText(o)):''}${o.note?'<br><span style="padding-left:14px">'+esc(o.note)+'</span>':''}</div>`).join('')}
 </div></div>
+<div class=platbox><div class=top><b>自动关停亏损机</b><span class=muted>看板每 60s 检查 · 产值 = 算力 × 网络产率 × 币价 × (1−池费)</span></div>
+<div class=grid2>
+<div class=fld>启用</div><label class=ckrow><input type=checkbox id=as_enabled ${as.enabled?'checked':''}><span class=hint>关掉只显示产值/回本列, 不自动关机</span></label>
+<div class=fld>亏损阈值 %</div><input id=as_loss value="${esc(as.loss_pct==null?'':as.loss_pct)}" placeholder="20">
+<div class=fld>最短机龄 (分钟)</div><input id=as_age value="${esc(as.min_age_min==null?'':as.min_age_min)}" placeholder="30">
+<div class=fld>持续亏损 (分钟)</div><input id=as_persist value="${esc(as.persist_min==null?'':as.persist_min)}" placeholder="20">
+<div class=fld>关停后拉黑 (小时)</div><input id=as_bl value="${esc(as.blacklist_hours==null?'':as.blacklist_hours)}" placeholder="6">
+</div>
+<div class=row style=margin-top:12px><button class=b-acc onclick=saveAutoStop() style="white-space:nowrap">保存</button>
+<span class=hint>写入 .env 立即生效, 无需重启。产值 &lt; 单价 × (1 − 阈值) 且持续够久、机龄够长才关; 成本线附近 / 新机 / 币价或产率数据过期 / 账号进程没跑 都不动; 每分钟最多关 2 台, 候选超过在跑一半时暂停(防数据异常误杀); Salad 不参与; 关停后经 control/ 交接让 sniper 拉黑该机器</span></div></div>
 <div class=platbox><div class=top><b>账户 · 看板登录</b></div>
 <div class=grid2>
 <div class=fld>用户名</div><input value="admin" disabled>
@@ -2803,6 +3320,7 @@ ${isS?`<div class=fld>机器数 / 矿池</div><div class=hint style="padding-top
 </div>
 ${isS?'':'<div class=hint style=margin-top:4px>本账号在租机器的总时租不会超过上限; 所有账号上限之和 = 最坏每小时花费</div>'}
 <div class=lbl style=margin-top:14px>${N(isS?3:5)}GPU 档 <span class=muted style="font-size:11px;font-weight:400">${isS?'· 型号 / 最低算力 TH/s(低于门槛持续一段时间自动换机; 未列型号用高级设置里的 default_min_hashrate_th)':'· 型号 / 最高出价 $/h / 最低算力 TH/s'}</span></div>
+${CATALOG?`<div class=hint style="margin:0 0 8px">目标利润率 <select onchange="setMargin('${p}',this.value)">${[0.1,0.15,0.2,0.25,0.3,0.4].map(x=>`<option value="${x}" ${Math.abs(gpuMargin()-x)<1e-6?'selected':''}>${Math.round(x*100)}%</option>`).join('')}</select> · 网络产率 ${CATALOG.yield_prl_per_th_h?fnum(CATALOG.yield_prl_per_th_h*24,4)+' PRL/TH·天':'—'} · 币价 $${fnum(CATALOG.coin_price_usd,3)} → 每 100 TH/s 每小时产值 <b>$${fnum(CATALOG.ypc*100,3)}</b>; 建议出价 = 参考算力 × 产值/TH × (1 − 利润率); 建议最低算力 = 参考算力 × 75%; 市场参考价 ${esc(CATALOG.market_ref_asof||'')} 公开资料, 仅供对照</div>`:''}
 <div class="gpurow${isS?' nop':''}" style=color:var(--mut);font-size:11px><div>GPU 型号</div>${isS?'':'<div>最高出价 $/h</div>'}<div>最低算力 TH/s</div><div></div></div>
 <div id="gpus_${p}" class="${isS?'nop':''}">${gpus}</div>
 <button onclick="addGpu('${p}')" style=margin-top:4px>+ 增加 GPU</button>
@@ -2830,6 +3348,8 @@ ${spec?`<div class=lbl style=margin-top:14px>平台特定参数</div><div class=
 <span class=hint>logs/${p}.log · 实时后台输出</span></div>
 <pre class=logbox id="log_${p}" style=display:none></pre>
 </div>`;}
+async function saveAutoStop(){const g=id=>document.getElementById(id).value.trim();let data={enabled:document.getElementById('as_enabled').checked,loss_pct:g('as_loss'),min_age_min:g('as_age'),persist_min:g('as_persist'),blacklist_hours:g('as_bl')};
+let r=await api('/api/auto-stop-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:data})});toast(r.error?('失败: '+r.error):'自动关停设置已保存, 立即生效');if(r.ok)renderConfigTab();}
 async function savePw(){let pw=document.getElementById('newpw').value;if(pw.length<4){toast('密码至少 4 位');return;}
 let r=await api('/api/dashboard-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
 document.getElementById('newpw').value='';toast(r.error?('失败: '+r.error):'看板密码已更新');}
@@ -2838,11 +3358,22 @@ function setPoolView(v){localStorage.setItem('pool_view',v);renderOverview();}
 async function loadLog(p){let n=document.getElementById('loglines_'+p).value;let pre=document.getElementById('log_'+p);
 pre.style.display='';pre.textContent='加载中…';
 try{let r=await api('/api/logs?platform='+p+'&lines='+n);pre.textContent=r.log||'(空)';pre.scrollTop=pre.scrollHeight;}catch(e){pre.textContent='加载失败';}}
-function gpuRowHtml(p,i,g){return `<div class=gpurow data-gpu>
-<input value="${esc(g.gpu||'')}" placeholder="RTX 4090" data-f=gpu>
+function gpuRowHtml(p,i,g){const cat=(CATALOG&&CATALOG.models)||[];const cur=g.gpu||'';const key=g.catalog_key||cur;const inCat=!!cur&&cat.some(m=>m.key==key);
+let sel;if(cat.length){sel=`<select data-f=gpusel onchange="onGpuPick(this,'${p}')"><option value="">— 选择型号 —</option>${cat.map(m=>`<option value="${esc(m.key)}" ${(inCat&&m.key==key)?'selected':''}>${esc(m.key)}${m.ref_th?' · ~'+fnum(m.ref_th,0)+' TH/s':''}</option>`).join('')}<option value="__custom__" ${(cur&&!inCat)?'selected':''}>自定义…</option></select><input value="${esc(inCat?key:cur)}" placeholder="自定义型号, 如 RTX 3080 Ti" data-f=gpu style="display:${(cur&&!inCat)?'':'none'}">`;}
+else sel=`<input value="${esc(cur)}" placeholder="RTX 4090" data-f=gpu>`;
+return `<div class=gpurow data-gpu>
+<div class=gsel>${sel}</div>
 <input value="${esc(g.max_price==null?'':g.max_price)}" placeholder="0.4" data-f=price>
 <input value="${esc(g.min_hashrate==null?'':g.min_hashrate)}" placeholder="220" data-f=hash>
-<button class=b-bad onclick="this.parentNode.remove()">×</button></div>`;}
+<button class=b-bad onclick="this.parentNode.remove()">×</button>
+<div class=ghint data-f=hint>${gpuHint(inCat?key:'',p)}</div></div>`;}
+function gpuHint(key,p){if(!CATALOG||!key)return '';const m=(CATALOG.models||[]).find(x=>x.key==key);if(!m)return '';const mg=gpuMargin();const bid=(m.ref_th&&CATALOG.ypc>0)?m.ref_th*CATALOG.ypc*(1-mg):null;const isS=((CFG&&CFG.platforms[p])||{}).platform=='salad';
+const mk=[];if(m.runpod_observed)mk.push('RunPod 实时最低 $'+fnum(m.runpod_observed.price,3)+(m.runpod_observed.cloud?' ('+m.runpod_observed.cloud.toLowerCase()+')':''));if(m.market_ref&&m.market_ref.runpod_community!=null)mk.push('RunPod 社区档 $'+fnum(m.market_ref.runpod_community,2));if(m.market_ref&&m.market_ref.vast_typical!=null)mk.push('Vast 典型 $'+fnum(m.market_ref.vast_typical,2));
+return `${m.ref_th?('参考算力 ~<b>'+fnum(m.ref_th,0)+'</b> TH/s ('+esc(m.ref_source)+')'):'参考算力未知(无公开数据, 本池同型号 ≥3 台后自动用实测)'}${bid!=null?' · 建议出价 ≤ <b>$'+fnum(bid,3)+'</b>/h (利润率 '+Math.round(mg*100)+'%)':''}${m.rec_min_th?' · 建议最低算力 <b>'+m.rec_min_th+'</b> TH/s':''}${mk.length?' · 市场 '+mk.join(' / '):''}${m.ref_th?` <a href=# onclick="applyRec(this,'${esc(m.key)}',${isS});return false">采用推荐 ↵</a>`:''}`;}
+function applyRec(el,key,isS){const row=el.closest('[data-gpu]');const m=((CATALOG&&CATALOG.models)||[]).find(x=>x.key==key);if(!row||!m)return;const mg=gpuMargin();
+if(!isS&&m.ref_th&&CATALOG.ypc>0)row.querySelector('[data-f=price]').value=(m.ref_th*CATALOG.ypc*(1-mg)).toFixed(3);if(m.rec_min_th)row.querySelector('[data-f=hash]').value=m.rec_min_th;toast('已填入推荐值, 记得「保存配置」→「重启应用」');}
+function onGpuPick(sel,p){const row=sel.closest('[data-gpu]');const inp=row.querySelector('[data-f=gpu]');const h=row.querySelector('[data-f=hint]');if(sel.value=='__custom__'){inp.style.display='';inp.value='';h.innerHTML='';inp.focus();}else{inp.style.display='none';inp.value=sel.value;h.innerHTML=gpuHint(sel.value,p);}}
+function setMargin(p,v){localStorage.setItem('gpu_margin',v);document.querySelectorAll('#gpus_'+p+' [data-gpu]').forEach(r=>{const s=r.querySelector('[data-f=gpusel]');const key=s?(s.value=='__custom__'?'':s.value):'';r.querySelector('[data-f=hint]').innerHTML=gpuHint(key,p);});}
 function addGpu(p){document.getElementById('gpus_'+p).insertAdjacentHTML('beforeend',gpuRowHtml(p,0,{}));}
 const SPEC_LABELS={max_offer_price_usd:'最高报价 $/h (粗筛)',min_offer_price_usd:'最低报价 $/h (滤异常低价)',min_reliability:'最低可靠度 0-1',disk_gb:'磁盘 GB',prefer_countries:'优先国家',
 cloud_types:'云类型 COMMUNITY/SECURE',country_codes:'国家代码',container_disk_gb:'容器磁盘 GB',create_observed_price_factor:'观测价保守系数 (1=按观测价)',short_exit_blacklist_seconds:'短命退出拉黑秒数',allowed_cuda_versions:'允许宿主 CUDA 版本 (空=不限; CUDA 原生矿机需 13.0)',hashrate_watch_enabled:'零算力监控回收',hashrate_grace_seconds:'新机宽限秒数 (期间不判低效; 池有下限时取大)',low_efficiency_stop_seconds:'低效持续秒数后回收',allow_unsupported_pool:'强制在本平台跑未验证的矿池矿机',
@@ -2856,7 +3387,8 @@ return `<div class=fld>${lb}${s.type=='list'?' <span class=muted>(逗号分隔)<
 function collectGpus(p){let rows=document.querySelectorAll('#gpus_'+p+' [data-gpu]');let th={},mh={};
 rows.forEach(r=>{let gpu=r.querySelector('[data-f=gpu]').value.trim();if(!gpu)return;
 let pr=parseFloat(r.querySelector('[data-f=price]').value);let h=parseFloat(r.querySelector('[data-f=hash]').value);
-let names=[gpu];if(gpu.startsWith('RTX '))names.push('NVIDIA GeForce '+gpu);
+let names=[gpu];const cm=CATALOG&&(CATALOG.models||[]).find(x=>x.key==gpu);
+if(cm)(cm.aliases||[]).forEach(a=>{if(!names.includes(a))names.push(a);});else if(gpu.startsWith('RTX '))names.push('NVIDIA GeForce '+gpu);
 names.forEach(n=>{if(!isNaN(pr))th[n]=pr;if(!isNaN(h))mh[n]=h;});});
 return {thresholds:th,min_hashrate_th:mh};}
 
@@ -3024,6 +3556,7 @@ def main():
     (ROOT / "logs").mkdir(exist_ok=True)  # 看板拉起 sniper 前保证 logs/ 存在(不经 start-all 启动时也不会静默失败)
     threading.Thread(target=spend_loop, daemon=True).start()
     threading.Thread(target=_refresh_loop, daemon=True).start()  # 后台预热缓存, 请求只读缓存不阻塞
+    threading.Thread(target=auto_stop_loop, daemon=True).start()  # 自动关停亏损机(默认开, .env AUTO_STOP_* 可关/调)
     start_portal_manager()  # 常驻 headless 抓 salad portal GPU/余额(无会话/无 playwright 则静默跳过)
     port = int(CONF.get("port", 8787))
     host = CONF.get("host", "127.0.0.1")

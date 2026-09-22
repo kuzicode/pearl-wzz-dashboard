@@ -165,6 +165,55 @@ def normalize_gpu(name):
         return "RTX 4060 Ti"
     if "4060" in compact:
         return "RTX 4060"
+    if "3070TI" in compact:
+        return "RTX 3070 Ti"
+    if "3070" in compact:
+        return "RTX 3070"
+    if "3060TI" in compact:
+        return "RTX 3060 Ti"
+    if "3060" in compact:
+        return "RTX 3060"
+    if "5060" in compact:
+        return "RTX 5060"
+    if "2080TI" in compact:
+        return "RTX 2080 Ti"
+    if "2080SUPER" in compact:
+        return "RTX 2080 Super"
+    if "2080" in compact:
+        return "RTX 2080"
+    if "2070SUPER" in compact:
+        return "RTX 2070 Super"
+    if "2070" in compact:
+        return "RTX 2070"
+    if "2060SUPER" in compact:
+        return "RTX 2060 Super"
+    if "2060" in compact:
+        return "RTX 2060"
+    # 数据中心 / 工作站卡(RunPod/Vast 名如 "NVIDIA H100 80GB HBM3" / "A100-SXM4-80GB" / "RTX 6000 Ada Generation"); 长名优先
+    if "H200" in compact:
+        return "H200"
+    if "H100" in compact:
+        return "H100"
+    if "A100" in compact:
+        return "A100"
+    if "L40S" in compact:
+        return "L40S"
+    if "L40" in compact:
+        return "L40"
+    if re.search(r"(^|[^A-Z0-9])L4($|[^0-9])", text):
+        return "L4"
+    if "6000ADA" in compact:
+        return "RTX 6000 Ada"
+    if "A6000" in compact:
+        return "RTX A6000"
+    if "A5000" in compact:
+        return "RTX A5000"
+    if "A4000" in compact:
+        return "RTX A4000"
+    if "V100" in compact:
+        return "V100"
+    if re.search(r"(^|[^A-Z0-9])T4($|[^0-9])", text):
+        return "T4"
     for token in ("RTX 5090", "RTX 4090", "RTX 3090 TI", "RTX 3090", "RTX 3080 TI", "RTX 3080", "RTX 5060 TI"):
         if token in text:
             return token.title().replace("Ti", "Ti").replace("Rtx", "RTX")
@@ -189,6 +238,59 @@ def gpu_map_value(name, mapping, default=None):
         if normalize_gpu(key) == normalized:
             return value
     return default
+
+
+# GPU 目录(配置页下拉 + 建议出价/算力)。key = normalize_gpu 输出; aliases = 写入 config 的同义 key(vast gpu_name / runpod gpuTypeId);
+# ref_th = 公开参考算力 TH/s(PearlHash 算法), 有出处才填, 未知留 None(不猜; 看板会用本池实测中位数覆盖);
+# market_ref = 公开市场参考价 $/h(RunPod 社区档 / Vast 典型成交), 仅供对照, 日期见 GPU_MARKET_REF_ASOF。
+GPU_MARKET_REF_ASOF = "2026-09"
+def _gc(key, ref_th, src, aliases=None, runpod_ids=None, market=None):
+    ali = list(aliases or [])
+    if key.startswith("RTX ") and f"NVIDIA GeForce {key}" not in ali:
+        ali.append(f"NVIDIA GeForce {key}")
+    return {"key": key, "aliases": ali, "runpod_ids": list(runpod_ids or ali), "ref_th": ref_th, "ref_source": src,
+            "market_ref": dict(market or {})}
+_HR = "hashrate.no"
+_MB = "miningboard 公开表"
+GPU_CATALOG = [
+    _gc("RTX 5090", 400, "本池 WildRig v13 实测(hashrate.no 418)", market={"runpod_community": 0.99, "vast_typical": 0.45}),
+    _gc("RTX 5080", 204, _HR),
+    _gc("RTX 5070 Ti", 170, _HR),
+    _gc("RTX 5070", 107, _HR),
+    _gc("RTX 5060 Ti", 87, _HR),
+    _gc("RTX 4090", 290, "本池 WildRig v13 实测(hashrate.no 280)", market={"runpod_community": 0.34, "vast_typical": 0.30}),
+    _gc("RTX 4080 Super", 125, _MB, aliases=["NVIDIA GeForce RTX 4080 SUPER"]),
+    _gc("RTX 4080", 159, _HR),
+    _gc("RTX 4070 Ti Super", 105, _MB, aliases=["NVIDIA GeForce RTX 4070 Ti SUPER"]),
+    _gc("RTX 4070 Ti", 115, _HR),
+    _gc("RTX 4070", 116, _HR),
+    _gc("RTX 4060 Ti", 90, _HR),
+    _gc("RTX 3090 Ti", 121, _HR),
+    _gc("RTX 3090", 110, _HR, market={"runpod_community": 0.50, "vast_typical": 0.15}),
+    _gc("RTX 3080 Ti", 116, _HR),
+    _gc("RTX 3080", 105, _HR),
+    _gc("RTX 3070 Ti", 75, _HR),
+    _gc("RTX 3070", 71, _HR),
+    _gc("RTX 3060 Ti", 58, _HR),
+    _gc("RTX 3060", 42, _HR),
+    _gc("RTX 2080 Ti", 86, _HR),
+    _gc("RTX A6000", None, "", aliases=["NVIDIA RTX A6000"]),
+    _gc("RTX 6000 Ada", None, "", aliases=["NVIDIA RTX 6000 Ada Generation"]),
+    _gc("RTX A5000", None, "", aliases=["NVIDIA RTX A5000"]),
+    _gc("RTX A4000", 33, _HR, aliases=["NVIDIA RTX A4000"]),
+    _gc("L40S", None, "", aliases=["NVIDIA L40S"]),
+    _gc("L4", None, "", aliases=["NVIDIA L4"]),
+    _gc("A100", None, "", aliases=["NVIDIA A100 80GB PCIe", "NVIDIA A100-SXM4-80GB"]),
+    _gc("H100", None, "", aliases=["NVIDIA H100 80GB HBM3", "NVIDIA H100 PCIe", "NVIDIA H100 NVL"]),
+    _gc("V100", None, "", aliases=["Tesla V100-SXM2-16GB"]),
+]
+
+def catalog_entry(name):
+    k = normalize_gpu(name)
+    for c in GPU_CATALOG:
+        if c["key"] == k:
+            return c
+    return None
 
 
 _HASHRATE_UNIT_MULT = {  # 单位 → 折算到 TH/s 的系数
@@ -552,33 +654,86 @@ def offer_machine_ids(offer):
     return sorted(set(ids))
 
 
+def _bl_alive(entry):
+    """拉黑条目是否仍有效: 无 expires_epoch = 永久; 有则未过期才算。"""
+    if entry is None:
+        return False
+    try:
+        exp = (entry or {}).get("expires_epoch")
+        return exp is None or float(exp) > epoch_now()
+    except Exception:
+        return True
+
+
+def machine_blacklisted(state, provider, machine_id):
+    if not machine_id:
+        return False
+    return _bl_alive(state.get("blacklist", {}).get("machines", {}).get(f"{provider}:{machine_id}"))
+
+
 def is_blacklisted(state, provider, offer):
     blacklist = state.get("blacklist", {})
     offer_id = str(offer.get("id", ""))
-    if f"{provider}:{offer_id}" in blacklist.get("offers", {}):
+    if _bl_alive(blacklist.get("offers", {}).get(f"{provider}:{offer_id}")):
         return True
     for machine_id in offer_machine_ids(offer):
-        if f"{provider}:{machine_id}" in blacklist.get("machines", {}):
+        if _bl_alive(blacklist.get("machines", {}).get(f"{provider}:{machine_id}")):
             return True
     return False
 
 
-def blacklist_offer(state, provider, offer_id, reason, details=None):
-    state.setdefault("blacklist", {}).setdefault("offers", {})[f"{provider}:{offer_id}"] = {
-        "time": now(),
-        "reason": reason,
-        "details": details or {},
-    }
+def blacklist_offer(state, provider, offer_id, reason, details=None, expires_epoch=None):
+    entry = {"time": now(), "reason": reason, "details": details or {}}
+    if expires_epoch:
+        entry["expires_epoch"] = float(expires_epoch)
+    state.setdefault("blacklist", {}).setdefault("offers", {})[f"{provider}:{offer_id}"] = entry
 
 
-def blacklist_machine(state, provider, machine_id, reason, details=None):
+def blacklist_machine(state, provider, machine_id, reason, details=None, expires_epoch=None):
     if not machine_id:
         return
-    state.setdefault("blacklist", {}).setdefault("machines", {})[f"{provider}:{machine_id}"] = {
-        "time": now(),
-        "reason": reason,
-        "details": details or {},
-    }
+    entry = {"time": now(), "reason": reason, "details": details or {}}
+    if expires_epoch:
+        entry["expires_epoch"] = float(expires_epoch)
+    state.setdefault("blacklist", {}).setdefault("machines", {})[f"{provider}:{machine_id}"] = entry
+
+
+def merge_control_blacklist(state, provider=None):
+    """合并看板交接的拉黑条目(自动关停亏损机后): control/<账号>.blacklist-add, 每行一个 JSON
+    {provider, offer_id, machine_id, reason, details, expires_epoch}。先 os.replace 成 .processing 再读:
+    原子, 期间看板再追加会新建文件, 不丢。看板不直接写 state 文件(本进程内存持有并整文件覆盖)。返回合并条数。"""
+    try:
+        name = ACCOUNT or provider or ""
+        if not name:
+            return 0
+        path = ROOT / "control" / f"{name}.blacklist-add"
+        if not path.exists():
+            return 0
+        proc = path.with_name(path.name + ".processing")
+        os.replace(path, proc)
+        n = 0
+        for line in proc.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+            except Exception:
+                continue
+            prov = e.get("provider") or provider or account_platform(name)
+            reason = e.get("reason") or "dashboard_blacklist"
+            exp = e.get("expires_epoch")
+            if e.get("offer_id"):
+                blacklist_offer(state, prov, e["offer_id"], reason, e.get("details"), expires_epoch=exp)
+            if e.get("machine_id"):
+                blacklist_machine(state, prov, e["machine_id"], reason, e.get("details"), expires_epoch=exp)
+            log(f"Blacklist handoff merged: provider={prov} offer={e.get('offer_id')} machine={e.get('machine_id')} reason={reason} expires={exp}")
+            n += 1
+        proc.unlink(missing_ok=True)
+        return n
+    except Exception as exc:
+        log(f"merge_control_blacklist error: {type(exc).__name__}: {exc}")
+        return 0
 
 
 def mark_seen(state, provider, external_id, details):
@@ -1810,7 +1965,7 @@ def try_runpod_create(config, state, live):
                         request_json("DELETE", f"https://rest.runpod.io/v1/pods/{pod_id}", {"Authorization": f"Bearer {api_key}"}, timeout=30)
                     continue
                 machine_id = str(result.get("machineId") or (result.get("machine") or {}).get("id") or "")
-                if machine_id and f"runpod:{machine_id}" in state.get("blacklist", {}).get("machines", {}):
+                if machine_id and machine_blacklisted(state, "runpod", machine_id):
                     pod_id = result.get("id")
                     log(f"RunPod created on blacklisted machine={machine_id}; deleting pod={pod_id}")
                     if pod_id:
@@ -3169,6 +3324,8 @@ def run_provider_loop(config, state, live):
 
     def submit(executor, name):
         def task():
+            with lock:
+                merge_control_blacklist(state, name)   # 看板自动关停后的拉黑交接, 先于本轮扫描/租用
             providers[name](config, state, live)
             with lock:
                 save_json(STATE_PATH, state)
