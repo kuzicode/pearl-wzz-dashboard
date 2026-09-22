@@ -1142,7 +1142,9 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
     cfg = config.get("vast", {})
     if not cfg.get("hashrate_watch_enabled", True):
         return False
-    in_grace = age < effective_grace(cfg, rental_pool(rented))   # 宽限期内照样取算力供看板显示, 只是不套低效策略
+    pool_grace = effective_grace(cfg, rental_pool(rented))       # 池要求的宽限(Kryptex 只给 30m 均值 → 1800s)
+    own_grace = int(cfg.get("hashrate_grace_seconds", 300))      # 账号自己的宽限: 算力来自容器日志(即时值)时用这个, 功耗墙宿主不用等 30 分钟
+    in_grace = age < pool_grace   # 宽限期内照样取算力供看板显示, 只是不套低效策略
     now_ts = epoch_now()
     last_check = float(rented.get("hashrate_last_check_epoch") or 0)
     interval = int(cfg.get("hashrate_watch_interval_seconds", 30))
@@ -1150,9 +1152,13 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
         return False
     rented["hashrate_last_check_epoch"] = now_ts
     hashrate_th = None
+    from_log = False
     try:
         log_text = request_vast_instance_logs(contract_id, int(cfg.get("hashrate_log_tail_lines", 300)))
         hashrate_th = parse_latest_hashrate(log_text)
+        from_log = hashrate_th is not None
+        if from_log and in_grace and age >= own_grace:
+            in_grace = False   # 日志里已有即时算力且过了账号宽限 → 提前进入低效判定(池均值滞后的顾虑不存在)
     except Exception as exc:
         log(f"Vast hashrate log check failed: contract={contract_id} error={exc}; falling back to pool worker API (merged across monitor_pools, incl active pool)")
     if hashrate_th is None:
