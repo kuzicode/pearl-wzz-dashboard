@@ -785,7 +785,7 @@ POOLS = {
                      "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
-                  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r2",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
+                  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
                   "reads_prl_host": True,
                   "platforms": ["vast", "salad", "runpod"],
                   "requires": {"min_reliability": 0.98, "grace_seconds_min": 1800},   # 池级要求; 矿机相关(min_cuda)在 miners[*].requires
@@ -794,7 +794,7 @@ POOLS = {
                       "krig":     {"label": "KRig 1.5.2", "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.2",
                                    "requires": {"min_cuda": 13.0},
                                    "note": "Kryptex 官方 miner, 0% dev fee; 宿主驱动需支持 CUDA ≥ 13(≥580)且显存独占, RunPod 社区机约半数 cuInit 失败"},
-                      "srbminer": {"label": "SRBMiner-MULTI 3.6.9", "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r2",
+                      "srbminer": {"label": "SRBMiner-MULTI 3.6.9", "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3",
                                    "requires": {},
                                    "note": "pearlhash 不硬性要求 CUDA 13, 旧驱动宿主可跑(5000 系建议 ≥580); dev fee 2%; 无 TTY 不输出故镜像用 script 伪终端包裹, 每分钟打 hashrate_th_s= 行"},
                   },
@@ -1757,8 +1757,7 @@ def reconcile_runpod_instances(config, state):
         if switched_epoch:
             # 切 host 重启后, 以重启时刻为准重新计算"机龄", 给足新宽限期
             age = min(age, now_ts - switched_epoch)
-        if age < grace:
-            continue
+        in_grace = age < grace   # 宽限期内照样查矿池算力供看板显示, 只是不套低效策略(不回收)
         last_check = float(rented.get("hashrate_last_check_epoch") or 0)
         if now_ts - last_check < interval:
             continue
@@ -1776,6 +1775,8 @@ def reconcile_runpod_instances(config, state):
         info = lookup_worker(worker_hashrates, worker)
         if not info:
             rented["last_hashrate_lookup"] = {"worker": worker, "found": False}
+            if in_grace:
+                continue   # 宽限期: 还没上池很正常, 不记 0、不判低效
             # worker 不在矿池 = 没在挖。仅当本轮矿池查询成功时按 0 算力计, 交低效策略在持续低效 N 秒后回收;
             # 矿池 API 临时故障(worker_api_failed)则跳过, 避免误杀好机器。
             if worker_api_failed or not bool(cfg.get("missing_worker_as_zero", True)):
@@ -1784,6 +1785,12 @@ def reconcile_runpod_instances(config, state):
         else:
             hashrate_th = float(info.get("hashrate_th") or 0)
             rented["last_hashrate_lookup"] = {"worker": worker, "found": True, "ip": info.get("ip"), "version": info.get("version")}
+        if in_grace:
+            # 宽限期只更新显示值(看板产值/回本列), 低效判定等宽限结束再开始
+            rented["last_hashrate_th"] = hashrate_th
+            pr = float(rented.get("price") or pod.get("costPerHr") or 0)
+            rented["last_hashrate_efficiency"] = round(hashrate_th / pr, 1) if pr > 0 else None
+            continue
         stopped = apply_low_efficiency_policy(
             config,
             state,

@@ -7,11 +7,11 @@
 ### Added — 新增
 - **矿机变体**:`POOLS["kryptex"]["miners"]` = `krig`(KRig 1.5.2, 需宿主 CUDA 13/≥580)/ `srbminer`(SRBMiner-MULTI 3.6.9, pearlhash 不硬性要求 CUDA 13, dev fee 2%),`default_miner=krig`。账号 config 顶层 `miner` 选变体;`effective_image()` / `pool_requires(pool, config)` 按变体取镜像与宿主要求(Vast `cuda_max_good`、RunPod `allowedCudaVersions` 随之不再强制 13.0);记账/基线仍按 kryptex 一个池。`pool_of_image` 认 `srb-*` 为 Kryptex。
 - 配置页「新抢矿池」旁新增「矿机」下拉(池有变体时显示),`POST /api/set-miner`;要求提示按变体合并显示。`/api/full-config` 的 `pools[].miners / default_miner`、`platforms[].miner / image`。
-- 新镜像 `kuzigmgm/pearl-miner:srb-3.6.9-r2`(源 `docker-srb/`;r1 因 SRBMiner **无 TTY 时完全不输出且秒退**而废弃, r2 用 util-linux `script` 提供伪终端 + 补 OpenCL ICD 注册):从 GitHub Release 包 COPY 二进制(`./fetch.sh <版本>` 下载);entrypoint 沿用 KRig 的短 rig 名 / PRL_ADDRESS 护栏 / DIAG 行,`PRL_HOST` 的 `stratum+ssl://` → `--pool h:p --tls true`,登录 `--wallet <addr>.<rig>`,`--api-enable` 后每 60s 从本机 API 打 `hashrate_th_s=` 结构化行(sniper 日志解析可用),`SRB_EXTRA_ARGS` 追加超频参数,退避重启循环。参数均经 3.6.9 `--help` 核对(无 `--disable-startup-monitor`)。
+- 新镜像 `kuzigmgm/pearl-miner:srb-3.6.9-r3`(源 `docker-srb/`;r1 因 SRBMiner **无 TTY 时完全不输出且秒退**而废弃, r2 用 util-linux `script` 提供伪终端 + 补 OpenCL ICD 注册;r3 加**快速失败**:矿机连续 3 次 30s 内退出即容器 rc=1 退出,让 RunPod/Vast 置为 EXITED、sniper 1 分钟内删除并拉黑宿主,不再白烧 30 分钟宽限期,`FAST_FAIL_COUNT=0` 可关):从 GitHub Release 包 COPY 二进制(`./fetch.sh <版本>` 下载);entrypoint 沿用 KRig 的短 rig 名 / PRL_ADDRESS 护栏 / DIAG 行,`PRL_HOST` 的 `stratum+ssl://` → `--pool h:p --tls true`,登录 `--wallet <addr>.<rig>`,`--api-enable` 后每 60s 从本机 API 打 `hashrate_th_s=` 结构化行(sniper 日志解析可用),`SRB_EXTRA_ARGS` 追加超频参数,退避重启循环。参数均经 3.6.9 `--help` 核对(无 `--disable-startup-monitor`)。
 - 测试 `tests/test_pool_miner_variant.py`。
 
 ### Changed — 变更
-- **Kryptex 默认矿机改为 SRBMiner**(`default_miner=srbminer`,`POOLS["kryptex"].image` 同步指向 `srb-3.6.9-r2`);要回 KRig 在账号 config 顶层设 `miner: "krig"`(配置页矿机下拉)。试跑通过:RunPod 4090 279 TH/s、份额 100% 接受。
+- **Kryptex 默认矿机改为 SRBMiner**(`default_miner=srbminer`,`POOLS["kryptex"].image` 同步指向 `srb-3.6.9-r3`);要回 KRig 在账号 config 顶层设 `miner: "krig"`(配置页矿机下拉)。试跑通过:RunPod 4090 279 TH/s、份额 100% 接受。
 - 运维:runpod-2 试跑通过后放开到 10 台 / $5/h;runpod-1 / runpod-2 的 4090 出价上限 0.30 → 0.35(RunPod 社区价 $0.34,0.30 永远租不到)。
 
 ## [单机经济性 + 自动关停亏损机 + Kryptex 已付修正 + GPU 目录推荐] — 2026-09-22
