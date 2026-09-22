@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Salad 兜底价表更新为 Low Priority 实价] — 2026-09-22
+
+### Changed — 变更
+- `SALAD_GPU_PRICES` low 列按 2026-09-22 Salad 建组页 Low Priority 实价更新(4090 0.217、5090 0.333、5070 Ti 0.142、4070 0.097、4070 Ti 0.12、4070 Ti Super 0.13、3080 Ti 0.105、5080 0.187 …),并补 3070 / 3070 Ti / 3060 Ti / 4060 / 4070 Laptop / 3050 / 2080 / 2070 / 2060;medium/high 按比例估算。仅在 Salad gpu-classes 实时价取不到时兜底。
+
 ## [机器表「利润率」列 + Vast 功耗墙宿主提前回收] — 2026-09-22
 
 ### Changed — 变更
