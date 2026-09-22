@@ -1711,7 +1711,7 @@ def reconcile_runpod_instances(config, state):
     worker_api_failed = False
     now_ts = epoch_now()
     interval = int(cfg.get("hashrate_watch_interval_seconds", 30))
-    grace = int(cfg.get("hashrate_grace_seconds", 300))
+    grace = effective_grace(cfg, active_pool(config), default=300)   # 池要求的宽限下限(Kryptex 只给 30m 均值 → ≥1800s)与 vast 路径一致
     for rented in state.get("rented", []):
         if rented.get("provider") != "runpod" or not rented.get("active", True):
             continue
