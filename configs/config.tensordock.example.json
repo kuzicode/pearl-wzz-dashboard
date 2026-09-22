@@ -12,7 +12,7 @@
   "provider_intervals_seconds": {
     "vast": 10,
     "runpod": 10,
-    "tensordock": 2
+    "tensordock": 30
   },
   "worker_prefix": "auto",
   "alert_url": "",
@@ -30,19 +30,17 @@
     "image": "ubuntu2404",
     "vcpu_count": 2,
     "ram_gb": 4,
-    "storage_gb": 100,
+    "storage_gb": 30,
     "use_dedicated_ip": true,
     "ssh_key_path": "./keys/tensordock.pub",
     "ssh_private_key_path": "./keys/tensordock",
     "ssh_user": "user",
     "ssh_timeout_seconds": 600,
-    "city": "Dallas",
     "excluded_states": [],
     "location_rules": {},
     "prefer_hostnodes": true,
     "scan_hostnodes": true,
     "scan_locations": true,
-    "max_instance_age_starting_seconds": 900,
     "gpu_slugs": {
       "RTX 4090": "geforcertx4090-pcie-24gb",
       "RTX 5090": "geforcertx5090-pcie-32gb",
@@ -50,10 +48,10 @@
       "NVIDIA GeForce RTX 5090": "geforcertx5090-pcie-32gb"
     },
     "thresholds": {
-      "RTX 4090": 0.4,
-      "RTX 5090": 0.5,
-      "NVIDIA GeForce RTX 4090": 0.4,
-      "NVIDIA GeForce RTX 5090": 0.5
+      "RTX 4090": 0.3,
+      "NVIDIA GeForce RTX 4090": 0.3,
+      "RTX 5090": 0.42,
+      "NVIDIA GeForce RTX 5090": 0.42
     },
     "nvidia_driver_packages": [
       "nvidia-driver-580-open nvidia-utils-580",
@@ -81,15 +79,15 @@
     "hashrate_watch_interval_seconds": 30,
     "hashrate_zero_recover_seconds": 120,
     "hashrate_log_tail_lines": 300,
-    "hashrate_grace_seconds": 300,
+    "hashrate_grace_seconds": 600,
     "low_efficiency_stop_seconds": 900,
     "min_th_per_usd_hour": 334,
     "min_hashrate_th": {
-      "RTX 5090": 250,
-      "RTX 4090": 220,
-      "NVIDIA GeForce RTX 4090": 220,
-      "NVIDIA GeForce RTX 5090": 250
+      "RTX 4090": 250,
+      "NVIDIA GeForce RTX 4090": 250,
+      "RTX 5090": 300,
+      "NVIDIA GeForce RTX 5090": 300
     },
-    "seen_ttl_seconds": 1800
+    "scan_backoff_base_seconds": 60
   }
 }

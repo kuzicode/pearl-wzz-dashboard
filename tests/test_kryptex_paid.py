@@ -27,6 +27,13 @@ PAGES[BASE+"?page=2"]={"count":3,"next":None,"results":[{"date":str(RESET-100),"
 D._kryptex_paid.update({"total":None,"ts":0,"count":0,"items":[]})
 t=D.kryptex_payouts_total(force=True)
 ck("两页求和 只计 FINISHED = 4.0", abs(t-4.0)<1e-9 and D._kryptex_paid["count"]==2)
+# next 跨域名(真实: prl-api.kryptex.network) 也要翻页; 无关域名不跟随
+PAGES[BASE]={"count":3,"next":"https://prl-api.kryptex.network/api/v1/miner/payouts/prl1pX?page=2","results":[{"date":str(RESET+100),"amount":"2.5","status":"FINISHED"}]}
+PAGES["https://prl-api.kryptex.network/api/v1/miner/payouts/prl1pX?page=2"]={"count":3,"next":"https://evil.example.com/x","results":[{"date":str(RESET-100),"amount":"1.5","status":"FINISHED"}]}
+PAGES["https://evil.example.com/x"]={"results":[{"date":"1","amount":"999","status":"FINISHED"}]}
+t3=D.kryptex_payouts_total(force=True)
+ck("next 指向 prl-api.kryptex.network 也翻页 = 4.0; 无关域名不跟随", abs(t3-4.0)<1e-9)
+PAGES[BASE]={"count":3,"next":BASE+"?page=2","results":[{"date":str(RESET+100),"amount":"2.5","status":"FINISHED"},{"date":str(RESET+50),"amount":"9.9","status":"PENDING"}]}
 PAGES[BASE+"?page=2"]=RuntimeError("502")
 t2=D.kryptex_payouts_total(force=True)
 ck("某页失败 → 保留旧值 4.0(不写部分和)", abs(t2-4.0)<1e-9)

@@ -44,12 +44,12 @@
     "use_worker_fallback": false,
     "missing_worker_as_zero": true,
     "worker_gpu_names": {},
-    "default_min_hashrate_th": 220,
+    "default_min_hashrate_th": 200,
     "min_hashrate_th": {
-      "RTX 4090": 220,
-      "RTX 5090": 250,
-      "NVIDIA GeForce RTX 4090": 220,
-      "NVIDIA GeForce RTX 5090": 250
+      "RTX 4090": 240,
+      "RTX 5090": 300,
+      "NVIDIA GeForce RTX 4090": 240,
+      "NVIDIA GeForce RTX 5090": 300
     },
     "alphapool_worker_api_enabled": false,
     "alphapool_reallocate_enabled": false,

@@ -57,10 +57,13 @@ powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1   # Windows
 | 项 | 模板默认 | 说明 |
 |----|------|------|
 | `<平台>.enabled` / `create_enabled` | **false / false** | 不租机。`enabled=true, create_enabled=false` = 只观察不下单(看日志里的 observe hit 判断出价是否合理);两者都 true 才真租 |
-| `pool` / `monitor_pools` | `pearlhash` | 矿池与算力监控来源;镜像 `kuzigmgm/pearl-miner:v13-wildrig` 随池自动决定 |
+| `pool` / `monitor_pools` | `pearlhash` | 矿池与算力监控来源;镜像随池/矿机自动决定(PearlHash → WildRig v13;Kryptex → SRBMiner) |
+| RunPod `cloud_types` / `country_codes` | `["COMMUNITY"]` / `[]` | 秘密云 4090 $0.74 永不命中只会白建白删;不限国家扩大宿主池 |
+| Vast `min_offer_price_usd` / `max_offer_price_usd` / `min_reliability` | 0.03 / 0.6 / 0.95 | 粗筛区间与可靠度;每型号上限仍由 GPU 档决定 |
+| TensorDock | `enabled: false`,轮询 30s | 实验性:裸机 v10 矿机、仅 PearlHash 池、附加费未计;2s 轮询会被 429 限流 |
 | `miner`(仅 Kryptex) | `krig` | 同一矿池的矿机变体:`krig`(KRig,需宿主 CUDA 13)/ `srbminer`(SRBMiner-MULTI,旧驱动可跑,dev fee 2%);配置页「矿机」下拉可切,只影响新租 |
 | `max_active_instances` / `max_total_hourly_usd` | 1 台 / $1.0/h | **每账号独立**的花钱护栏,先小后大 |
-| GPU 档 `thresholds` / `min_hashrate_th` | 4090 ≤$0.4 ≥220TH,5090 ≤$0.5 ≥250TH | 高于出价不租;实测算力持续低于门槛自动回收换机 |
+| GPU 档 `thresholds` / `min_hashrate_th` | RunPod 4090 ≤$0.34 ≥250TH,5090 ≤$0.45 ≥300TH;Vast 4090 ≤$0.30,5090 ≤$0.42 | 按 2026-09 行情(RunPod 社区价 0.34 / 回本线 ≈$0.35/h);高于出价不租,实测算力持续低于门槛自动回收换机。行情变了用配置页 GPU 档的「建议出价」重算 |
 | 自动关停 `AUTO_STOP_*`(.env) | 开 / 亏 20% / 机龄 30min / 持续 20min / 拉黑 6h | 看板每分钟按「算力 × 网络产率 × 币价」算每台产值,持续明显亏损才关停并让 sniper 拉黑;成本线附近、新机、Salad、数据过期不动。配置总览页可改 |
 | `worker_prefix` | `auto` | 矿池里 worker 名前缀;多人/多账号同钱包请各自改成不同前缀 |
 | `DASHBOARD_HOST` | `127.0.0.1` | 见上「云服务器上访问看板」 |

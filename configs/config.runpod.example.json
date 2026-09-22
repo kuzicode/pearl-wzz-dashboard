@@ -25,18 +25,14 @@
     "observe_enabled": true,
     "cloud_type": "COMMUNITY",
     "cloud_types": [
-      "COMMUNITY",
-      "SECURE"
+      "COMMUNITY"
     ],
-    "country_codes": [
-      "US",
-      "CA"
-    ],
+    "country_codes": [],
     "unrestricted_country_gpu_keywords": [
       "4090",
       "5090"
     ],
-    "container_disk_gb": 20,
+    "container_disk_gb": 10,
     "volume_gb": 1,
     "min_download_mbps": 50,
     "min_upload_mbps": 20,
@@ -46,22 +42,22 @@
     "observe_no_hit_log_interval_seconds": 300,
     "observe_error_log_interval_seconds": 300,
     "thresholds": {
-      "NVIDIA GeForce RTX 4090": 0.4,
-      "NVIDIA GeForce RTX 5090": 0.5,
-      "RTX 4090": 0.4,
-      "RTX 5090": 0.5
+      "RTX 4090": 0.34,
+      "NVIDIA GeForce RTX 4090": 0.34,
+      "RTX 5090": 0.45,
+      "NVIDIA GeForce RTX 5090": 0.45
     },
     "hashrate_watch_interval_seconds": 30,
     "hashrate_zero_recover_seconds": 120,
     "hashrate_grace_seconds": 600,
-    "low_efficiency_stop_seconds": 300,
+    "low_efficiency_stop_seconds": 900,
     "backdate_low_efficiency_for_existing": true,
     "min_th_per_usd_hour": 334,
     "min_hashrate_th": {
-      "NVIDIA GeForce RTX 5090": 250,
-      "NVIDIA GeForce RTX 4090": 220,
-      "RTX 4090": 220,
-      "RTX 5090": 250
+      "RTX 4090": 250,
+      "NVIDIA GeForce RTX 4090": 250,
+      "RTX 5090": 300,
+      "NVIDIA GeForce RTX 5090": 300
     },
     "create_observed_price_factor": 1.0,
     "start_ssh": false,

@@ -2,6 +2,17 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [盈亏列改名 + Kryptex 付款跨域翻页修复 + 示例配置默认值更新 + TensorDock 限流修复] — 2026-09-22
+
+### Fixed — 修复
+- **Kryptex 已付款漏第 2 页(ISS-020 补充)**:payouts 每页 15 条,`next` 指向 `prl-api.kryptex.network`(非 `pool.kryptex.com`),旧判断停在第一页漏掉最早付款(本次 3 笔 5.26 PRL)。现按 host 后缀 `kryptex.com` / `kryptex.network` 跟随。
+- **TensorDock 2s 轮询被 429 限流**导致从未租到机器:模板与真实配置轮询改 30s + `scan_backoff_base_seconds 60`。
+
+### Changed — 变更
+- 机器表 / 自动关停记录的「回本」列改名 **「盈亏」**(= (产值 − 单价) ÷ 单价);「回本线」名称不变。
+- **示例配置默认值**按 2026-09 调研更新(仍默认不花钱):RunPod 仅 COMMUNITY、不限国家、容器盘 10 GB、4090 ≤0.34 / 5090 ≤0.45、最低算力 250/300、低效持续 900s;Vast 4090 ≤0.30 / 5090 ≤0.42、`min_offer 0.03` / `max_offer 0.6` / `min_reliability 0.95`;TensorDock 轮询 30s、存储 30 GB、删除死键 `seen_ttl_seconds` / `max_instance_age_starting_seconds` / `city`;Salad 最低算力 4090 240 / 5090 300。README「默认配置是什么」表同步。新增 `tests/test_example_configs.py`。
+- 看板 TensorDock 高级设置移除死键 `seen_ttl_seconds`;账号页加实验性提示(裸机 v10 矿机、仅 PearlHash 池、附加费未计、轮询 ≥30s)。
+
 ## [Kryptex 池矿机变体: SRBMiner-MULTI 3.6.9 镜像(旧驱动可跑)] — 2026-09-22
 
 ### Added — 新增

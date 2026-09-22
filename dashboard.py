@@ -47,7 +47,7 @@ SPECIFIC = {
                ("allowed_cuda_versions", "list"), ("hashrate_watch_enabled", "bool"),
                ("hashrate_grace_seconds", "num"), ("low_efficiency_stop_seconds", "num"), ("allow_unsupported_pool", "bool")],
     "tensordock": [("excluded_states", "list"), ("storage_gb", "num"), ("vcpu_count", "num"),
-                   ("ram_gb", "num"), ("seen_ttl_seconds", "num")],
+                   ("ram_gb", "num")],   # seen_ttl_seconds 是死键(sniper 从不读), 已移除
     "salad": [("organization_name", "str"), ("project_name", "str"), ("include_container_groups", "list"),
               ("default_min_hashrate_th", "num"), ("per_model_threshold_enabled", "bool"),
               ("treat_missing_log_as_zero", "bool"), ("low_efficiency_stop_seconds", "num"),
@@ -1546,7 +1546,8 @@ def kryptex_payouts_total(force=False):
     total, items, pages = 0.0, [], 0
     try:
         while url and pages < 50:
-            if not str(url).startswith("https://pool.kryptex.com"):
+            _host = (urllib.parse.urlparse(str(url)).hostname or "").lower()   # next 指向 prl-api.kryptex.network(非 pool.kryptex.com), 认 kryptex 域即可
+            if not (_host.endswith("kryptex.com") or _host.endswith("kryptex.network")):
                 break
             req = urllib.request.Request(url, headers={"User-Agent": KRYPTEX_UA, "Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -3080,7 +3081,7 @@ return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu
 let beRow=(BE!=null&&mlist.length)?`<tr class=beline><td colspan=${p=='salad'?6:5} style="text-align:right">回本线 ▶</td><td>$${fnum(BE,3)}</td><td colspan=4 style="font-weight:400;color:var(--mut)">$/100TH·h 高于此值 = 租金超过产值(币价 $${fnum(d.coin_price_usd,3)} · ${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)} PRL/TH·天)</td></tr>`:'';
 let _pt=v.console_url?`<b><a class=platlink href="${esc(v.console_url)}" target=_blank rel=noopener title="打开 ${esc(v.label||aid)} 后台 ↗">${esc(v.label||aid)} ↗</a></b>`:`<b>${esc(v.label||aid)}</b>`;
 plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}${pv!='merged'?`<span class=muted style="font-size:11px;margin-left:8px">本池 $${fnum(acctBurn,3)}/h (${poolName(pv)})</span>`:''}</div>${sstat}
-<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th title="单价 ÷ 算力 × 100: 每 100 TH/s 每小时花费, 按此降序(最贵在上)">$/100TH·h ▼</th><th title="算力 × 网络产率 × 币价 × (1−池费)">产值 $/h</th><th title="(产值 − 单价) ÷ 单价; 红 = 亏超自动关停阈值, 黄 = 成本线附近, 绿 = 盈利">回本</th><th>矿池</th><th></th></tr>${beRow}${rows}</table></div></div>`;}
+<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th title="单价 ÷ 算力 × 100: 每 100 TH/s 每小时花费, 按此降序(最贵在上)">$/100TH·h ▼</th><th title="算力 × 网络产率 × 币价 × (1−池费)">产值 $/h</th><th title="盈亏 = (产值 − 单价) ÷ 单价; 红 = 亏超自动关停阈值, 黄 = 成本线附近, 绿 = 盈利">盈亏</th><th>矿池</th><th></th></tr>${beRow}${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
 <div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addrrow><span class=addr>${esc(d.wallet)}</span><span class=copyi title="复制钱包地址" onclick="copyAddr('${esc(d.wallet)}')"><svg viewBox="0 0 24 24" width=16 height=16 fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round aria-hidden=true><rect x=9 y=9 width=13 height=13 rx=2 ry=2/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span></div></div>
@@ -3120,7 +3121,7 @@ ${paPanel(d)}
 ${hrPanel}
 <div class=sec><div class=lbl>账号总览</div><div class=platbox><div class=ovtw><table class=ovt><thead><tr><th>账号</th><th>状态</th><th>矿池</th><th>在跑</th><th>总算力</th><th>时租</th><th>最多同时租 · 时租上限</th></tr></thead><tbody>${acctRows}</tbody></table></div></div></div>
 <div class=sec><div class=lbl>各平台租用情况</div>${plat}</div>
-${(((d.auto_stop||{}).history)||[]).length?`<div class=sec><div class=lbl>自动关停记录 <span class=muted style="font-size:11px;font-weight:400">· 最近 ${Math.min(10,d.auto_stop.history.length)} 条 / 共 ${d.auto_stop.history.length}</span></div><div class=platbox><div class=tscroll><table class=rtab><tr><th>时间</th><th>账号</th><th>实例</th><th>GPU</th><th>单价</th><th>算力</th><th>产值</th><th>回本</th><th>亏损持续</th></tr>${d.auto_stop.history.slice(-10).reverse().map(h=>`<tr><td>${new Date(h.ts*1000).toLocaleString()}</td><td>${esc(h.acct)}</td><td>${esc(h.id)}</td><td>${esc(h.gpu||'')}</td><td>$${fnum(h.price,3)}/h</td><td>${fnum(h.th)} TH/s</td><td>$${fnum(h.value_usd_h,3)}/h</td><td style="color:var(--bad);font-weight:600">${fnum(h.margin_pct,1)}%</td><td>${h.since?dur(h.ts-h.since):'-'}</td></tr>`).join('')}</table></div></div></div>`:''}`;
+${(((d.auto_stop||{}).history)||[]).length?`<div class=sec><div class=lbl>自动关停记录 <span class=muted style="font-size:11px;font-weight:400">· 最近 ${Math.min(10,d.auto_stop.history.length)} 条 / 共 ${d.auto_stop.history.length}</span></div><div class=platbox><div class=tscroll><table class=rtab><tr><th>时间</th><th>账号</th><th>实例</th><th>GPU</th><th>单价</th><th>算力</th><th>产值</th><th>盈亏</th><th>亏损持续</th></tr>${d.auto_stop.history.slice(-10).reverse().map(h=>`<tr><td>${new Date(h.ts*1000).toLocaleString()}</td><td>${esc(h.acct)}</td><td>${esc(h.id)}</td><td>${esc(h.gpu||'')}</td><td>$${fnum(h.price,3)}/h</td><td>${fnum(h.th)} TH/s</td><td>$${fnum(h.value_usd_h,3)}/h</td><td style="color:var(--bad);font-weight:600">${fnum(h.margin_pct,1)}%</td><td>${h.since?dur(h.ts-h.since):'-'}</td></tr>`).join('')}</table></div></div></div>`:''}`;
 let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=pv;
 if(_paopen){const pp=document.getElementById('papanel');if(pp)pp.classList.add('open');}
 // renderOverview 每次重建 DOM 后恢复 K线展开状态
@@ -3303,7 +3304,7 @@ ${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="
 </div></div>
 <div class=platbox><div class=top><b>自动关停亏损机</b><span class=muted>看板每 60s 检查 · 产值 = 算力 × 网络产率 × 币价 × (1−池费)</span></div>
 <div class=grid2>
-<div class=fld>启用</div><label class=ckrow><input type=checkbox id=as_enabled ${as.enabled?'checked':''}><span class=hint>关掉只显示产值/回本列, 不自动关机</span></label>
+<div class=fld>启用</div><label class=ckrow><input type=checkbox id=as_enabled ${as.enabled?'checked':''}><span class=hint>关掉只显示产值/盈亏列, 不自动关机</span></label>
 <div class=fld>亏损阈值 %</div><input id=as_loss value="${esc(as.loss_pct==null?'':as.loss_pct)}" placeholder="20">
 <div class=fld>最短机龄 (分钟)</div><input id=as_age value="${esc(as.min_age_min==null?'':as.min_age_min)}" placeholder="30">
 <div class=fld>持续亏损 (分钟)</div><input id=as_persist value="${esc(as.persist_min==null?'':as.persist_min)}" placeholder="20">
@@ -3336,6 +3337,7 @@ let av=k=>esc(ac[k]==null?'':ac[k]);let N=n=>`<span class=stepn>${n}</span>`;
 return `<div class=lbl>${esc(v.label||p)} · 账号配置</div>
 <div class=platbox id=box_${p}><div class=top><b>${esc(v.label||p)}</b>${proc}</div>
 <div class=lbl style=margin-top:2px>基础设置 <span class=muted style="font-size:11px;font-weight:400">· 从上到下填完 → 保存配置 → 重启应用</span></div>
+${(v.platform||p)=='tensordock'?'<div class=hint style="color:var(--warn);margin-bottom:8px">⚠ TensorDock 为实验性平台: 裸机 pearl-miner-v10(非 WildRig/SRBMiner 镜像)、仅 PearlHash 池、存储/vCPU/内存附加费未计入出价上限; 轮询间隔请 ≥30s(2s 会被 429 限流)</div>':''}
 <div class=fld style=margin-bottom:6px>${N(1)}API KEY · <b>${esc(v.key_name)}</b> ${key} <span class=req>必填</span></div>
 <div class=row><input id="k_${p}" type=password placeholder="粘贴 ${esc(v.key_name)}, 点存 KEY 立即写入 .env"><button onclick="savekey('${p}')">存 KEY</button></div>
 <div class=hint style="margin:4px 0 10px">没设 key 的账号 start-all 会直接跳过, 不会抢租</div>
