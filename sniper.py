@@ -1391,6 +1391,9 @@ def try_host_fallback(config, provider, rented, instance_id):
         # 当前抢卡池(如 twpool)不读 PRL_HOST → 切 host 无意义, 禁用兜底, 命中低效直接走正常销毁/回收。
         return False
     cfg = config.get(provider, {})
+    if active_pool(config) != "pearlhash" and not cfg.get("host_fallback_host"):
+        # 默认备用 host 是 PearlHash 池地址; 非 pearlhash 池(如 Kryptex)切过去会用错误的池/登录格式, 除非账号显式配了本池的备用 host
+        return False
     if not cfg.get("host_fallback_enabled", True):
         return False
     if rented.get("host_switched"):
