@@ -1114,7 +1114,7 @@ def request_vast_instance_logs(instance_id, tail=300):
         return ""
     data = request_json(
         "PUT",
-        f"https://console.vast.ai/api/v0/instances/request_logs/{instance_id}",
+        f"https://console.vast.ai/api/v0/instances/request_logs/{instance_id}/",   # 结尾斜杠必需: 无斜杠 Vast 返回 400(实测), 日志路径一直失败只能靠矿池兜底
         {"Authorization": f"Bearer {api_key}"},
         {"tail": str(tail), "daemon_logs": "false"},
         timeout=30,
@@ -1142,8 +1142,7 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
     cfg = config.get("vast", {})
     if not cfg.get("hashrate_watch_enabled", True):
         return False
-    if age < effective_grace(cfg, rental_pool(rented)):
-        return False
+    in_grace = age < effective_grace(cfg, rental_pool(rented))   # 宽限期内照样取算力供看板显示, 只是不套低效策略
     now_ts = epoch_now()
     last_check = float(rented.get("hashrate_last_check_epoch") or 0)
     interval = int(cfg.get("hashrate_watch_interval_seconds", 30))
@@ -1177,6 +1176,12 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
     if price <= 0:
         return False
     efficiency = hashrate_th / price
+    if in_grace:
+        # 宽限期只更新显示值(看板产值/回本列); 还没上池(0)不写, 避免看板显示 0 TH/s 误导
+        if hashrate_th > 0:
+            rented["last_hashrate_th"] = round(hashrate_th, 3)
+            rented["last_hashrate_efficiency"] = round(efficiency, 3)
+        return False
     min_eff = float(cfg.get("min_th_per_usd_hour", 250))
     min_hash = gpu_map_value(inst.get("gpu_name") or rented.get("gpu"), cfg.get("min_hashrate_th", {}))
     low = efficiency < min_eff or (min_hash is not None and hashrate_th < float(min_hash))
