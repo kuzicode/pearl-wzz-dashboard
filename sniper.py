@@ -690,16 +690,50 @@ def _bl_alive(entry):
 def machine_blacklisted(state, provider, machine_id):
     if not machine_id:
         return False
-    return _bl_alive(state.get("blacklist", {}).get("machines", {}).get(f"{provider}:{machine_id}"))
+    mk = f"{provider}:{machine_id}"
+    return _bl_alive(state.get("blacklist", {}).get("machines", {}).get(mk)) or mk in sibling_blacklist(provider)["machines"]
+
+
+_sibling_bl = {"ts": 0.0, "data": {"offers": {}, "machines": {}}}
+SIBLING_BLACKLIST_TTL = 60.0
+
+def sibling_blacklist(provider):
+    """同平台其它账号的拉黑名单(只读 state.<provider>*.json, 60s 缓存): 一台功耗墙/坏驱动宿主被账号 2 拉黑后, 账号 1 不该再租。
+    只读不写, 不碰对方进程持有的 state。"""
+    now_ts = time.monotonic()
+    if now_ts - _sibling_bl["ts"] < SIBLING_BLACKLIST_TTL:
+        return _sibling_bl["data"]
+    merged = {"offers": {}, "machines": {}}
+    try:
+        own = STATE_PATH.resolve()
+        for path in ROOT.glob(f"state.{provider}*.json"):
+            if path.resolve() == own:
+                continue
+            try:
+                bl = (load_json(path, {}) or {}).get("blacklist") or {}
+            except Exception:
+                continue
+            for kind in ("offers", "machines"):
+                for k, v in (bl.get(kind) or {}).items():
+                    if k.startswith(f"{provider}:") and _bl_alive(v):
+                        merged[kind][k] = v
+    except Exception:
+        pass
+    _sibling_bl["ts"] = now_ts
+    _sibling_bl["data"] = merged
+    return merged
 
 
 def is_blacklisted(state, provider, offer):
     blacklist = state.get("blacklist", {})
+    shared = sibling_blacklist(provider)
     offer_id = str(offer.get("id", ""))
-    if _bl_alive(blacklist.get("offers", {}).get(f"{provider}:{offer_id}")):
+    key = f"{provider}:{offer_id}"
+    if _bl_alive(blacklist.get("offers", {}).get(key)) or key in shared["offers"]:
         return True
     for machine_id in offer_machine_ids(offer):
-        if _bl_alive(blacklist.get("machines", {}).get(f"{provider}:{machine_id}")):
+        mk = f"{provider}:{machine_id}"
+        if _bl_alive(blacklist.get("machines", {}).get(mk)) or mk in shared["machines"]:
             return True
     return False
 

@@ -2,6 +2,14 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [同平台账号共享拉黑名单] — 2026-09-22
+
+### Added — 新增
+- `sibling_blacklist(provider)`:抢租时只读同平台其它账号的 `state.<provider>*.json` 拉黑条目(60s 缓存, 过期条目不算),`is_blacklisted` / `machine_blacklisted` 同时看本账号 + 共享名单。起因:vast-2 刚因功耗墙拉黑的 3080 宿主, vast-1 切池后第一单就租到了同一 offer。
+
+### Changed — 变更
+- 运维:vast-1 切到 Kryptex + SRBMiner,并套用 vast-2 的 GPU 档 / 过滤 / 宽限(在跑 PearlHash 机器不受影响,monitor_pools 保留 pearlhash)。
+
 ## [Kryptex 30m 均值按 worker 上线时长还原(ISS-022)] — 2026-09-22
 
 ### Fixed — 修复
