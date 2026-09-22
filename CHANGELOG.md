@@ -2,6 +2,12 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [review 修复: RunPod 宽限按机器所属池 + 共享拉黑缓存分平台] — 2026-09-22
+
+### Fixed — 修复
+- **RunPod 回收宽限取错池**:`reconcile_runpod_instances` 原在循环外按账号当前新租池 `active_pool(config)` 算一次 grace;账号切池后仍在旧池挖的机器会失去旧池要求的宽限(Kryptex ≥1800s → 降到账号自设 600s),可能被提前判低效回收。现移入逐台循环、按 `rental_pool(rented)` 取,与 vast / salad 路径一致。新增 `tests/test_runpod_grace_per_pool.py`。
+- **同平台共享拉黑缓存未按平台分桶**:`_sibling_bl` 原为全局单份,一个进程线程并行跑多个平台时 60s 内会互相拿到对方平台的名单;且 `ts=0` 哨兵在 `monotonic()` 初值 <60s 的环境(刚启动的容器)会把首次加载当成有效缓存跳过。现按 provider 分桶、加锁、未加载用 None 显式判断;测试补两条用例。
+
 ## [登录页偷窥入口 + 模板镜像跟随默认矿机] — 2026-09-22
 
 ### Changed — 变更

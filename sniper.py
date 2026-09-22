@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -694,15 +695,18 @@ def machine_blacklisted(state, provider, machine_id):
     return _bl_alive(state.get("blacklist", {}).get("machines", {}).get(mk)) or mk in sibling_blacklist(provider)["machines"]
 
 
-_sibling_bl = {"ts": 0.0, "data": {"offers": {}, "machines": {}}}
+_sibling_bl = {}   # provider → {"ts": monotonic, "data": {...}}; 一个进程可能线程并行跑多个平台, 必须按平台分桶
+_sibling_bl_lock = threading.Lock()
 SIBLING_BLACKLIST_TTL = 60.0
 
 def sibling_blacklist(provider):
-    """同平台其它账号的拉黑名单(只读 state.<provider>*.json, 60s 缓存): 一台功耗墙/坏驱动宿主被账号 2 拉黑后, 账号 1 不该再租。
-    只读不写, 不碰对方进程持有的 state。"""
+    """同平台其它账号的拉黑名单(只读 state.<provider>*.json, 每平台 60s 缓存): 一台功耗墙/坏驱动宿主被账号 2 拉黑后, 账号 1 不该再租。
+    只读不写, 不碰对方进程持有的 state。缓存未加载(ts None)时必定读一次, 不依赖 monotonic 初值。"""
     now_ts = time.monotonic()
-    if now_ts - _sibling_bl["ts"] < SIBLING_BLACKLIST_TTL:
-        return _sibling_bl["data"]
+    with _sibling_bl_lock:
+        ent = _sibling_bl.get(provider)
+        if ent and ent["ts"] is not None and now_ts - ent["ts"] < SIBLING_BLACKLIST_TTL:
+            return ent["data"]
     merged = {"offers": {}, "machines": {}}
     try:
         own = STATE_PATH.resolve()
@@ -719,8 +723,8 @@ def sibling_blacklist(provider):
                         merged[kind][k] = v
     except Exception:
         pass
-    _sibling_bl["ts"] = now_ts
-    _sibling_bl["data"] = merged
+    with _sibling_bl_lock:
+        _sibling_bl[provider] = {"ts": now_ts, "data": merged}
     return merged
 
 
@@ -1773,10 +1777,11 @@ def reconcile_runpod_instances(config, state):
     worker_api_failed = False
     now_ts = epoch_now()
     interval = int(cfg.get("hashrate_watch_interval_seconds", 30))
-    grace = effective_grace(cfg, active_pool(config), default=300)   # 池要求的宽限下限(Kryptex 只给 30m 均值 → ≥1800s)与 vast 路径一致
     for rented in state.get("rented", []):
         if rented.get("provider") != "runpod" or not rented.get("active", True):
             continue
+        # 宽限按这台机器自己所属的池算(切池后旧池机器保留原池继续监控), 与 vast/salad 路径一致; Kryptex 只给 30m 均值 → ≥1800s
+        grace = effective_grace(cfg, rental_pool(rented), default=300)
         pod_id = str(rented.get("contract_id") or rented.get("external_id") or "")
         pod = by_id.get(pod_id)
         if not pod:

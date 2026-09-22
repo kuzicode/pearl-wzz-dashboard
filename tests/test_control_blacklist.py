@@ -31,10 +31,16 @@ print("\n全部通过")
 # ---- 同平台其它账号的拉黑共享(只读 sibling state) ----
 S.STATE_PATH=tmp/"state.vast-2.json"; S.STATE_PATH.write_text("{}")
 (tmp/"state.vast.json").write_text(json.dumps({"blacklist":{"machines":{"vast:m-shared":{"time":"t","reason":"low_efficiency"},"vast:m-expired":{"time":"t","reason":"x","expires_epoch":now-5}},"offers":{"vast:777":{"time":"t","reason":"x"}}}}))
-S._sibling_bl["ts"]=0.0
+S._sibling_bl.clear()
 st2={"seen":{},"rented":[]}
 ck("其它账号拉黑的机器/offer 本账号也跳过", S.is_blacklisted(st2,"vast",{"id":"1","machine_id":"m-shared"}) and S.is_blacklisted(st2,"vast",{"id":"777"}))
 ck("其它账号已过期条目不算", not S.is_blacklisted(st2,"vast",{"id":"2","machine_id":"m-expired"}))
 ck("machine_blacklisted 也看共享名单", S.machine_blacklisted(st2,"vast","m-shared") and not S.machine_blacklisted(st2,"vast","zzz"))
+# 缓存按平台分桶: vast 刚加载过, runpod 不能拿到 vast 的名单, 也不能因 vast 的时间戳跳过首次加载
+(tmp/"state.runpod-2.json").write_text(json.dumps({"blacklist":{"machines":{"runpod:rp-bad":{"time":"t","reason":"x"}}}}))
+ck("共享缓存按平台分桶", S.is_blacklisted(st2,"runpod",{"id":"9","machineId":"rp-bad"}) and not S.is_blacklisted(st2,"runpod",{"id":"9","machineId":"m-shared"}) and S.is_blacklisted(st2,"vast",{"id":"1","machine_id":"m-shared"}))
+_mono=S.time.monotonic; S._sibling_bl.clear(); S.time.monotonic=lambda: 5.0
+try: ck("monotonic 初值 <60s 时首次加载不被跳过", S.is_blacklisted(st2,"vast",{"id":"1","machine_id":"m-shared"}))
+finally: S.time.monotonic=_mono
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过(含共享拉黑)")
