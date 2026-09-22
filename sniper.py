@@ -131,6 +131,10 @@ def normalize_gpu(name):
         return ""
     text = re.sub(r"\s+", " ", name.upper()).replace("GEFORCE ", "")
     compact = re.sub(r"[^A-Z0-9]+", "", text)
+    if "LAPTOP" in compact:
+        # 移动版算力远低于桌面版(5090 Laptop ≈ 桌面 60%), 单独归一成 "<桌面型号> Laptop", 门槛/目录可分别配置
+        base = normalize_gpu(re.sub(r"(?i)laptop( gpu)?", " ", name))
+        return f"{base} Laptop" if base and base.startswith("RTX ") else base
     if "5090" in compact:
         return "RTX 5090"
     if "4090" in compact:

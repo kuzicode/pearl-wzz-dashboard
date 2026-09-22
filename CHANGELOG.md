@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [normalize_gpu 区分 Laptop 变体] — 2026-09-22
+
+### Fixed — 修复
+- `normalize_gpu` 把 "RTX 5090 Laptop GPU" 归一成 `RTX 5090 Laptop`(此前并入桌面 `RTX 5090`,Salad 移动卡会吃桌面门槛被误杀);`min_hashrate_th` / 目录可对 Laptop 单独配置。运维:Salad 各型号最低算力按参考算力 65% 填入(4090 195 / 5090 260 / 5090 Laptop 155 / 5070 Ti 110 / 4070 75 …),`default_min_hashrate_th` 40。
+
 ## [Salad 兜底价表更新为 Low Priority 实价] — 2026-09-22
 
 ### Changed — 变更

@@ -16,6 +16,7 @@ cases={"NVIDIA GeForce RTX 3070 Ti":"RTX 3070 Ti","RTX 3070":"RTX 3070","RTX 306
  "RTX 3090 Ti":"RTX 3090 Ti","RTX 3080":"RTX 3080","RTX 4060":"RTX 4060","RTX 4090, RTX 4090":""}
 for k,v in cases.items():
     ck(f"normalize {k!r} → {v!r}", S.normalize_gpu(k)==v)
+ck("Laptop 变体单独归一", S.normalize_gpu("NVIDIA GeForce RTX 5090 Laptop GPU")=="RTX 5090 Laptop" and S.normalize_gpu("RTX 4070 Laptop")=="RTX 4070 Laptop" and S.gpu_map_value("RTX 5090 Laptop GPU",{"RTX 5090":260,"RTX 5090 Laptop":155})==155)
 ck("T4 不误配 RTX 4090 / L4 不误配 L40S", S.normalize_gpu("RTX 4090")=="RTX 4090" and S.normalize_gpu("L40S")=="L40S")
 ck("目录 key 全部是 normalize_gpu 不动点", all(S.normalize_gpu(c["key"])==c["key"] for c in S.GPU_CATALOG))
 ck("目录 alias 归一到 key", all(S.normalize_gpu(a)==c["key"] for c in S.GPU_CATALOG for a in c["aliases"]))
