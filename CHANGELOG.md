@@ -2,6 +2,16 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [登录页偷窥入口 + 模板镜像跟随默认矿机] — 2026-09-22
+
+### Changed — 变更
+- 登录页「偷窥模式」由一行灰字改成醒目的虚线胶囊入口:👉 手指左右点动引导 + 「没有密码?点下面进访客模式」提示 + 两行文案(偷窥模式 · 仅看仪表盘 / PEEK MODE · 无需密码),支持键盘 Enter/空格,`prefers-reduced-motion` 下停止动效。
+- 登录页与侧栏版本标识 v1 → **v2**。
+- 模板 `config.runpod / vast / salad.example.json` 的 `image` 改为 `kuzigmgm/pearl-miner:srb-3.6.9-r3` 并显式写 `miner: srbminer`,与默认推荐(Kryptex + SRBMiner)一致(此前 image 仍是 v13-wildrig,虽被 `effective_image` 按 pool 覆盖但看着误导);`test_example_configs` 新增断言。
+
+### Fixed — 修复
+- 钱包复制图标 SVG `ry=2/>` 无引号写法被解析成 `"2/"`,控制台每次渲染报错;改为 `ry=2 />`。
+
 ## [Kryptex 设为默认推荐方案] — 2026-09-22
 
 ### Changed — 变更

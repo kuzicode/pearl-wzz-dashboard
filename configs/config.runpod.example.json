@@ -1,11 +1,12 @@
 {
-  "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
+  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3",
   "max_active_instances": 1,
   "max_total_hourly_usd": 1.0,
   "poll_seconds": 10,
   "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
   "prl_host": "stratum+ssl://prl.kryptex.network:8048",
   "pool": "kryptex",
+  "miner": "srbminer",
   "monitor_pools": [
     "kryptex"
   ],

@@ -2817,12 +2817,17 @@ details details{border-top:0;margin-top:10px;padding-top:0}details .grid2{margin
 #login .lbtn:active{transform:translateY(1px) scale(.995);box-shadow:0 8px 18px rgba(20,70,140,.4)}
 #login .lerr{color:#c62f3f;font-size:11.5px;margin-top:9px;min-height:14px;letter-spacing:.02em;text-shadow:0 1px 1px rgba(255,255,255,.4)}
 #login .ldiv{height:1px;background:rgba(255,255,255,.5);margin:18px 0 12px}
-#login .foot{display:flex;align-items:center;gap:8px;font-size:11px;color:#3e5468;letter-spacing:.04em;cursor:pointer;transition:color .14s ease}
-#login .foot:hover{color:var(--lblue)}
-#login .foot .lmono{font-family:'IBM Plex Mono',ui-monospace,monospace;letter-spacing:.12em}
-#login .foot .eye{font-size:14px}
+#login .fnote{font-size:10.5px;letter-spacing:.06em;color:#3e5468;margin-bottom:7px;text-align:center}
+#login .foot{display:flex;align-items:center;gap:10px;padding:9px 14px;border-radius:12px;border:1.5px dashed rgba(22,87,200,.5);background:rgba(255,255,255,.24);font-size:11.5px;font-weight:600;color:#1a4a86;letter-spacing:.04em;cursor:pointer;user-select:none;transition:background .16s ease,border-color .16s ease,box-shadow .16s ease,transform .12s ease}
+#login .foot:hover{background:rgba(255,255,255,.5);border-color:rgba(22,87,200,.95);color:#1657c8;box-shadow:0 8px 20px rgba(20,70,140,.22)}
+#login .foot:active{transform:translateY(1px)}
+#login .foot .hand{font-size:20px;line-height:1;display:inline-block;flex-shrink:0;animation:lpoke 1.1s ease-in-out infinite}
+#login .foot .ftxt{display:flex;flex-direction:column;gap:3px;min-width:0}
+#login .foot .ftxt span{white-space:nowrap}
+@keyframes lpoke{0%,100%{transform:translateX(0)}50%{transform:translateX(5px)}}
+#login .foot .lmono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:10px;font-weight:400;letter-spacing:.12em;color:#3e5468}
 @media (max-width:820px){#login .stage{grid-template-columns:1fr;gap:8px;max-width:440px}#login .pearl-scene{min-height:340px;transform:none}#login .pearl{width:200px;height:200px}}
-@media (prefers-reduced-motion:reduce){#login .ring,#login .orbit,#login .sweep,#login .ripple,#login .caustics,#login .surf::after,#login .surf::before,#login .pearl,#login .pearl::before,#login .pearl::after,#login .pearl-scene::before{animation:none!important}}
+@media (prefers-reduced-motion:reduce){#login .ring,#login .orbit,#login .sweep,#login .ripple,#login .caustics,#login .surf::after,#login .surf::before,#login .pearl,#login .pearl::before,#login .pearl::after,#login .pearl-scene::before,#login .foot .hand{animation:none!important}}
 .muted{color:var(--mut);font-size:11.5px}
 .err{color:var(--bad);font-size:11.5px;margin-top:8px;min-height:14px}
 a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
@@ -2977,7 +2982,7 @@ th{font-family:'IBM Plex Sans','Noto Sans SC',sans-serif;text-transform:none;let
 <div class=pearl><span class=underglow></span><span class=glint></span></div>
 </section>
 <section class=pcard>
-<div class=eyebrow>// PEARL_SNIPER v1</div>
+<div class=eyebrow>// PEARL_SNIPER v2</div>
 <h1 class=ltitle>今晚挖<span class=accent>珍珠</span></h1>
 <div class=lsub>PEARL SNIPER DASHBOARD</div>
 <form onsubmit="login();return false">
@@ -2986,14 +2991,15 @@ th{font-family:'IBM Plex Sans','Noto Sans SC',sans-serif;text-transform:none;let
 <button type=submit class=lbtn>登录 / LOGIN</button>
 </form>
 <div class=ldiv></div>
-<div class=foot onclick=guestLogin()><span class=eye>👁</span><span>偷窥模式 · 仅看仪表盘</span><span class=lmono>/ PEEK MODE</span></div>
+<div class=fnote>没有密码?点下面进访客模式</div>
+<div class=foot role=button tabindex=0 onclick=guestLogin() onkeydown="if(event.key=='Enter'||event.key==' '){event.preventDefault();guestLogin()}"><span class=hand>👉</span><span class=ftxt><span>👁 偷窥模式 · 仅看仪表盘</span><span class=lmono>PEEK MODE · 无需密码</span></span></div>
 </section></main></div>
 
 <div class=mtopbar><button class=mtoggle onclick=toggleSide() aria-label="菜单">☰</button><span class=mbrand>今晚挖珍珠</span></div>
 <div class=mbackdrop id=mbackdrop onclick=closeSide()></div>
 <div class=app>
 <aside class=side>
-<div class=sbrand><span class=orb style="width:26px;height:26px"></span><span class=bt>今晚挖<i class=pg>珍珠</i><small>PEARL SNIPER v1</small></span></div>
+<div class=sbrand><span class=orb style="width:26px;height:26px"></span><span class=bt>今晚挖<i class=pg>珍珠</i><small>PEARL SNIPER v2</small></span></div>
 <nav class=nav>
 <div class="ni on" data-nav=ov onclick="nav('ov')">仪表盘</div>
 <div class="ni" data-nav=lk onclick="nav('lk')">工具集</div>
@@ -3106,7 +3112,7 @@ plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}${pv!='merged'?`<sp
 <div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th title="单价 ÷ 算力 × 100: 每 100 TH/s 每小时花费, 按此降序(最贵在上)">$/100TH·h ▼</th><th title="算力 × 网络产率 × 币价 × (1−池费)">产值 $/h</th><th title="利润率 = (产值 − 单价) ÷ 单价, 即距回本线的距离(0% = 回本线); 红 = 亏超自动关停阈值, 黄 = 回本线附近, 绿 = 盈利">利润率</th><th>矿池</th><th></th></tr>${beRow}${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
-<div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addrrow><span class=addr>${esc(d.wallet)}</span><span class=copyi title="复制钱包地址" onclick="copyAddr('${esc(d.wallet)}')"><svg viewBox="0 0 24 24" width=16 height=16 fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round aria-hidden=true><rect x=9 y=9 width=13 height=13 rx=2 ry=2/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span></div></div>
+<div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addrrow><span class=addr>${esc(d.wallet)}</span><span class=copyi title="复制钱包地址" onclick="copyAddr('${esc(d.wallet)}')"><svg viewBox="0 0 24 24" width=16 height=16 fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round aria-hidden=true><rect x=9 y=9 width=13 height=13 rx=2 ry=2 /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span></div></div>
 <div class=row style="gap:8px;flex-wrap:wrap;align-items:center">
 ${poolLinks}
 <select id=poolView onchange="setPoolView(this.value)" title="切换显示的矿池(仅显示, 不影响挖矿)"><option value=merged ${pv=='merged'?'selected':''}>合并</option>${(d.pools||[]).map(o=>'<option value='+o.id+(pv==o.id?' selected':'')+'>'+esc(o.label)+'</option>').join('')}</select></div></div>

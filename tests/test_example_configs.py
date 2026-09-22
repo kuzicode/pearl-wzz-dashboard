@@ -20,6 +20,7 @@ ck("vast: 4090 0.30 / 5090 0.42 / min_offer 0.03 / max_offer 0.6 / reliability 0
 t=cfgs["config.tensordock.example.json"]
 ck("tensordock: 轮询 ≥30s, 无死键, storage 30", t["provider_intervals_seconds"]["tensordock"]>=30 and not any(k in t["tensordock"] for k in ("seen_ttl_seconds","max_instance_age_starting_seconds","city")) and t["tensordock"]["storage_gb"]==30)
 ck("RTX 短名与 NVIDIA GeForce 长名成对出现", all(("NVIDIA GeForce "+k) in x["thresholds"] for x in (r,v,t["tensordock"]) for k in x["thresholds"] if k.startswith("RTX ")))
+ck("runpod/vast/salad 模板 image 为 SRBMiner 镜像且 miner=srbminer", all(cfgs[f"config.{p}.example.json"]["image"].endswith("pearl-miner:srb-3.6.9-r3") and cfgs[f"config.{p}.example.json"].get("miner")=="srbminer" for p in ("runpod","vast","salad")))
 ck("runpod/vast/salad 模板默认 Kryptex 池 + TLS 入口; tensordock 仍 pearlhash(仅支持该池)", all(cfgs[f"config.{p}.example.json"]["pool"]=="kryptex" and cfgs[f"config.{p}.example.json"]["prl_host"].startswith("stratum+ssl://prl.kryptex.network") for p in ("runpod","vast","salad")) and cfgs["config.tensordock.example.json"]["pool"]=="pearlhash")
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")
