@@ -785,11 +785,21 @@ POOLS = {
                      "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
-                  "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.2",
+                  "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.2",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
                   "reads_prl_host": True,
                   "platforms": ["vast", "salad", "runpod"],
-                  "requires": {"min_cuda": 13.0, "min_reliability": 0.98, "grace_seconds_min": 1800},
-                  "note": "KRig(CUDA 13): 宿主驱动需支持 CUDA ≥ 13 且显存独占; 只认官方 TLS 入口; 矿池只给 30 分钟均值, 新机前 30 分钟算力偏低; RunPod 社区机部分宿主 cuInit 失败(实测约半数), 靠回收换机"},  # KRig(Kryptex 官方 miner)+ Kryptex 池(镜像内 KRIG_URL 默认, 不读 PRL_HOST)
+                  "requires": {"min_reliability": 0.98, "grace_seconds_min": 1800},   # 池级要求; 矿机相关(min_cuda)在 miners[*].requires
+                  # 同一池可选矿机变体(账号 config 顶层 "miner"), 记账/基线仍按 kryptex 一个池; 变体 requires 与池级合并
+                  "miners": {
+                      "krig":     {"label": "KRig 1.5.2", "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.2",
+                                   "requires": {"min_cuda": 13.0},
+                                   "note": "Kryptex 官方 miner, 0% dev fee; 宿主驱动需支持 CUDA ≥ 13(≥580)且显存独占, RunPod 社区机约半数 cuInit 失败"},
+                      "srbminer": {"label": "SRBMiner-MULTI 3.6.9", "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9",
+                                   "requires": {},
+                                   "note": "pearlhash 不硬性要求 CUDA 13, 旧驱动宿主可跑(5000 系建议 ≥580); dev fee 2%; 镜像每分钟打 hashrate_th_s= 行"},
+                  },
+                  "default_miner": "krig",
+                  "note": "只认官方 TLS 入口; 矿池只给 30 分钟均值, 新机前 30 分钟算力偏低; 矿机可选 KRig(需 CUDA 13) / SRBMiner(旧驱动可跑)"},
 }
 
 def _raw_pool(config):
@@ -813,8 +823,32 @@ def _unsupported_pool_log(provider, pool_id):
         log(f"{provider} 不支持矿池 {pool_id} 的矿机(见 POOLS.platforms), 跳过建机; 如需强制请在账号配置 {provider}.allow_unsupported_pool=true")
 
 
-def pool_requires(pool_id):
-    return dict((POOLS.get(pool_id) or {}).get("requires") or {})
+def pool_miners(pool_id):
+    """该池可选矿机变体 {miner_id: {label,image,requires,note}}; 无变体的池返回 {}。"""
+    return dict((POOLS.get(pool_id) or {}).get("miners") or {})
+
+
+def active_miner(config, pool_id=None):
+    """账号选的矿机变体(config 顶层 'miner'); 无效/未配 → 池的 default_miner; 池无变体 → None。"""
+    pool_id = pool_id or active_pool(config)
+    miners = pool_miners(pool_id)
+    if not miners:
+        return None
+    m = str((config or {}).get("miner") or "").strip()
+    if m in miners:
+        return m
+    d = (POOLS.get(pool_id) or {}).get("default_miner")
+    return d if d in miners else next(iter(miners))
+
+
+def pool_requires(pool_id, config=None):
+    """池级 requires 与矿机变体 requires 合并(变体覆盖同名键)。不传 config 时用池的默认变体(向后兼容: kryptex 默认 KRig 仍要 CUDA 13)。"""
+    req = dict((POOLS.get(pool_id) or {}).get("requires") or {})
+    miners = pool_miners(pool_id)
+    if miners:
+        m = active_miner(config, pool_id) if config is not None else (POOLS.get(pool_id) or {}).get("default_miner")
+        req.update((miners.get(m) or {}).get("requires") or {})
+    return req
 
 
 def pool_supports(pool_id, platform):
@@ -842,9 +876,12 @@ def effective_grace(cfg, pool_id, default=300):
 
 
 def effective_image(config):
-    """新抢机器用的镜像: 优先按配置的 pool 镜像; pool 未知/未配则回退 config['image']。"""
+    """新抢机器用的镜像: 优先按配置的 pool(及其矿机变体 miner)镜像; pool 未知/未配则回退 config['image']。"""
     p = _raw_pool(config)
     if p in POOLS:
+        m = active_miner(config, p)
+        if m:
+            return (pool_miners(p).get(m) or {}).get("image") or POOLS[p]["image"]
         return POOLS[p]["image"]
     return (config or {}).get("image")
 
@@ -859,7 +896,7 @@ def pool_of_image(image):
         return "pearlfortune"
     if "twpool" in s or "conishc" in s:
         return "twpool"
-    if "kryptex" in s or "krig" in s:
+    if "kryptex" in s or "krig" in s or "srb" in s:   # srb-* = SRBMiner 变体镜像, 同属 Kryptex 池
         return "kryptex"
     return "pearlhash"
 
@@ -904,7 +941,7 @@ def find_vast_offers(config, state):
         log("Vast skipped: VAST_API_KEY is not set")
         return []
     cfg = config["vast"]
-    req = pool_requires(active_pool(config))
+    req = pool_requires(active_pool(config), config)   # 含矿机变体要求(KRig 需 CUDA 13, SRBMiner 不需)
     headers = {"Authorization": f"Bearer {api_key}"}
     body = {
         "limit": 500,
@@ -1934,8 +1971,8 @@ def try_runpod_create(config, state, live):
             # 可选: 只租宿主驱动 CUDA 版本在列表内的机器(RunPod allowedCudaVersions, 可选值 13.0/12.9/12.8/.../11.8)。
             # CUDA 原生 miner(KRig/PF)在旧驱动宿主上 cuInit 失败; 按账号配置, 不配则不传(任意版本)。
             acv = cfg.get("allowed_cuda_versions")
-            if not acv and pool_requires(active_pool(config)).get("min_cuda"):
-                mc = float(pool_requires(active_pool(config))["min_cuda"])
+            if not acv and pool_requires(active_pool(config), config).get("min_cuda"):
+                mc = float(pool_requires(active_pool(config), config)["min_cuda"])
                 acv = [v for v in ("13.0", "12.9", "12.8", "12.7", "12.6", "12.5", "12.4") if float(v) >= mc]
             if acv:
                 body["allowedCudaVersions"] = [str(x) for x in acv]

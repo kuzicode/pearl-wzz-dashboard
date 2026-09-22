@@ -458,7 +458,7 @@ def pool_of_image(image):
         return "pearlfortune"
     if "twpool" in s or "conishc" in s:
         return "twpool"
-    if "kryptex" in s or "krig" in s:
+    if "kryptex" in s or "krig" in s or "srb" in s:   # srb-* = SRBMiner 变体镜像, 同属 Kryptex 池
         return "kryptex"
     return "pearlhash"
 
@@ -2077,11 +2077,16 @@ def build_full_config():
             "raw": json.dumps(cfg, ensure_ascii=False, indent=2),
             "pool": S.active_pool(cfg),
             "pool_label": (S.POOLS.get(S.active_pool(cfg)) or {}).get("label") or S.active_pool(cfg),
+            "miner": S.active_miner(cfg),                       # 矿机变体(池有 miners 时), 顶层 config["miner"]
+            "image": S.effective_image(cfg),
             "account": {k: cfg.get(k) for k in ACCOUNT_KEYS},
         }
     return {"common": common, "common_diff": common_diff, "platforms": plats, "auto_stop": auto_stop_settings(),
             "pools": [{"id": k, "label": v["label"], "image": v["image"], "reads_prl_host": v["reads_prl_host"],
-                       "platforms": v.get("platforms") or [], "requires": v.get("requires") or {}, "note": v.get("note") or ""}
+                       "platforms": v.get("platforms") or [], "requires": v.get("requires") or {}, "note": v.get("note") or "",
+                       "miners": {mk: {"label": mv.get("label") or mk, "image": mv.get("image"), "requires": mv.get("requires") or {}, "note": mv.get("note") or ""}
+                                  for mk, mv in (v.get("miners") or {}).items()},
+                       "default_miner": v.get("default_miner")}
                       for k, v in available_pools(S)]}
 
 def backup_and_write(path, obj):
@@ -2150,6 +2155,24 @@ def save_pool_cfg(acct, pool):
     cfg["monitor_pools"] = mp
     backup_and_write(p, cfg)
     return {"ok": True, "platform": acct, "pool": pool, "monitor_pools": mp}
+
+def save_miner_cfg(acct, miner):
+    """切换某账号 Kryptex 等池的矿机变体(顶层 config['miner'], 只影响新 create)。"""
+    import sniper as S
+    if acct not in list_accounts():
+        return {"error": "账号无效"}
+    p = cfg_path(acct)
+    cfg = read_json(p, {})
+    pool = S.active_pool(cfg)
+    miners = S.pool_miners(pool)
+    miner = str(miner or "").strip()
+    if not miners:
+        return {"error": f"矿池 {pool} 没有可选矿机"}
+    if miner not in miners:
+        return {"error": f"未知矿机: {miner}"}
+    cfg["miner"] = miner
+    backup_and_write(p, cfg)
+    return {"ok": True, "platform": acct, "pool": pool, "miner": miner, "image": S.effective_image(cfg)}
 
 def save_common_cfg(data):
     if not isinstance(data, dict):
@@ -2553,6 +2576,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, do_terminate(plat, str(data.get("id", "")), str(data.get("group", "")) or None))
         if path == "/api/set-pool":
             return self._send(200, save_pool_cfg(str(data.get("platform", "")), data.get("pool")))
+        if path == "/api/set-miner":
+            return self._send(200, save_miner_cfg(str(data.get("platform", "")), data.get("miner")))
         if path == "/api/save-platform":
             return self._send(200, save_platform_cfg(str(data.get("platform", "")), data.get("data")))
         if path == "/api/save-common":
@@ -3294,7 +3319,10 @@ ${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="
 <span class=hint>立即生效, 下次登录用新密码</span></div></div>`;}
 function poolOk(o,plat){return !(o.platforms||[]).length||(o.platforms||[]).includes(plat);}
 function poolReqText(o){const r=o.requires||{};const parts=[];if(r.min_cuda)parts.push('宿主 CUDA ≥ '+r.min_cuda);if(r.min_reliability)parts.push('可靠度 ≥ '+r.min_reliability);if(r.grace_seconds_min)parts.push('回收宽限 ≥ '+Math.round(r.grace_seconds_min/60)+' 分钟');return parts.join(' · ');}
-function poolReqHtml(pid,plat){const o=(CFG.pools||[]).find(x=>x.id==pid);if(!o)return '';const ok=poolOk(o,plat);const req=poolReqText(o);
+function minerSelHtml(p,v){const o=(CFG.pools||[]).find(x=>x.id==v.pool);const ms=(o&&o.miners)||{};const keys=Object.keys(ms);if(!keys.length)return '';
+return ` <select id="miner_${p}" onchange="setMiner('${esc(p)}',this.value)" title="矿机变体: 同一矿池, 不同矿机镜像">${keys.map(k=>`<option value="${esc(k)}" ${v.miner==k?'selected':''}>${esc(ms[k].label||k)}</option>`).join('')}</select>`;}
+async function setMiner(aid,miner){let r;try{r=await api('/api/set-miner',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:aid,miner:miner})});}catch(e){toast('切换失败');return;}toast(r&&r.ok?('已切换矿机: '+miner+' → '+(r.image||'')+'(重启应用后新机器生效)'):('失败: '+((r&&r.error)||'未知')));renderConfigTab();}
+function poolReqHtml(pid,plat,miner){const o0=(CFG.pools||[]).find(x=>x.id==pid);if(!o0)return '';const mv=(o0.miners||{})[miner];const o=mv?Object.assign({},o0,{requires:Object.assign({},o0.requires||{},mv.requires||{}),note:(mv.note?mv.label+': '+mv.note+(o0.note?' · ':''):'')+(o0.note||'')}):o0;const ok=poolOk(o,plat);const req=poolReqText(o);
 return `<div class=hint style="margin-top:6px;${ok?'':'color:var(--bad)'}">${ok?'':'⚠ 该矿池的矿机在 '+esc(plat)+' 上未验证可跑, 抢租会跳过(高级设置 allow_unsupported_pool 可强制)。 '}${req?'租用要求: '+esc(req)+'。 ':''}${o.note?esc(o.note):''}</div>`;}
 function platformHtml(v,p){let ac=v.account||{};
 let proc=`<span class="pill ${v.process_running?'ok':'mut'}">${v.process_running?'RUNNING':'STOPPED'}</span>`+(v.rent_paused?`<span class="pill warn">${(v.platform||p)=='salad'?'REALLOC PAUSED':'RENT PAUSED'}</span>`:'');
@@ -3314,7 +3342,7 @@ return `<div class=lbl>${esc(v.label||p)} · 账号配置</div>
 <div class=grid2>
 <div class=fld>${N(2)}启用本账号</div><label class=ckrow><input type=checkbox id="en_${p}" ${v.enabled?'checked':''}><span class=hint>${isS?'关掉则不监控 Salad 容器组(不影响容器组本身运行)':'关掉则不扫描不租用'}</span></label>
 ${v.has_create?`<div class=fld>自动建机</div><label class=ckrow><input type=checkbox id="ce_${p}" ${v.create_enabled?'checked':''}><span class=hint>价格达标自动下单; 关掉只观察不租</span></label>`:''}
-${isS?`<div class=fld>机器数 / 矿池</div><div class=hint style="padding-top:9px">由 Salad portal 里的容器组决定: replicas = 台数, 镜像 = 矿池(krig → Kryptex, wildrig → PearlHash); 本页不设租用上限与出价</div>`:`<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}${poolOk(o,v.platform||p)?'':' (该平台不支持)'}</option>`).join('')}</select> <span class=hint>只影响之后新租的机器, 镜像随矿池自动决定; 在跑机器保持原池, 照常监控回收</span>${poolReqHtml(v.pool,v.platform||p)}</div>
+${isS?`<div class=fld>机器数 / 矿池</div><div class=hint style="padding-top:9px">由 Salad portal 里的容器组决定: replicas = 台数, 镜像 = 矿池(krig → Kryptex, wildrig → PearlHash); 本页不设租用上限与出价</div>`:`<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}${poolOk(o,v.platform||p)?'':' (该平台不支持)'}</option>`).join('')}</select>${minerSelHtml(p,v)} <span class=hint>只影响之后新租的机器, 镜像随矿池(及矿机)自动决定; 在跑机器保持原池, 照常监控回收</span>${poolReqHtml(v.pool,v.platform||p,v.miner)}</div>
 <div class=fld>${N(4)}最多同时租 (台)</div><input id="ac_${p}_max_active_instances" value="${av('max_active_instances')}" placeholder="1">
 <div class=fld>总时租上限 ($/h)</div><input id="ac_${p}_max_total_hourly_usd" value="${av('max_total_hourly_usd')}" placeholder="1.0">`}
 </div>

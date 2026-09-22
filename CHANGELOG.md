@@ -2,6 +2,17 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Kryptex 池矿机变体: SRBMiner-MULTI 3.6.9 镜像(旧驱动可跑)] — 2026-09-22
+
+### Added — 新增
+- **矿机变体**:`POOLS["kryptex"]["miners"]` = `krig`(KRig 1.5.2, 需宿主 CUDA 13/≥580)/ `srbminer`(SRBMiner-MULTI 3.6.9, pearlhash 不硬性要求 CUDA 13, dev fee 2%),`default_miner=krig`。账号 config 顶层 `miner` 选变体;`effective_image()` / `pool_requires(pool, config)` 按变体取镜像与宿主要求(Vast `cuda_max_good`、RunPod `allowedCudaVersions` 随之不再强制 13.0);记账/基线仍按 kryptex 一个池。`pool_of_image` 认 `srb-*` 为 Kryptex。
+- 配置页「新抢矿池」旁新增「矿机」下拉(池有变体时显示),`POST /api/set-miner`;要求提示按变体合并显示。`/api/full-config` 的 `pools[].miners / default_miner`、`platforms[].miner / image`。
+- 新镜像 `kuzigmgm/pearl-miner:srb-3.6.9`(源 `docker-srb/`):从 GitHub Release 包 COPY 二进制(`./fetch.sh <版本>` 下载);entrypoint 沿用 KRig 的短 rig 名 / PRL_ADDRESS 护栏 / DIAG 行,`PRL_HOST` 的 `stratum+ssl://` → `--pool h:p --tls true`,登录 `--wallet <addr>.<rig>`,`--api-enable` 后每 60s 从本机 API 打 `hashrate_th_s=` 结构化行(sniper 日志解析可用),`SRB_EXTRA_ARGS` 追加超频参数,退避重启循环。参数均经 3.6.9 `--help` 核对(无 `--disable-startup-monitor`)。
+- 测试 `tests/test_pool_miner_variant.py`。
+
+### Changed — 变更
+- 运维:runpod-2 切到 `pool=kryptex, miner=srbminer`,`allowed_cuda_versions=[]`,先 1 台 / $0.6/h 试跑。
+
 ## [单机经济性 + 自动关停亏损机 + Kryptex 已付修正 + GPU 目录推荐] — 2026-09-22
 
 ### Added — 新增
