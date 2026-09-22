@@ -29,6 +29,7 @@ D.pool_data=lambda force=False: {"connected_workers":[{"gpu_info":[{"name":"NVID
     {"gpu_info":[{"name":"NVIDIA GeForce RTX 4090","hashrate":300e12}]},{"gpu_info":[{"name":"NVIDIA GeForce RTX 4090","hashrate":310e12}]},
     {"gpu_info":[{"name":"NVIDIA GeForce RTX 3090","hashrate":100e12}]}]}
 D.list_accounts=lambda: ["runpod","vast"]
+D._default_pool_key=lambda S: "pearlhash"   # 建议出价按默认池池费算; 测试固定 pearlhash(1%)
 D.read_state=lambda a: {"runpod_observed_prices":{"COMMUNITY:NVIDIA GeForce RTX 4090":{"price":0.36},"SECURE:NVIDIA GeForce RTX 4090":{"price":0.69},"NVIDIA GeForce RTX 4090":{"price":0.36}}} if a=="runpod" else {}
 c=D.build_gpu_catalog(0.2)
 m={x["key"]:x for x in c["models"]}

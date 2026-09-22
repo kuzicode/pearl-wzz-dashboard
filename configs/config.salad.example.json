@@ -1,10 +1,10 @@
 {
   "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
   "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
-  "prl_host": "pool.pearlhash.xyz:9000",
-  "pool": "pearlhash",
+  "prl_host": "stratum+ssl://prl.kryptex.network:8048",
+  "pool": "kryptex",
   "monitor_pools": [
-    "pearlhash"
+    "kryptex"
   ],
   "worker_prefix": "auto",
   "alert_url": "",

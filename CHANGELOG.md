@@ -2,6 +2,13 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Kryptex 设为默认推荐方案] — 2026-09-22
+
+### Changed — 变更
+- 看板矿池按钮 / 下拉顺序改为 **Kryptex 在前**(`POOL_DISPLAY_ORDER`);GPU 目录建议出价按当前默认矿池的池费算(Kryptex 2%)。
+- 模板 `config.runpod / vast / salad.example.json` 默认 `pool: kryptex`、`prl_host: stratum+ssl://prl.kryptex.network:8048`、`monitor_pools: [kryptex]`(矿机默认 SRBMiner);TensorDock 模板仍 pearlhash(仅支持该池)。
+- 工具说明 / 挖珠教程 / README:矿池与矿机表 Kryptex 置顶并标"默认推荐",说明 PPS+ 稳定结算与 SRBMiner 驱动容错;Salad 建组镜像推荐 `srb-3.6.9-r3`、2 vCPU + 2 GB。
+
 ## [同平台账号共享拉黑名单] — 2026-09-22
 
 ### Added — 新增

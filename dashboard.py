@@ -60,9 +60,13 @@ HAS_CREATE = {"runpod", "tensordock", "vast"}
 NO_BALANCE_API = {"salad", "tensordock"}  # 无公共余额 API → 看板手填(总览内联编辑); salad 另有 portal 实时余额(salad_portal), 有则优先并隐藏手填
 OFFLINE_POOLS = {"twpool", "herominers", "pearlfortune"}  # 已下线/不可用的矿池: 从看板池列表(按钮/下拉/迁移)隐藏; 只保留 pearlhash
 
+POOL_DISPLAY_ORDER = ["kryptex", "pearlhash"]   # 看板按钮 / 下拉顺序: Kryptex 为默认推荐方案, 放最前
+
 def available_pools(S):
-    """看板展示的可用矿池: 排除 OFFLINE_POOLS。"""
-    return [(k, v) for k, v in S.POOLS.items() if k not in OFFLINE_POOLS]
+    """看板展示的可用矿池: 排除 OFFLINE_POOLS, 按 POOL_DISPLAY_ORDER 排序(未列出的排后)。"""
+    items = [(k, v) for k, v in S.POOLS.items() if k not in OFFLINE_POOLS]
+    rank = {k: i for i, k in enumerate(POOL_DISPLAY_ORDER)}
+    return sorted(items, key=lambda kv: rank.get(kv[0], len(rank)))
 
 def platform_of(account_id):
     """salad-2 → salad ; salad → salad"""
@@ -1997,7 +2001,11 @@ def build_gpu_catalog(margin=0.2):
     import sniper as S
     from statistics import median
     yv = network_yield() or {}
-    y = float(yv.get("prl_per_th_h") or 0); cp = float(coin_price() or 0); fee = POOL_FEE_DEFAULT
+    y = float(yv.get("prl_per_th_h") or 0); cp = float(coin_price() or 0)
+    try:
+        fee = pool_fee(_default_pool_key(S))   # 按当前默认(多数账号在用)矿池的池费算建议出价; Kryptex 2% / PearlHash 1%
+    except Exception:
+        fee = POOL_FEE_DEFAULT
     ypc = y * cp * (1 - fee)
     try:
         margin = float(margin)
@@ -3525,8 +3533,8 @@ function docGuide(){return `<div class=doc>
 <p>你<b>不用</b>手动登录每台租来的机器装环境。流程全自动:</p>
 <ol>
 <li>sniper 调用各平台 API <b>租到一块 GPU</b>。</li>
-<li>下单时把一个 <b>docker 矿机镜像</b>(默认 <b>kuzigmgm/pearl-miner:v13-wildrig</b>,随所选矿池自动决定)+ 一组<b>环境变量</b>(你的钱包 PRL_ADDRESS、矿池 PRL_HOST、worker 名等)一起下发给平台。</li>
-<li>平台自动 <b>docker pull 拉取镜像</b> → 在租来的 GPU 上跑起容器 → 容器里的矿机<b>连上 PearlHash 矿池开始挖 PRL</b>,收益直接进你的钱包地址。</li>
+<li>下单时把一个 <b>docker 矿机镜像</b>(随所选矿池 / 矿机自动决定: <b>Kryptex → SRBMiner-MULTI</b> <b>kuzigmgm/pearl-miner:srb-3.6.9-r3</b>(推荐, 旧驱动宿主也能跑); PearlHash → WildRig <b>v13-wildrig</b>)+ 一组<b>环境变量</b>(你的钱包 PRL_ADDRESS、矿池 PRL_HOST、worker 名等)一起下发给平台。</li>
+<li>平台自动 <b>docker pull 拉取镜像</b> → 在租来的 GPU 上跑起容器 → 容器里的矿机<b>连上矿池开始挖 PRL</b>(Kryptex 为 PPS+ 稳定结算, 每满 1 PRL 自动付到钱包; PearlHash 按小时 epoch 分配), 收益直接进你的钱包地址。</li>
 <li>镜像内矿机会自报算力;面板通过矿池 API <b>盯着每台</b>,算力低于门槛(坏卡 / 老驱动 / 虚标)就让它停、再换一台。</li>
 </ol>
 <p>所以全程是:<b>租卡 → 自动拉 docker 镜像 → 自动连池挖矿 → 自动盯算力换坏机</b>,你只负责配好参数。</p></div>
@@ -3549,7 +3557,7 @@ function docGuide(){return `<div class=doc>
 <li><b>钱包地址 prl_address</b> —— 收益打到这,<b>务必是你自己的钱包</b>,填错就是给别人挖。</li>
 <li><b>总时租上限 max_total_hourly_usd</b> —— <b>每个账号各自</b>每小时最多花多少;最坏总花费 = 各账号上限之和(配置总览顶部有合计)。</li>
 <li><b>最多同时租 max_active_instances</b> —— 该账号同时最多开几台。</li>
-<li><b>新抢矿池</b> —— 默认 PearlHash;矿机镜像随矿池自动决定,不用手填 image / prl_host。</li>
+<li><b>新抢矿池 / 矿机</b> —— 推荐 <b>Kryptex + SRBMiner</b>(PPS+ 结算稳定, 矿机对宿主驱动容错好; KRig 0% dev fee 但需宿主 CUDA 13);PearlHash + WildRig 作为对照或备选。矿机镜像随矿池 / 矿机自动决定,不用手填 image / prl_host。</li>
 <li><b>各账号:API Key、启用 / 自动建机、GPU 档(型号 / 最高出价 / 最低算力)</b> —— 控制只租"够便宜 + 够稳"的卡;自动建机关掉 = 只观察不下单。</li>
 </ul></div>
 <div class=tip>🔐 安全:API Key、钱包私钥 / 助记词只存在你部署的那台机器的本地文件(.env / 配置),不进代码仓库;公网部署务必改默认密码,转账、配置前再次确认钱包地址是你自己的。</div>
@@ -3574,7 +3582,7 @@ function docTutorial(){return `<div class=doc>
 <div class=lcard><h3><span class=step>c</span>配置参数,启动 miner</h3>
 <ul>
 <li>回到本面板 → <b>配置总览</b>(需管理员登录):填第 a 步的<b>钱包地址</b>(写入全部账号), 告警 URL 可留空。</li>
-<li>到左栏对应<b>账号配置</b>页, 按「基础设置」从上到下: ① 粘贴 <b>API Key</b> → ② 勾选启用 → ③ 选矿池(默认 PearlHash) → ④ 设<b>最多同时租</b>与<b>总时租上限</b>控制预算 → ⑤ 填 GPU 档(型号 / 最高出价 / 最低算力) → <b>保存配置</b> → <b>重启应用</b>。其余参数在「高级设置」里, 默认值通常无需改。</li>
+<li>到左栏对应<b>账号配置</b>页, 按「基础设置」从上到下: ① 粘贴 <b>API Key</b> → ② 勾选启用 → ③ 选矿池(推荐 Kryptex, 矿机 SRBMiner) → ④ 设<b>最多同时租</b>与<b>总时租上限</b>控制预算 → ⑤ 填 GPU 档(型号 / 最高出价 / 最低算力) → <b>保存配置</b> → <b>重启应用</b>。其余参数在「高级设置」里, 默认值通常无需改。</li>
 <li>之后 sniper 自动租卡、起矿机挖 PRL,<b>仪表盘</b>开始出算力和累计产出;想先观察不花钱,把「自动建机」关掉即可。</li>
 <li>每个参数啥意思?见 <span class=jump onclick="nav('doc:guide')">工具说明</span>。</li>
 </ul></div>
