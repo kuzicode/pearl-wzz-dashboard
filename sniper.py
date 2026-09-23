@@ -728,6 +728,21 @@ def sibling_blacklist(provider):
     return merged
 
 
+def machine_instance_count(state, provider, machine_ids):
+    """同一宿主(machine_id)上本账号已有多少台在跑。放开 min_gpu_frac 后一台多卡主机可被连开多台,
+    宿主一旦出问题(驱动/功耗墙/断网)会整组一起废,且同宿主实例共享 CPU/网络会互相挤占。"""
+    want = {str(m) for m in (machine_ids or []) if str(m)}
+    if not want:
+        return 0
+    n = 0
+    for r in state.get("rented", []):
+        if r.get("provider") != provider or not r.get("active", True):
+            continue
+        if str(r.get("machine_id") or "") in want:
+            n += 1
+    return n
+
+
 def is_blacklisted(state, provider, offer):
     blacklist = state.get("blacklist", {})
     shared = sibling_blacklist(provider)
@@ -1067,6 +1082,13 @@ def rent_vast(config, match, state, live):
     if active_hourly(state) + float(match["price"]) > float(config.get("max_total_hourly_usd", 0)):
         log(f"Vast hit but max_total_hourly_usd reached: {match['gpu']} ${match['price']:.3f}/h offer={offer_id}")
         return False
+    per_machine = int(config["vast"].get("max_instances_per_machine", 2))
+    machine_ids = offer_machine_ids(match.get("raw") or {})
+    if per_machine > 0 and machine_ids:
+        have = machine_instance_count(state, "vast", machine_ids)
+        if have >= per_machine:
+            log(f"Vast hit but max_instances_per_machine reached: {match['gpu']} ${match['price']:.3f}/h offer={offer_id} machine={machine_ids[0]} have={have}/{per_machine}")
+            return False
     log(f"Vast hit: {match['gpu']} ${match['price']:.3f}/h {match['location']} offer={offer_id}")
     if not live:
         log("Dry run: not renting Vast offer")
@@ -1108,6 +1130,8 @@ def rent_vast(config, match, state, live):
         return False
     record_rent(state, "vast", offer_id, match["gpu"], match["price"], result)
     state["rented"][-1]["env"] = {k: str(v) for k, v in env.items()}
+    if machine_ids:
+        state["rented"][-1]["machine_id"] = str(machine_ids[0])   # 单宿主上限要用; 老记录由 reconcile 回填
     if isinstance(result, dict):
         log(f"Vast rent result: offer={offer_id} success={result.get('success')} contract={result.get('new_contract')}")
     else:
@@ -1614,6 +1638,9 @@ def reconcile_vast_instances(config, state):
         if not contract_id and inst.get("id") is not None:
             rented["contract_id"] = str(inst.get("id"))
             contract_id = rented["contract_id"]
+        _mids = offer_machine_ids(inst)
+        if _mids:
+            rented["machine_id"] = str(_mids[0])   # 回填/刷新: 单宿主上限统计要用
         cur_state = str(inst.get("cur_state") or inst.get("actual_status") or "").lower()
         intended = str(inst.get("intended_status") or "").lower()
         actual = str(inst.get("actual_status") or "").lower()

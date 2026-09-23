@@ -2,6 +2,14 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [Vast 单宿主实例上限] — 2026-09-23
+
+### Added — 新增
+- **`vast.max_instances_per_machine`(默认 2)**:放开 `min_gpu_frac` 后一台多卡主机会被连开多台(实测一台宿主被开了 4 个实例),宿主一旦出问题(驱动 / 功耗墙 / 断网)整组一起废,且同宿主实例共享 CPU / 网络会互相挤占。下单前按 `machine_id` 统计本账号同宿主在跑数量,达上限即跳过并记日志;设 0 = 不限制。存量超限实例不强制下线,上限只作用于新租。新增 `sniper.machine_instance_count()` 与 `tests/test_per_machine_cap.py`。
+
+### Changed — 变更
+- 租用成功时即写入 `machine_id`(此前只在低效销毁时才写);`reconcile_vast_instances` 每轮从实例信息回填 / 刷新 `machine_id`,存量记录自动补齐。
+
 ## [review 修复: RunPod 宽限按机器所属池 + 共享拉黑缓存分平台] — 2026-09-22
 
 ### Fixed — 修复
