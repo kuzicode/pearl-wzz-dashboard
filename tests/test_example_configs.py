@@ -17,6 +17,7 @@ r=cfgs["config.runpod.example.json"]["runpod"]
 ck("runpod: 仅社区云 / 不限国家 / 4090 0.34 / 5090 0.45 / 最低算力 250,300", r["cloud_types"]==["COMMUNITY"] and r["country_codes"]==[] and r["thresholds"]["RTX 4090"]==0.34 and r["thresholds"]["RTX 5090"]==0.45 and r["min_hashrate_th"]["RTX 4090"]==250 and r["min_hashrate_th"]["RTX 5090"]==300)
 v=cfgs["config.vast.example.json"]["vast"]
 ck("vast: 4090 0.30 / 5090 0.42 / min_offer 0.03 / max_offer 0.6 / reliability 0.95", v["thresholds"]["RTX 4090"]==0.30 and v["thresholds"]["RTX 5090"]==0.42 and v["min_offer_price_usd"]==0.03 and v["max_offer_price_usd"]==0.6 and v["min_reliability"]==0.95)
+ck("vast: block_countries 默认空(模板不预设排除国家) 且单宿主上限为 2", v.get("block_countries")==[] and v.get("max_instances_per_machine")==2)
 t=cfgs["config.tensordock.example.json"]
 ck("tensordock: 轮询 ≥30s, 无死键, storage 30", t["provider_intervals_seconds"]["tensordock"]>=30 and not any(k in t["tensordock"] for k in ("seen_ttl_seconds","max_instance_age_starting_seconds","city")) and t["tensordock"]["storage_gb"]==30)
 ck("RTX 短名与 NVIDIA GeForce 长名成对出现", all(("NVIDIA GeForce "+k) in x["thresholds"] for x in (r,v,t["tensordock"]) for k in x["thresholds"] if k.startswith("RTX ")))

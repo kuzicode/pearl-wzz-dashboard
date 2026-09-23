@@ -20,6 +20,7 @@
   "vast": {
     "enabled": false,
     "allow_other_countries": true,
+    "block_countries": [],
     "creating_timeout_seconds": 600,
     "disk_gb": 20,
     "max_offer_price_usd": 0.6,
@@ -28,6 +29,7 @@
     "min_cpu_ram_mb": 4000,
     "min_disk_gb": 15,
     "min_gpu_frac": 1.0,
+    "max_instances_per_machine": 2,
     "min_reliability": 0.95,
     "prefer_countries": [
       "US",

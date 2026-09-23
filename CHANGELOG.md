@@ -12,6 +12,7 @@
 
 ### Added — 新增
 - **`vast.block_countries`**(硬排除,默认空):按国家码尾段匹配(不做子串匹配,"CN" 不会命中 "Cincinnati"),优先级高于 `prefer_countries`,只影响新租,已在跑的机器不受影响。国内宿主系统性拉不动 Docker Hub,租了也不产出。配置页「平台特定参数」可编辑。`tests/test_block_countries.py` 13 条断言。
+- 模板 `config.vast.example.json` 补上 `block_countries: []`(空 = 不排除)与 `max_instances_per_machine: 2`,让新用户看得到这两个开关;`test_example_configs` 加断言防止模板误带排除国家。
 
 ## [Vast 单宿主实例上限] — 2026-09-23
 
