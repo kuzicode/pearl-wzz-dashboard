@@ -40,7 +40,7 @@ ACCOUNT_KEYS = ["prl_address", "worker_prefix", "max_active_instances", "max_tot
 # 每平台结构化暴露的特定字段: (key, type)  type in num/str/list/bool
 SPECIFIC = {
     "vast": [("max_offer_price_usd", "num"), ("min_offer_price_usd", "num"),
-             ("min_reliability", "num"), ("disk_gb", "num"), ("prefer_countries", "list"),
+             ("min_reliability", "num"), ("disk_gb", "num"), ("prefer_countries", "list"), ("block_countries", "list"),
              ("hashrate_grace_seconds", "num"), ("low_efficiency_stop_seconds", "num")],
     "runpod": [("cloud_types", "list"), ("country_codes", "list"), ("container_disk_gb", "num"),
                ("create_observed_price_factor", "num"), ("short_exit_blacklist_seconds", "num"),
@@ -3433,7 +3433,7 @@ if(!isS&&m.ref_th&&CATALOG.ypc>0)row.querySelector('[data-f=price]').value=(m.re
 function onGpuPick(sel,p){const row=sel.closest('[data-gpu]');const inp=row.querySelector('[data-f=gpu]');const h=row.querySelector('[data-f=hint]');if(sel.value=='__custom__'){inp.style.display='';inp.value='';h.innerHTML='';inp.focus();}else{inp.style.display='none';inp.value=sel.value;h.innerHTML=gpuHint(sel.value,p);}}
 function setMargin(p,v){localStorage.setItem('gpu_margin',v);document.querySelectorAll('#gpus_'+p+' [data-gpu]').forEach(r=>{const s=r.querySelector('[data-f=gpusel]');const key=s?(s.value=='__custom__'?'':s.value):'';r.querySelector('[data-f=hint]').innerHTML=gpuHint(key,p);});}
 function addGpu(p){document.getElementById('gpus_'+p).insertAdjacentHTML('beforeend',gpuRowHtml(p,0,{}));}
-const SPEC_LABELS={max_offer_price_usd:'最高报价 $/h (粗筛)',min_offer_price_usd:'最低报价 $/h (滤异常低价)',min_reliability:'最低可靠度 0-1',disk_gb:'磁盘 GB',prefer_countries:'优先国家',
+const SPEC_LABELS={max_offer_price_usd:'最高报价 $/h (粗筛)',min_offer_price_usd:'最低报价 $/h (滤异常低价)',min_reliability:'最低可靠度 0-1',disk_gb:'磁盘 GB',prefer_countries:'优先国家',block_countries:'排除国家 (如 CN, 硬排除只影响新租)',
 cloud_types:'云类型 COMMUNITY/SECURE',country_codes:'国家代码',container_disk_gb:'容器磁盘 GB',create_observed_price_factor:'观测价保守系数 (1=按观测价)',short_exit_blacklist_seconds:'短命退出拉黑秒数',allowed_cuda_versions:'允许宿主 CUDA 版本 (空=不限; CUDA 原生矿机需 13.0)',hashrate_watch_enabled:'零算力监控回收',hashrate_grace_seconds:'新机宽限秒数 (期间不判低效; 池有下限时取大)',low_efficiency_stop_seconds:'低效持续秒数后回收',allow_unsupported_pool:'强制在本平台跑未验证的矿池矿机',
 excluded_states:'排除州/地区',storage_gb:'存储 GB',vcpu_count:'vCPU 数',ram_gb:'内存 GB',seen_ttl_seconds:'已看过 offer 记忆秒数',
 organization_name:'组织名',project_name:'项目名',include_container_groups:'纳入的容器组',default_min_hashrate_th:'默认最低算力 TH/s',per_model_threshold_enabled:'按型号门槛',treat_missing_log_as_zero:'无日志视为 0 算力',low_efficiency_stop_seconds:'低效持续秒数后回收',reallocate_cooldown_seconds:'重分配冷却秒数',hashrate_watch_interval_seconds:'算力检查间隔秒',log_lookback_seconds:'日志回看秒数',missing_worker_as_zero:'矿池无 worker 视为 0',alphapool_worker_api_enabled:'AlphaPool worker API',alphapool_reallocate_enabled:'AlphaPool 自动重分配',balance_usd:'手填余额 $'};

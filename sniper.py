@@ -626,12 +626,22 @@ def compact_location(offer):
     return str(offer.get("geolocation") or offer.get("location") or "").strip()
 
 
+def _loc_in(loc, countries):
+    """geolocation 形如 "Hebei, CN" / "CN"; 只按国家码尾段匹配, 不做子串匹配(免得 "CN" 命中 "Cincinnati")。"""
+    return any(loc.endswith(", " + c) or loc == c for c in countries)
+
+
 def is_preferred_location(offer, cfg):
-    countries = [c.upper() for c in cfg.get("prefer_countries", [])]
+    """block_countries 是硬排除(优先级最高), prefer_countries 是软偏好(配 allow_other_countries)。
+    排除名单只影响新租; 已在跑的机器不受影响。"""
+    loc = compact_location(offer).upper()
+    blocked = [str(c).upper() for c in (cfg.get("block_countries") or [])]
+    if blocked and _loc_in(loc, blocked):
+        return False
+    countries = [str(c).upper() for c in (cfg.get("prefer_countries") or [])]
     if not countries:
         return True
-    loc = compact_location(offer).upper()
-    preferred = any(loc.endswith(", " + c) or loc == c for c in countries)
+    preferred = _loc_in(loc, countries)
     return preferred or bool(cfg.get("allow_other_countries", True))
 
 
@@ -1626,6 +1636,9 @@ def reconcile_vast_instances(config, state):
         "failed to start containers",
         "unknown flag: --runtime",
     )
+    # 镜像拉不动(宿主网络受限)时 Vast 只在 status_msg 里刷重试进度, 不算 error;
+    # 单看这些词还不能判死(可能只是慢), 所以与 creating_timeout 一起用, 见下面 stuck_pulling。
+    pull_stall_patterns = ("retrying in", "pulling fs layer", "downloading", "extracting", "waiting")
     for rented in state.get("rented", []):
         if rented.get("provider") != "vast" or not rented.get("active", True):
             continue
@@ -1655,7 +1668,16 @@ def reconcile_vast_instances(config, state):
         if inst.get("start_date") and float(inst.get("start_date") or 0) > 0:
             created_epoch = min(float(created_epoch or epoch_now()), float(inst["start_date"]))
         age = epoch_now() - float(created_epoch or epoch_now())
-        timed_out = age >= creating_timeout and (cur_state in pending_states or actual in pending_states) and not status_msg
+        # 超过建机超时仍未起来即回收。原先 `and not status_msg` 会被任何进度消息短路:
+        # 宿主拉不动镜像时 status_msg 一直刷 "…: Retrying in 2 seconds", 于是永远不超时,
+        # 只能等宽限期(1800s)+低效持续(900s)共 45 分钟才被清掉, 白烧租金(ISS-024)。
+        pending_now = cur_state in pending_states or actual in pending_states
+        stuck_pulling = any(pat in status_msg for pat in pull_stall_patterns)
+        # 容器真起来后 Vast 必给 actual_status='running' 与 status_msg='success, running <image>';
+        # 两者同时为空说明容器从未创建(实测: 宿主拉不动镜像, cur_state 仍报 running, direct_port_start=-1),
+        # 这种在超时前查不出任何异常, 只能等 45 分钟低效回收, 故按超时处理。
+        never_reported = not actual and not status_msg
+        timed_out = age >= creating_timeout and (pending_now or stuck_pulling or never_reported)
         fractional_gpu = inst.get("gpu_frac") is not None and float(inst.get("gpu_frac") or 0) < float(config.get("vast", {}).get("min_gpu_frac", 1.0))
         if cur_state in bad_states or intended in bad_states or startup_error or timed_out or fractional_gpu:
             reason = f"bad_state:{cur_state}/{intended}"
@@ -1663,6 +1685,10 @@ def reconcile_vast_instances(config, state):
                 reason = "startup_error"
             if timed_out:
                 reason = f"creating_timeout:{int(age)}s"
+                if stuck_pulling:
+                    reason = f"image_pull_stalled:{int(age)}s"
+                elif never_reported and not pending_now:
+                    reason = f"container_never_started:{int(age)}s"
             if fractional_gpu:
                 reason = f"fractional_gpu:{inst.get('gpu_frac')}"
             rented["active"] = False

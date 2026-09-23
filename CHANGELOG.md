@@ -2,6 +2,17 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [建机超时修复(ISS-024) + 国家排除名单] — 2026-09-23
+
+### Fixed — 修复
+- **建机超时被 status_msg 短路(ISS-024)**:`timed_out` 原含 `and not status_msg`,宿主拉不动 Docker Hub 时 Vast 一直刷 `"<layer>: Retrying in 2 seconds"`,进度消息非空 → 永不超时;而 "Retrying" 不在 `bad_status_patterns` 里,`startup_error` 也走不到,只能等宽限 1800s + 低效 900s 共 **45 分钟**才被清掉,期间白烧租金(实测一批 10 台空转 48 分钟)。现去掉该短路,并新增两类判定,任一命中且超过 `creating_timeout`(600s)即回收拉黑:
+  - `pull_stall_patterns`(retrying in / pulling fs layer / downloading / extracting / waiting)→ 原因标 `image_pull_stalled`;
+  - `never_reported`(`actual_status` 与 `status_msg` 同时为空)→ 原因标 `container_never_started`。容器真起来后 Vast 必给 `actual_status='running'` 与 `status_msg='success, running <image>'`,两者皆空即容器从未创建。
+  - 实测回收时间从 45 分钟降到 10.5 分钟。`tests/test_creating_timeout.py` 9 条断言,含健康实例 / 刚建机器 / 有成功消息三条不误伤用例。
+
+### Added — 新增
+- **`vast.block_countries`**(硬排除,默认空):按国家码尾段匹配(不做子串匹配,"CN" 不会命中 "Cincinnati"),优先级高于 `prefer_countries`,只影响新租,已在跑的机器不受影响。国内宿主系统性拉不动 Docker Hub,租了也不产出。配置页「平台特定参数」可编辑。`tests/test_block_countries.py` 13 条断言。
+
 ## [Vast 单宿主实例上限] — 2026-09-23
 
 ### Added — 新增
