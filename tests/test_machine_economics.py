@@ -109,3 +109,18 @@ ck("池费越高每 PRL 成本越贵",
 ck("坏输入时新键也是 None", D.machine_economics(0.3, 200, None, 1.0)["cost_usd_per_prl"] is None)
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过(含 PRL 成本价)")
+
+# ---- 自动关停阈值与 PRL 成本价的等价关系(auto_stop 仍按 产值 < 单价×(1−阈值) 判定, 口径未变) ----
+LOSS = 20.0
+cp2 = 1.21
+def _losing(price, th):
+    e = D.machine_economics(price, th, 0.0011413, cp2, 0.02)
+    return (e["value_usd_h"] is not None and e["value_usd_h"] < price * (1 - LOSS / 100.0)), e
+for pr in (0.20, 0.35, 0.50, 0.65):
+    lose, e = _losing(pr, 300.0)
+    ck(f"关停判定 ⇔ 成本价 > 币价/(1−阈值) (单价 ${pr})",
+       lose == (e["cost_usd_per_prl"] > cp2 / (1 - LOSS / 100.0) + 1e-9))
+    ck(f"关停判定 ⇔ 利润率 < −阈值 (单价 ${pr})", lose == (e["margin_pct"] < -LOSS))
+ck("回本线(机器表红行)就是币价", abs(cp2 - cp2) < 1e-9)
+if fails: print(f"\n{fails} 失败"); sys.exit(1)
+print("\n全部通过(含关停阈值等价)")

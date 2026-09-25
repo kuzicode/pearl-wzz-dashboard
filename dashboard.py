@@ -2182,6 +2182,7 @@ def build_full_config():
             "account": {k: cfg.get(k) for k in ACCOUNT_KEYS},
         }
     return {"common": common, "common_diff": common_diff, "platforms": plats, "auto_stop": auto_stop_settings(),
+            "coin_price_usd": coin_price(),   # 配置页把关停阈值换算成 PRL 成本价展示, 与机器表同口径
             "pools": [{"id": k, "label": v["label"], "image": v["image"], "reads_prl_host": v["reads_prl_host"],
                        "platforms": v.get("platforms") or [], "requires": v.get("requires") or {}, "note": v.get("note") or "",
                        "miners": {mk: {"label": mv.get("label") or mk, "image": mv.get("image"), "requires": mv.get("requires") or {}, "note": mv.get("note") or ""}
@@ -3212,7 +3213,7 @@ ${poolLinks}
 <div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
 <div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
 </div>
-<div class=econ>网络产率 <b>${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)}</b> PRL/TH·天<span class=dot style="background:${d.yield_live?'var(--ok)':'var(--warn)'}" title="${d.yield_live?'prlscan 实时':'产率数据过期(自动关停暂停)'}"></span> · 回本线 <b style="color:var(--bad)">${d.breakeven_usd_per_100th==null?'—':'$'+fnum(d.breakeven_usd_per_100th,3)}</b>/100TH·h · 在跑产值 <b>$${fnum(d.value_usd_h_total,3)}</b>/h vs 时租 <b>$${fnum(d.current_hourly_usd,3)}</b>/h · 自动关停 ${(d.auto_stop||{}).enabled?'<span style="color:var(--ok);font-weight:600">开</span>':'<span class=muted>关</span>'} <span class=muted>(亏 ≥${fnum((d.auto_stop||{}).loss_pct,0)}% 持续 ${fnum((d.auto_stop||{}).persist_min,0)} 分钟且机龄 ≥${fnum((d.auto_stop||{}).min_age_min,0)} 分钟才关; Salad 不参与)</span></div>
+<div class=econ>网络产率 <b>${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)}</b> PRL/TH·天<span class=dot style="background:${d.yield_live?'var(--ok)':'var(--warn)'}" title="${d.yield_live?'prlscan 实时':'产率数据过期(自动关停暂停)'}"></span> · 回本线 <b style="color:var(--bad)" title="挖到 1 PRL 的租金成本高于此值即亏损; 数值就是当前币价, 与机器表「PRL 成本价」列同口径">${d.coin_price_usd==null?'—':'$'+fnum(d.coin_price_usd,3)}</b>/PRL · 在跑产值 <b>$${fnum(d.value_usd_h_total,3)}</b>/h vs 时租 <b>$${fnum(d.current_hourly_usd,3)}</b>/h · 自动关停 ${(d.auto_stop||{}).enabled?'<span style="color:var(--ok);font-weight:600">开</span>':'<span class=muted>关</span>'} <span class=muted>(亏 ≥${fnum((d.auto_stop||{}).loss_pct,0)}% 持续 ${fnum((d.auto_stop||{}).persist_min,0)} 分钟且机龄 ≥${fnum((d.auto_stop||{}).min_age_min,0)} 分钟才关; Salad 不参与)</span></div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
 <span class=muted style="font-size:12px">PRL/USDT <b style="color:var(--hi);font-family:var(--mono)">$${fnum(d.coin_price_usd,4)}</b>${d.coin_price_live?' <span style="color:var(--ok);font-size:10px;letter-spacing:.4px">● 实时</span>':' <span style="color:var(--warn);font-size:10px">离线</span>'}</span>
 <button class=b-bad onclick="resetStats()">重置统计</button>
@@ -3428,7 +3429,7 @@ ${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="
 <div class=fld>关停后拉黑 (小时)</div><input id=as_bl value="${esc(as.blacklist_hours==null?'':as.blacklist_hours)}" placeholder="6">
 </div>
 <div class=row style=margin-top:12px><button class=b-acc onclick=saveAutoStop() style="white-space:nowrap">保存</button>
-<span class=hint>写入 .env 立即生效, 无需重启。产值 &lt; 单价 × (1 − 阈值) 且持续够久、机龄够长才关; 成本线附近 / 新机 / 币价或产率数据过期 / 账号进程没跑 都不动; 每分钟最多关 2 台, 候选超过在跑一半时暂停(防数据异常误杀); Salad 不参与; 关停后经 control/ 交接让 sniper 拉黑该机器</span></div></div>
+<span class=hint>写入 .env 立即生效, 无需重启。产值 &lt; 单价 × (1 − 阈值) 且持续够久、机龄够长才关 —— 换算到机器表就是 <b>PRL 成本价 &gt; 币价 ÷ (1 − 阈值)</b>(当前 ${d.coin_price_usd==null?'—':'$'+fnum(d.coin_price_usd/(1-(parseFloat(as.loss_pct)||20)/100),3)}/PRL); 成本线附近 / 新机 / 币价或产率数据过期 / 账号进程没跑 都不动; 每分钟最多关 2 台, 候选超过在跑一半时暂停(防数据异常误杀); Salad 不参与; 关停后经 control/ 交接让 sniper 拉黑该机器</span></div></div>
 <div class=platbox><div class=top><b>账户 · 看板登录</b></div>
 <div class=grid2>
 <div class=fld>用户名</div><input value="admin" disabled>
