@@ -40,6 +40,10 @@
 - **非 running 的 Salad 实例不再计费**:`allocating`/`creating`/`downloading` 此前被算进 `burn_hourly` 与当前 $/h(反向高估),现与 `value_usd_h` 统一走 `_is_running`。
 - **优先级档位兜底**:`salad_inst_price_num` 在 `SALAD_GPU_PRICES` 缺该档(如 `batch`)时退到 `low` 档而非返回 `None`,避免整台机器不计费。
 
+### Docs
+- README 总览与 Salad 章节按新版重写:说明「没有 portal 会话也能记账」的完整链路(日志识别型号 → 按组优先级查价 → 型号未知取同组中位价 → portal 不可用时按 price×time 估算并标注),以及余额手填配合「约 X h 花完」作为充值提醒;看板内「工具说明」的仪表盘条目同步。
+- 已知边界写入文档:整组同时冷启动的头十几分钟,所有实例都没解析出型号、中位数无从取值,这段时间不计费(金额很小,单台 reallocate 不受影响)。
+
 ### Tests
 - `test_machine_economics` 补 PRL 成本价与恒等式/排序等价断言;`test_salad_rent_balance` 改写(原先把「portal 拿不到 → 不累加」当成期望行为断言,正是本 bug);新增 `test_salad_cost`(档位兜底/中位价/非 running 不计费)。67 → 68 个测试文件全绿。
 
