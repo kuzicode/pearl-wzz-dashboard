@@ -14,6 +14,15 @@
 - **`vast.block_countries`**(硬排除,默认空):按国家码尾段匹配(不做子串匹配,"CN" 不会命中 "Cincinnati"),优先级高于 `prefer_countries`,只影响新租,已在跑的机器不受影响。国内宿主系统性拉不动 Docker Hub,租了也不产出。配置页「平台特定参数」可编辑。`tests/test_block_countries.py` 13 条断言。
 - 模板 `config.vast.example.json` 补上 `block_countries: []`(空 = 不排除)与 `max_instances_per_machine: 2`,让新用户看得到这两个开关;`test_example_configs` 加断言防止模板误带排除国家。
 
+## [总览卡片: 产出以美元为主 + 预计每小时利润] — 2026-09-25
+
+### Changed — 变更
+- **「累计产出」卡片主次行对调**:主行改为折合美元(如 `$886.05`),次行给 PEARL 数量与平均每小时产币(`744.5789 PEARL · 平均 5.5628 PEARL/h`);已确认/待成熟明细仍在主数值的悬浮提示里。
+- **「累计折合利润」卡片次行换成预计每小时利润**:`预计 +$1.73/h · 产值 $6.41 − 租金 $4.68`,按盈亏着色,无在跑机器时显示"暂无在跑机器";原口径说明(产出折合 − 累计租金,以及跨期口径警告)移入主数值悬浮提示。summary 新增 `profit_usd_h`。
+
+### Fixed — 修复
+- **`build_summary` 的时租口径与产值不一致**:`current_hourly_usd` 此前统计全部机器,而 `value_usd_h_total` 只统计在跑机器,两者相减会被 Salad 的 `allocating`/`creating`/`downloading` 实例拉低。现两侧统一走 `_is_running`,与 `tick_spend`、`build_rentals` 一致。同一问题也影响数据分析面板的池级「理论盈亏」(非 running 机器只进租金不进产值,系统性低估 margin),一并修正。新增 `tests/test_profit_hourly.py` 锁定该口径;`test_machine_economics` 中一条断言原先锁的是旧的不一致口径,已改写。
+
 ## [机器表改「PRL 成本价」列 + Salad 租金漏算修复(ISS-025)] — 2026-09-25
 
 ### Changed — 变更

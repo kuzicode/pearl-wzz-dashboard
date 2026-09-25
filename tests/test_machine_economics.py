@@ -59,7 +59,8 @@ ck("面板含 pearlhash + kryptex 两池", set(pa)=={"pearlhash","kryptex"})
 ph=pa["pearlhash"]
 ck("pearlhash 累计: 租金4 产出0.9 成本 4.44 每$产币 0.225", abs(ph["rent_usd"]-4)<1e-9 and abs(ph["output_prl"]-0.9)<1e-9 and abs(ph["cost_usd_per_prl"]-4.4444)<1e-3 and abs(ph["prl_per_usd"]-0.225)<1e-6)
 ck("pearlhash 实测产率 = 0.9/1000×24 = 0.0216, 效率 = 0.0009/0.001 = 90%", abs(ph["realized_prl_per_th_day"]-0.0216)<1e-6 and abs(ph["efficiency_pct"]-90.0)<0.1)
-ck("理论产值 = 300×0.001×1×0.99 = 0.297, 池时租 = a+c = 0.6(bbp 计全部机器) → margin −50.5%", abs(ph["value_usd_h"]-0.297)<1e-6 and abs(ph["margin_pct"]+50.5)<0.1)
+# c 是 state=stopping 的机器: 既不算产值也不算租金(此前只在产值侧排除, 租金侧仍计入 → margin 被系统性低估)
+ck("理论产值 = 300×0.001×1×0.99 = 0.297, 池时租 = 仅 a = 0.3(非 running 的 c 不计) → margin −1%", abs(ph["value_usd_h"]-0.297)<1e-6 and abs(ph["margin_pct"]+1.0)<0.1)
 ck("theory_prl_per_th_day = 0.024", abs(s["theory_prl_per_th_day"]-0.024)<1e-9)
 kx=pa["kryptex"]
 ck("kryptex 产出 = balance 0.5 − 基线(缺=0) = 0.5; 实测 0.5/500×24=0.024 → 效率 100%(效率按未扣费理论算, 与池费无关)", abs(kx["output_prl"]-0.5)<1e-9 and abs(kx["efficiency_pct"]-100.0)<0.1)

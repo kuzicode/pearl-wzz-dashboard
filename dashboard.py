@@ -1824,6 +1824,8 @@ def build_summary(pool_key="merged"):
     bbp = {k: 0.0 for k in S.POOLS}
     for acct, info in rentals.items():
         for m in info.get("machines", []):
+            if not _is_running(m):
+                continue   # 与下面 _value_total 口径一致; 否则"产值 − 租金"会被未开挖的实例拉低
             try:
                 pr = float(m.get("price") or 0)
             except Exception:
@@ -1905,6 +1907,8 @@ def build_summary(pool_key="merged"):
         "yield_height": _yv.get("height"),
         "breakeven_usd_per_100th": _econ["breakeven_usd_per_100th"],
         "value_usd_h_total": round(_value_total, 4),
+        # 预计每小时利润 = 在跑机器产值 − 当前时租(两者同池视图、同 _is_running 口径); 无在跑机器时为 None
+        "profit_usd_h": round(_value_total - cur_hourly, 4) if (_value_total or cur_hourly) else None,
         "auto_stop": {**_as, "watch": _as_watch, "history": list(stats.get("auto_stop_history") or [])[-AUTO_STOP_HISTORY_MAX:]},
         "pool_analysis": _pool_analysis,
         "th_hours_since": int(_th_since) if _th_since else None,
@@ -3210,8 +3214,8 @@ ${poolLinks}
 <div class=card><div class=k>在跑机器</div><div class=v>${d.running_machines}</div><div class=sub>${pv=='merged'?poolBreak:esc(bp)}</div></div>
 <div class=card><div class=k>总算力 矿池实测</div><div class=v>${fnum(d.total_hashrate_th)} <small>TH/s</small></div></div>
 <div class=card><div class=k>累计租金${d.rent_has_estimate?' <span class=muted style=font-weight:400 title="Salad portal 余额不可用, 该账号租金按 单价 × 在跑时长 估算">· 含估算</span>':''}</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
-<div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
-<div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
+<div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">$${fnum(d.cumulative_output_usd)}</div><div class=sub>${fnum(d.cumulative_output,4)} <small>PEARL</small> · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
+<div class=card><div class=k>累计折合利润</div><div class="v tip" style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}" data-tip="${esc(proflabel)}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${(()=>{const ph=d.profit_usd_h;if(ph==null)return '<span class=muted>暂无在跑机器</span>';const c=ph>=0?'var(--acc)':'#ff6b6b';return `预计 <b style="color:${c}">${ph>=0?'+':'−'}$${fnum(Math.abs(ph),2)}</b>/h <span class=muted>· 产值 $${fnum(d.value_usd_h_total,2)} − 租金 $${fnum(d.current_hourly_usd,2)}</span>`;})()}</div></div>
 </div>
 <div class=econ>网络产率 <b>${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)}</b> PRL/TH·天<span class=dot style="background:${d.yield_live?'var(--ok)':'var(--warn)'}" title="${d.yield_live?'prlscan 实时':'产率数据过期(自动关停暂停)'}"></span> · 回本线 <b style="color:var(--bad)" title="挖到 1 PRL 的租金成本高于此值即亏损; 数值就是当前币价, 与机器表「PRL 成本价」列同口径">${d.coin_price_usd==null?'—':'$'+fnum(d.coin_price_usd,3)}</b>/PRL · 在跑产值 <b>$${fnum(d.value_usd_h_total,3)}</b>/h vs 时租 <b>$${fnum(d.current_hourly_usd,3)}</b>/h · 自动关停 ${(d.auto_stop||{}).enabled?'<span style="color:var(--ok);font-weight:600">开</span>':'<span class=muted>关</span>'} <span class=muted>(亏 ≥${fnum((d.auto_stop||{}).loss_pct,0)}% 持续 ${fnum((d.auto_stop||{}).persist_min,0)} 分钟且机龄 ≥${fnum((d.auto_stop||{}).min_age_min,0)} 分钟才关; Salad 不参与)</span></div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
