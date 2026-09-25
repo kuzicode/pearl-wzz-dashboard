@@ -88,3 +88,24 @@ ck("tick_spend 记起点产出(pearlhash=cumulative_output 2.0, kryptex=0.5−0.
 ck("tick_spend 累计算力小时 ≈ 300×60/3600 = 5", abs(st["th_hours_by_pool"]["pearlhash"]-5.0)<0.2 and abs(st["th_hours_by_pool"]["kryptex"]-5.0)<0.2)
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过(含 th_hours 起点)")
+
+# ---- PRL 成本价(挖到 1 PRL 的租金成本), 与币价同单位 ----
+r = D.machine_economics(0.312, 302.24, 0.0011413, 1.23, 0.02)
+ck("cost_usd_per_prl = 单价 ÷ 每小时到手产币量",
+   abs(r["cost_usd_per_prl"] - 0.312 / (302.24 * 0.0011413 * 0.98)) < 1e-4)
+ck("恒等: cost == 币价 / (1 + 利润率/100)",
+   abs(r["cost_usd_per_prl"] - 1.23 / (1 + r["margin_pct"] / 100.0)) < 2e-3)
+ck("成本价低于币价 ⇔ 利润率为正",
+   (r["cost_usd_per_prl"] < 1.23) == (r["margin_pct"] > 0))
+hi = D.machine_economics(0.60, 302.24, 0.0011413, 1.23, 0.02)
+ck("贵机器成本价更高且利润率为负", hi["cost_usd_per_prl"] > r["cost_usd_per_prl"] and hi["margin_pct"] < 0)
+ck("按成本价降序 ≡ 按利润率升序",
+   sorted([r, hi], key=lambda x: -x["cost_usd_per_prl"]) == sorted([r, hi], key=lambda x: x["margin_pct"]))
+ck("零算力 → cost 为 None", D.machine_economics(0.3, 0, 0.0011413, 1.23)["cost_usd_per_prl"] is None)
+ck("单价为 0 → cost 为 None", D.machine_economics(0, 200, 0.0011413, 1.23)["cost_usd_per_prl"] is None)
+ck("池费越高每 PRL 成本越贵",
+   D.machine_economics(0.3, 200, 0.0011413, 1.23, 0.02)["cost_usd_per_prl"]
+   > D.machine_economics(0.3, 200, 0.0011413, 1.23, 0.01)["cost_usd_per_prl"])
+ck("坏输入时新键也是 None", D.machine_economics(0.3, 200, None, 1.0)["cost_usd_per_prl"] is None)
+if fails: print(f"\n{fails} 失败"); sys.exit(1)
+print("\n全部通过(含 PRL 成本价)")

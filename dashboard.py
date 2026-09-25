@@ -618,16 +618,20 @@ SALAD_PRICE_ALIAS = {"rtx 4080 super": "rtx 4080", "rtx 4070 super": "rtx 4070"}
 def salad_inst_price_num(gname, classprice, prio):
     """实例时价(USD/h): salad gpu-classes 实时价(classprice, 先解析别名)优先 → SALAD_GPU_PRICES 兜底 → None。
     classprice = {gpu_key: 该组 prio 的实时价}; prio = 组优先级(high/medium/low/batch)。
-    salad 组多为 batch 优先级, 而兜底表只有 low/medium/high → 无 salad class 的卡(如 4080 SUPER)
-    必须靠别名命中 classprice 才有价, 否则上层回退组级区间 label。"""
+    兜底表只有 low/medium/high; prio 缺档(如 batch)时退到 low 档而不是返回 None ——
+    返回 None 会让该机器在 burn_hourly/累计租金里按 $0 计, 静默漏算(ISS-025)。"""
     k = gpu_key(gname)
     k = SALAD_PRICE_ALIAS.get(k, k)
     if k in classprice:
         return classprice[k]
-    fb = SALAD_GPU_PRICES.get(k, {}).get(prio)
+    row = SALAD_GPU_PRICES.get(k) or {}
+    fb = row.get(prio)
+    if fb is None and row:
+        fb = row.get("low")   # batch 等缺档 → 退到最低档(宁可低估单价, 也好过整台不计费)
     return float(fb) if fb is not None else None
 
 _gpucls = {}  # org -> {"data", "ts"}
+_salad_stale_warned = set()  # 已告警过"白名单含不存在的容器组"的账号, 防日志刷屏
 
 def salad_gpu_prices(base, org, key):
     """{uuid: {name, prices:{priority:price}}} ，缓存 10min(按 org)。"""
@@ -676,6 +680,7 @@ def _salad_compute(account_id):
         if not names:
             d = salad_get(pre, key)
             names = [g.get("name") for g in (d.get("items") or [])]
+
         watch = read_state(account_id).get("salad_instance_watch") or {}
         gpu_cache = salad_gpu_for(account_id)  # portal gpu_class: {instance_id: gpu_class}(优先源)
         # 矿池侧 worker 名 = <prefix>-salad-<machine_id>。跨所有矿池监控取归一化 worker(name/th/gpus),
@@ -701,7 +706,7 @@ def _salad_compute(account_id):
         def phr(w):
             return (w or {}).get("th") if w else None
         def fetch_group(nm):  # 单组: 拉 组详情 + 实例; 返回片段, 由主线程按 names 顺序合并
-            out = {"name": nm, "counts": None, "gpu_classes": [], "prices": [], "instances": [], "error": None}
+            out = {"name": nm, "counts": None, "gpu_classes": [], "prices": [], "instances": [], "error": None, "group_error": None}
             prio = "medium"
             label = None
             try:
@@ -719,8 +724,9 @@ def _salad_compute(account_id):
                     lo, hi = min(ps), max(ps)
                     label = f"${lo:.3f}/h" if abs(lo - hi) < 1e-9 else f"${lo:.3f}–{hi:.3f}/h"
                     out["prices"] += ps
-            except Exception:
-                pass
+            except Exception as ge:
+                # 组详情拉不到 → prio 只能退回 medium(价格可能错档); 配置里写了但已删/改名的组也走这里
+                out["group_error"] = f"{type(ge).__name__}: {ge}"
             # 按组优先级建 GPU名→精确价 映射; 命中用单价, 否则兜底表, 再否则回退区间 label
             classprice = {}
             for info in gp.values():
@@ -772,6 +778,12 @@ def _salad_compute(account_id):
                 group_results = list(ex.map(fetch_group, names))  # map 保序 → 合并顺序同原串行
         else:
             group_results = []
+        if scfg.get("include_container_groups") and account_id not in _salad_stale_warned:
+            # 白名单过期会静默漏算整组(ISS-025)。复用上面已拉的组详情结果判断, 不额外发请求; 每账号只告警一次。
+            bad = [g.get("name") for g in group_results if g.get("group_error")]
+            if bad:
+                _salad_stale_warned.add(account_id)
+                print(f"[salad] {account_id} include_container_groups 里这些组拉不到详情(可能已删/改名, 会整组漏算): {bad}; 留空该项即自动发现全部组", flush=True)
         prices = []
         for gr in group_results:
             if gr["counts"] is not None:
@@ -868,16 +880,17 @@ def active_rentals(account_id):
 def tick_spend():
     """累计租金 tick(spend_loop 每 60s 调)。口径:
     current_hourly_usd = 所有机器单价估算(含 salad 名义报价, 平滑即时速率);
-    cumulative_usd = 非-salad price×time + salad portal 真实余额下降量(实际扣费)。
-    current_hourly_by_pool/hbp 仅含非-salad(salad 不走 price×time); UI 当前 $/h 由 build_summary 从 build_rentals 重算。"""
+    cumulative_usd = 非-salad price×time + salad(portal 真实余额下降量, 拿不到时退化为 price×time 估算)。
+    只统计在跑实例(_is_running); current_hourly_by_pool/hbp 仅含非-salad; UI 当前 $/h 由 build_summary 从 build_rentals 重算。"""
     with _lock:
         s = read_json(STATS_PATH, {"cumulative_usd": 0.0, "last_epoch": time.time()})
         now = time.time()
         hourly = 0.0
-        non_salad_hourly = 0.0  # 非-salad 所有机器(含 unknown 池)→ 累计总额(salad 改用真实余额下降, 不计 price×time)
+        non_salad_hourly = 0.0  # 非-salad 所有机器(含 unknown 池)→ 累计总额
         import sniper as S
         hbp = {k: 0.0 for k in S.POOLS}  # 非-salad 已知池 → 按池累计(POOLS 驱动)
         salad_pool_of = {}  # salad 账号 -> 其机器占多数的池(归 drop 用)
+        salad_hourly = {}   # salad 账号 -> 在跑实例时租合计(portal 余额拿不到时按此估算累计)
         for acct, info in build_rentals().items():
             is_salad = platform_of(acct) == "salad"
             if is_salad:
@@ -888,12 +901,16 @@ def tick_spend():
                 if _cnt:
                     salad_pool_of[acct] = max(_cnt, key=_cnt.get)
             for m in info.get("machines", []):
+                if not _is_running(m):
+                    continue   # salad 的 allocating/creating/downloading 不计费, 与 build_rentals 口径一致
                 try:
                     pr = float(m.get("price") or 0)
                 except Exception:
                     pr = 0.0
                 hourly += pr  # 当前 $/h 显示(含 salad 估算)
-                if not is_salad:
+                if is_salad:
+                    salad_hourly[acct] = salad_hourly.get(acct, 0.0) + pr
+                else:
                     non_salad_hourly += pr
                     pool = m.get("pool")
                     if pool in hbp:
@@ -904,24 +921,44 @@ def tick_spend():
             s["cumulative_usd"] = float(s.get("cumulative_usd", 0.0)) + non_salad_hourly * dt / 3600.0
             for pool, h in hbp.items():
                 cbp[pool] = float(cbp.get(pool, 0.0)) + h * dt / 3600.0
-        # salad: portal 真实余额下降量(实测花费, 不受 dt 守卫; 归该账号机器实际所在池, 未知则回退 twpool)
+        # salad: 优先用 portal 真实余额下降量(实测花费); portal 拿不到时退化为 price×time 估算。
+        # 以前这里直接 continue, 而 portal 会话过期后永远拿不到 → salad 租金恒为 0(ISS-025)。
         prev = s.get("salad_balance_prev") or {}
+        est_acc = s.get("salad_estimated_usd") or {}   # 账号 -> 自上次真实读数以来已估算计入的金额
+        any_est = False
         for acct in list_accounts():
             if platform_of(acct) != "salad":
                 continue
+            dest = salad_pool_of.get(acct) or "twpool"
+            if dest == "unknown":
+                dest = "twpool"
             bal = salad_real_balance(acct)
-            if bal is None:  # portal 拿不到 → 跳过(prev 不更新, 下次有效读数补这段缺口)
+            if bal is None:
+                # portal 不可用 → 按在跑实例时租估算(受同一 dt 守卫), 记入 est_acc 以便日后真实读数回来时抵扣
+                if dt < 3600:
+                    add = salad_hourly.get(acct, 0.0) * dt / 3600.0
+                    if add > 0:
+                        s["cumulative_usd"] = float(s.get("cumulative_usd", 0.0)) + add
+                        cbp[dest] = float(cbp.get(dest, 0.0)) + add
+                        est_acc[acct] = float(est_acc.get(acct, 0.0)) + add
+                        any_est = True
                 continue
             p = prev.get(acct)
             if p is not None and float(bal) < float(p):  # 仅下降计入; 充值上升不计负
                 drop = float(p) - float(bal)
-                s["cumulative_usd"] = float(s.get("cumulative_usd", 0.0)) + drop
-                dest = salad_pool_of.get(acct) or "twpool"
-                if dest == "unknown":
-                    dest = "twpool"
-                cbp[dest] = float(cbp.get(dest, 0.0)) + drop
+                # 这段时间里已按估算计过的部分先抵扣, 避免 portal 恢复后重复计数
+                used = min(float(est_acc.get(acct, 0.0)), drop)
+                drop -= used
+                if used:
+                    est_acc[acct] = float(est_acc.get(acct, 0.0)) - used
+                if drop > 0:
+                    s["cumulative_usd"] = float(s.get("cumulative_usd", 0.0)) + drop
+                    cbp[dest] = float(cbp.get(dest, 0.0)) + drop
+            est_acc[acct] = 0.0   # 拿到真实读数 → 估算账清零, 之后以余额为准
             prev[acct] = bal
         s["salad_balance_prev"] = prev
+        s["salad_estimated_usd"] = est_acc
+        s["salad_cost_estimated"] = any_est
         s["cumulative_usd_by_pool"] = cbp
         # 按池累计「算力小时」(矿池实测算力 × 时长), 供数据分析面板算实测产率 = 自重置产出 / 算力小时
         # 起点(th_hours_start)记录开始累计时的时间与各池自重置产出, 实测产率 = (现产出 − 起点产出) / 算力小时, 口径对齐
@@ -1242,8 +1279,11 @@ def pool_fee(pool):
 
 def machine_economics(price, th, y, cp, fee=POOL_FEE_DEFAULT):
     """单机经济性: 产值 $/h = 算力 × 产率 × 币价 × (1−池费); 回本线 $/100TH·h = 产率 × 币价 × (1−池费) × 100;
-    margin_pct = (产值 − 单价) / 单价 × 100。缺任一输入 → 对应字段 None。"""
-    out = {"value_usd_h": None, "breakeven_usd_per_100th": None, "margin_pct": None}
+    margin_pct = (产值 − 单价) / 单价 × 100;
+    cost_usd_per_prl = 单价 ÷ 每小时到手产币量 = 挖到 1 PRL 花的租金(与币价同单位, 高于币价即亏)。
+    缺任一输入 → 对应字段 None。"""
+    out = {"value_usd_h": None, "breakeven_usd_per_100th": None, "margin_pct": None,
+           "cost_usd_per_prl": None}
     try:
         y = float(y or 0); cp = float(cp or 0)
     except Exception:
@@ -1258,8 +1298,12 @@ def machine_economics(price, th, y, cp, fee=POOL_FEE_DEFAULT):
         return out
     if th > 0:
         out["value_usd_h"] = round(th * ypc, 4)
+        prl_per_h = th * y * (1 - float(fee or 0))   # 每小时到手 PRL(已扣池费)
         if pr > 0:
             out["margin_pct"] = round((th * ypc - pr) / pr * 100, 1)
+            if prl_per_h > 0:
+                # 恒等: cost_usd_per_prl == cp / (1 + margin_pct/100); 按它降序 ≡ 按利润率升序
+                out["cost_usd_per_prl"] = round(pr / prl_per_h, 4)
     return out
 
 def reset_stats():
@@ -1670,6 +1714,33 @@ def _is_running(machine):
     仅 'running' 算(排除 creating/downloading/allocating/stopping —— 这些已分配但还没在挖)。"""
     return machine.get("state") in (None, "running")
 
+
+def _median(vals):
+    v = sorted(float(x) for x in vals)
+    n = len(v)
+    if not n:
+        return None
+    return v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2.0
+
+
+def _fill_salad_missing_prices(items):
+    """Salad 机器已 running 但 GPU 型号还没从日志解析出来时, price 为 None 会被当成 $0 漏算(ISS-025)。
+    用同容器组已知单价的中位数暂代(组内没有则用全账号中位数), 并标 price_estimated 供 UI 加 ~ 前缀。
+    型号识别出来后下一轮自动换成真实单价。非 running 的实例不填(本来就不计费)。"""
+    known = [float(m["price"]) for m in items if m.get("price") is not None and _is_running(m)]
+    by_group = {}
+    for m in items:
+        if m.get("price") is not None and _is_running(m):
+            by_group.setdefault(str(m.get("group") or ""), []).append(float(m["price"]))
+    acct_med = _median(known)
+    for m in items:
+        if m.get("price") is not None or not _is_running(m):
+            continue
+        med = _median(by_group.get(str(m.get("group") or "")) or []) or acct_med
+        if med is not None:
+            m["price"] = round(med, 4)
+            m["price_estimated"] = True
+
 def _default_pool_key(S):
     """前端默认矿池视图: 取已启用账号配置的活跃池(出现最多的); 无则兜底 pearlfortune。
     用于"进入看板默认显示在跑的那个池", 而非"合并"(合并会把各池链接全列出, 挤窄钱包地址)。"""
@@ -1845,6 +1916,8 @@ def build_summary(pool_key="merged"):
         "total_hashrate_th": pv["total_hashrate_th"],
         "workers": pv["workers"],
         "cumulative_rent_usd": rent,
+        # True = 本轮有 salad 账号的租金是按 price×time 估算的(portal 余额不可用), UI 据此标注"含估算"
+        "rent_has_estimate": bool(stats.get("salad_cost_estimated")),
         "current_hourly_usd": cur_hourly,
         "coin_price_usd": cp,
         "coin_price_live": _price_cache.get("prl") is not None,  # True=实时拉取, False=fallback
@@ -1897,8 +1970,11 @@ def build_rentals():
                 d["machine_id"] = mids[str(d.get("id"))]
             img = d.get("image") or (imgs.get(str(d.get("id"))) if plat in ("runpod", "vast") else None)
             d["pool"] = machine_pool(img, d.get("worker"))
-            d.update(machine_economics(d.get("price"), d.get("hashrate_th"), _y, _cp, pool_fee(d["pool"])))  # 产值/回本
             items.append(d)
+        if plat == "salad":
+            _fill_salad_missing_prices(items)   # 型号未识别的在跑机器按同组中位单价估算, 避免按 $0 漏算
+        for d in items:
+            d.update(machine_economics(d.get("price"), d.get("hashrate_th"), _y, _cp, pool_fee(d["pool"])))  # 产值/回本
         res[acct] = {
             "platform": plat,
             "account_id": acct,
@@ -1918,7 +1994,8 @@ def build_rentals():
             "max_total_hourly_usd": full_cfg.get("max_total_hourly_usd"),
         }
         bal = platform_balance(acct)
-        burn = sum(float(m.get("price") or 0) for m in items)
+        # 只有真正在跑的实例才花钱(salad 的 allocating/creating/downloading 不计费), 与 value_usd_h 口径一致
+        burn = sum(float(m.get("price") or 0) for m in items if _is_running(m))
         estimated = False
         real = False
         if plat == "salad":                      # salad: portal 真实余额优先于手填估算
@@ -2738,6 +2815,9 @@ textarea{resize:vertical;min-height:150px;line-height:1.5;font-family:var(--mono
 .gpurow .gsel{display:flex;gap:6px;min-width:0}.gpurow .gsel select{flex:1;min-width:0}.gpurow .gsel input{flex:1;min-width:0}
 .ghint{grid-column:1/-1;font-size:11px;color:var(--mut);margin:-4px 0 4px;line-height:1.6}.ghint a{color:var(--acc);font-weight:600;text-decoration:none}
 .beline td{color:var(--bad);font-weight:600;background:var(--badbg)}
+th.sortth{cursor:pointer;user-select:none;white-space:nowrap}
+th.sortth:hover{color:var(--acc)}
+th.sortth .sortdim{opacity:.45;font-weight:400}
 .econ{font-size:12px;color:var(--mut);margin:10px 0 2px;line-height:1.8}.econ b{color:var(--tx);font-family:var(--mono)}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin:0 2px;vertical-align:middle}
 .gpurow.nop,.nop .gpurow{grid-template-columns:1fr 110px 34px}.nop .gpurow [data-f=price]{display:none}
@@ -3052,6 +3132,10 @@ function dur(s){if(s==null)return '-';let h=Math.floor(s/3600),m=Math.floor(s%36
 function fnum(n,d){if(n==null)return '-';n=Number(n);if(Math.abs(n)<1e-9)n=0;return n.toLocaleString(undefined,{maximumFractionDigits:d==null?2:d});}
 async function resetStats(){if(!confirm('确认重置统计? 累计租金 / 产出 / 利润都会清零, 从现在重新起算(币价保留)。'))return;try{let r=await api('/api/reset-stats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});if(r&&r.ok){toast('统计已重置, 从现在起算');refresh();}else toast((r&&r.error)||'重置失败');}catch(e){}}
 
+// 机器表排序: key='cost'(PRL 成本价) | 'margin'(利润率); 默认成本价降序(最贵在上)
+let MSORT=(()=>{try{const v=JSON.parse(localStorage.getItem('mtab_sort')||'null');if(v&&(v.key=='cost'||v.key=='margin')&&(v.dir=='asc'||v.dir=='desc'))return v;}catch(e){}return {key:'cost',dir:'desc'};})();
+function sarrow(k){return MSORT.key==k?(MSORT.dir=='desc'?'▼':'▲'):'<span class=sortdim>⇅</span>';}
+function msort(k){MSORT=(MSORT.key==k)?{key:k,dir:MSORT.dir=='desc'?'asc':'desc'}:{key:k,dir:'desc'};try{localStorage.setItem('mtab_sort',JSON.stringify(MSORT));}catch(e){}renderOverview();}
 async function renderOverview(){if(EDITING)return;let d,r,pv;try{let stored=localStorage.getItem('pool_view');d=await api('/api/summary?pool='+encodeURIComponent(stored||'default'));r=await api('/api/rentals');pv=d.pool_view||'merged'}catch(e){return}
 if(ROLE=='admin'){let _ce=document.getElementById('cfaccts');if(_ce)_ce.innerHTML=Object.keys(r).map(a=>`<div class="ni sub adm${(view=='cf'&&subtab==a)?' on':''}" data-nav=cf:${a} onclick="nav('cf:${a}')">${esc((r[a]&&r[a].label)||a)}</div>`).join('');}
 let phUrl='https://pearlhash.xyz/account/'+encodeURIComponent(d.wallet);
@@ -3095,21 +3179,26 @@ let sstat='';if(p=='salad'){let s=v.salad_status||{};let pr=[];if(s.running_coun
 
 let mlist=(v.machines||[]).filter(m=>pv=='merged'||m.pool==pv);
 let acctBurn=mlist.reduce((s,m)=>s+(parseFloat(m.price)||0),0);
-// 性价比 = 每 100 TH/s 每小时花多少 $(越高越差); 无算力(宽限中/未测)排最前, 其后按性价比降序 → 从上往下就是最该先关的
-let cpt=m=>{const pr=parseFloat(m.price),th=parseFloat(m.hashrate_th);return (isFinite(pr)&&pr>0&&isFinite(th)&&th>0)?pr/th*100:null;};
-mlist=mlist.slice().sort((x,y)=>{const a=cpt(x),b=cpt(y);if(a==null&&b==null)return 0;if(a==null)return -1;if(b==null)return 1;return b-a;});
+// PRL 成本价 = 挖到 1 PRL 花的租金(后端 machine_economics 算好, 与币价同单位; 高于币价即亏)
+// 无算力(宽限中/未测)始终排最前, 其余按当前排序列; 默认成本价降序 → 从上往下就是最该先关的
+let cpt=m=>{const c=parseFloat(m.cost_usd_per_prl);return isFinite(c)?c:null;};
+let mgv=m=>{const g=parseFloat(m.margin_pct);return isFinite(g)?g:null;};
+const SK=MSORT.key,SD=MSORT.dir=='asc'?1:-1;
+const skey=SK=='margin'?mgv:cpt;
+mlist=mlist.slice().sort((x,y)=>{const a=skey(x),b=skey(y);if(a==null&&b==null)return 0;if(a==null)return -1;if(b==null)return 1;return (a-b)*SD;});
 let cpts=mlist.map(cpt).filter(x=>x!=null);let cptMed=cpts.length?cpts.slice().sort((a,b)=>a-b)[Math.floor(cpts.length/2)]:null;
+const COIN=d.coin_price_usd;
 const AS=d.auto_stop||{};const LOSS=parseFloat(AS.loss_pct)||20;const BE=d.breakeven_usd_per_100th;const WATCH=AS.watch||{};
 let rows=mlist.map(m=>{let a=(ROLE=='admin'&&m.id)?`<button class=b-bad onclick="term('${aid}','${p}','${esc(m.id)}','${esc(m.group||'')}')">关闭</button>`:'';
 
-let price=m.price_label?esc(m.price_label):(m.price==null?'-':'$'+fnum(m.price,3)+'/h');
+let price=m.price_label?esc(m.price_label):(m.price==null?'-':(m.price_estimated?'<span title="GPU 型号尚未从日志识别, 按同组已知机器中位单价估算">~$'+fnum(m.price,3)+'/h</span>':'$'+fnum(m.price,3)+'/h'));
 let gpu=(m.gpu&&m.gpu!='?')?esc(m.gpu):'<span class=muted>—</span>';
 let idcell=p=='salad'?`<td title="实例 ${esc(m.id)}${m.machine_id?(' · 机器(worker 后缀) '+esc(m.machine_id)):''}">${esc(m.machine_id||m.id)}</td>`:`<td>${esc(m.id)}</td>`;
-return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${(()=>{const c=cpt(m);if(c==null)return '<span class=muted title="无算力数据(宽限中/未连池)">—</span>';const bad=(BE!=null&&c>BE)||(cptMed!=null&&c>cptMed*1.15);return `<span style="${bad?'color:var(--bad);font-weight:600':''}" title="每 100 TH/s 每小时花费; 红色 = 高于回本线(租金超过产值)或比本账号中位数贵 15% 以上">$${fnum(c,3)}</span>`;})()}</td><td title="算力 × 网络产率 × 币价 × (1−池费)">${m.value_usd_h==null?'<span class=muted>—</span>':'$'+fnum(m.value_usd_h,3)+'/h'}</td><td>${(()=>{const mg=m.margin_pct;if(mg==null)return '<span class=muted title="无算力或产率/币价数据">—</span>';const col=mg>=0?'var(--ok)':(mg>-LOSS?'var(--warn)':'var(--bad)');const w=WATCH[aid+':'+m.id];return `<span style="color:${col};font-weight:600" title="(产值 − 单价) ÷ 单价; 红 = 亏损超过 ${LOSS}%(自动关停阈值), 黄 = 成本线附近${w?' · 自动关停观察中 '+fnum(w.elapsed_min,0)+'/'+fnum(AS.persist_min,0)+' 分钟':''}">${mg>=0?'+':''}${fnum(mg,1)}%</span>${w?`<span class=muted style="font-size:10px"> ⏱${fnum(w.elapsed_min,0)}/${fnum(AS.persist_min,0)}m</span>`:''}`;})()}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?11:10} class=muted>无符合机器</td></tr>`;
-let beRow=(BE!=null&&mlist.length)?`<tr class=beline><td colspan=${p=='salad'?6:5} style="text-align:right">回本线 ▶</td><td>$${fnum(BE,3)}</td><td colspan=4 style="font-weight:400;color:var(--mut)">$/100TH·h 高于此值 = 租金超过产值(币价 $${fnum(d.coin_price_usd,3)} · ${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)} PRL/TH·天)</td></tr>`:'';
+return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${(()=>{const c=cpt(m);if(c==null)return '<span class=muted title="无算力数据(宽限中/未连池)">—</span>';const bad=(COIN!=null&&c>COIN)||(cptMed!=null&&c>cptMed*1.15);return `<span style="${bad?'color:var(--bad);font-weight:600':''}" title="挖到 1 PRL 的租金成本 = 单价 ÷ 每小时到手产币量; 红色 = 高于币价(租金超过产值)或比本账号中位数贵 15% 以上">$${fnum(c,3)}/PRL</span>`;})()}</td><td title="算力 × 网络产率 × 币价 × (1−池费)">${m.value_usd_h==null?'<span class=muted>—</span>':'$'+fnum(m.value_usd_h,3)+'/h'}</td><td>${(()=>{const mg=m.margin_pct;if(mg==null)return '<span class=muted title="无算力或产率/币价数据">—</span>';const col=mg>=0?'var(--ok)':(mg>-LOSS?'var(--warn)':'var(--bad)');const w=WATCH[aid+':'+m.id];return `<span style="color:${col};font-weight:600" title="(产值 − 单价) ÷ 单价; 红 = 亏损超过 ${LOSS}%(自动关停阈值), 黄 = 成本线附近${w?' · 自动关停观察中 '+fnum(w.elapsed_min,0)+'/'+fnum(AS.persist_min,0)+' 分钟':''}">${mg>=0?'+':''}${fnum(mg,1)}%</span>${w?`<span class=muted style="font-size:10px"> ⏱${fnum(w.elapsed_min,0)}/${fnum(AS.persist_min,0)}m</span>`:''}`;})()}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?11:10} class=muted>无符合机器</td></tr>`;
+let beRow=(COIN!=null&&mlist.length)?`<tr class=beline><td colspan=${p=='salad'?6:5} style="text-align:right">回本线 ▶</td><td>$${fnum(COIN,3)}/PRL</td><td colspan=4 style="font-weight:400;color:var(--mut)">成本价高于此值 = 租金超过产值(币价 $${fnum(COIN,3)} · ${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)} PRL/TH·天)</td></tr>`:'';
 let _pt=v.console_url?`<b><a class=platlink href="${esc(v.console_url)}" target=_blank rel=noopener title="打开 ${esc(v.label||aid)} 后台 ↗">${esc(v.label||aid)} ↗</a></b>`:`<b>${esc(v.label||aid)}</b>`;
 plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}${pv!='merged'?`<span class=muted style="font-size:11px;margin-left:8px">本池 $${fnum(acctBurn,3)}/h (${poolName(pv)})</span>`:''}</div>${sstat}
-<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th title="单价 ÷ 算力 × 100: 每 100 TH/s 每小时花费, 按此降序(最贵在上)">$/100TH·h ▼</th><th title="算力 × 网络产率 × 币价 × (1−池费)">产值 $/h</th><th title="利润率 = (产值 − 单价) ÷ 单价, 即距回本线的距离(0% = 回本线); 红 = 亏超自动关停阈值, 黄 = 回本线附近, 绿 = 盈利">利润率</th><th>矿池</th><th></th></tr>${beRow}${rows}</table></div></div>`;}
+<div class=tscroll><table class=rtab><tr>${p=='salad'?'<th>组</th>':''}<th>${p=='salad'?'机器(worker)':'实例'}</th><th>GPU</th><th>单价</th><th>时长</th><th>算力</th><th class=sortth onclick="msort('cost')" title="挖到 1 PRL 的租金成本 = 单价 ÷ 每小时到手产币量; 与币价同单位, 高于币价即亏。点击切换升/降序">PRL 成本价 ${sarrow('cost')}</th><th title="算力 × 网络产率 × 币价 × (1−池费)">产值 $/h</th><th class=sortth onclick="msort('margin')" title="利润率 = (产值 − 单价) ÷ 单价, 即距回本线的距离(0% = 回本线); 红 = 亏超自动关停阈值, 黄 = 回本线附近, 绿 = 盈利。点击切换升/降序">利润率 ${sarrow('margin')}</th><th>矿池</th><th></th></tr>${beRow}${rows}</table></div></div>`;}
 document.getElementById('ov').innerHTML=`
 <div class="card wallet">
 <div style=min-width:0><div class=k>WALLET · 钱包地址</div><div class=addrrow><span class=addr>${esc(d.wallet)}</span><span class=copyi title="复制钱包地址" onclick="copyAddr('${esc(d.wallet)}')"><svg viewBox="0 0 24 24" width=16 height=16 fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round aria-hidden=true><rect x=9 y=9 width=13 height=13 rx=2 ry=2 /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span></div></div>
@@ -3119,7 +3208,7 @@ ${poolLinks}
 <div class=cards>
 <div class=card><div class=k>在跑机器</div><div class=v>${d.running_machines}</div><div class=sub>${pv=='merged'?poolBreak:esc(bp)}</div></div>
 <div class=card><div class=k>总算力 矿池实测</div><div class=v>${fnum(d.total_hashrate_th)} <small>TH/s</small></div></div>
-<div class=card><div class=k>累计租金</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
+<div class=card><div class=k>累计租金${d.rent_has_estimate?' <span class=muted style=font-weight:400 title="Salad portal 余额不可用, 该账号租金按 单价 × 在跑时长 估算">· 含估算</span>':''}</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
 <div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
 <div class=card><div class=k>累计折合利润</div><div class=v style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${proflabel}</div></div>
 </div>

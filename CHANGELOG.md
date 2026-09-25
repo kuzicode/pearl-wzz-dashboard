@@ -14,6 +14,24 @@
 - **`vast.block_countries`**(硬排除,默认空):按国家码尾段匹配(不做子串匹配,"CN" 不会命中 "Cincinnati"),优先级高于 `prefer_countries`,只影响新租,已在跑的机器不受影响。国内宿主系统性拉不动 Docker Hub,租了也不产出。配置页「平台特定参数」可编辑。`tests/test_block_countries.py` 13 条断言。
 - 模板 `config.vast.example.json` 补上 `block_countries: []`(空 = 不排除)与 `max_instances_per_machine: 2`,让新用户看得到这两个开关;`test_example_configs` 加断言防止模板误带排除国家。
 
+## [机器表改「PRL 成本价」列 + Salad 租金漏算修复(ISS-025)] — 2026-09-25
+
+### Changed — 变更
+- **机器表 `$/100TH·h` 列换成「PRL 成本价 $/PRL」**:挖到 1 PRL 花的租金 = 单价 ÷ 每小时到手产币量,与币价同单位,高于币价即亏。后端 `machine_economics` 新增 `cost_usd_per_prl`(恒等 `币价 ÷ (1 + 利润率/100)`),前端不再自行换算。
+- **表头可点击排序**:PRL 成本价与利润率两列均可点,默认成本价降序(最贵在上),状态存 `localStorage.mtab_sort`;无算力的机器(宽限中/未连池)始终排最前。
+- **回本线红行改用币价口径**:显示 `$<币价>/PRL`,文案「成本价高于此值 = 租金超过产值」;单机标红条件同步改为高于币价或高于本账号中位数 15%。
+
+### Fixed — 修复
+- **Salad 租金一直没计入累计(ISS-025)**,线上实测累计租金 $623.11 中 Salad 贡献为 0。三条独立根因:
+  1. `tick_spend` 把 Salad 排除出 `price×time`,只认 portal 余额下降,而余额拿不到时直接 `continue` —— portal 会话 2026-06-18 即过期(`salad_balance_prev` 恒为空字典可证),于是永远不累加。现改为退化按 `price×time` 估算,并用 `salad_estimated_usd` 记账:portal 日后恢复时先从真实扣费里抵扣已估算部分,不会重复计数;`summary.rent_has_estimate` 透出,看板「累计租金」标注「含估算」。
+  2. GPU 型号识别不到 → 单价 `None` → 该机按 $0 计。现 running 但型号未知的机器按**同容器组已知单价的中位数**估算(组内无已知则退账号中位),标 `price_estimated`,单价列显示 `~$x.xxx/h`,型号识别出来后自动换回真实价。
+  3. 容器组白名单 `include_container_groups` 过期(配了已删除的 `kuzi-miner-1`,漏掉新组)→ 整组静默漏算。服务器与模板均改为留空走 API 自动发现;白名单里配了却拉不到详情的组现在会告警一次(复用已有请求,不增加 API 调用)。
+- **非 running 的 Salad 实例不再计费**:`allocating`/`creating`/`downloading` 此前被算进 `burn_hourly` 与当前 $/h(反向高估),现与 `value_usd_h` 统一走 `_is_running`。
+- **优先级档位兜底**:`salad_inst_price_num` 在 `SALAD_GPU_PRICES` 缺该档(如 `batch`)时退到 `low` 档而非返回 `None`,避免整台机器不计费。
+
+### Tests
+- `test_machine_economics` 补 PRL 成本价与恒等式/排序等价断言;`test_salad_rent_balance` 改写(原先把「portal 拿不到 → 不累加」当成期望行为断言,正是本 bug);新增 `test_salad_cost`(档位兜底/中位价/非 running 不计费)。67 → 68 个测试文件全绿。
+
 ## [Vast 单宿主实例上限] — 2026-09-23
 
 ### Added — 新增
