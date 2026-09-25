@@ -66,3 +66,11 @@ s = summary([mach(0.30, 300.0)], [])
 ck("cumulative_output_usd / cumulative_output 都在", "cumulative_output_usd" in s and "cumulative_output" in s)
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")
+
+# ---- 日收益 = 小时利润 × 24(前端展示用, 后端只给小时值) ----
+s = summary([mach(0.30, 300.0)], [])
+ck("日收益 = 小时利润 × 24", abs(s["profit_usd_h"] * 24 - (s["value_usd_h_total"] - s["current_hourly_usd"]) * 24) < 1e-6)
+s_loss = summary([mach(1.50, 300.0)], [])
+ck("亏损时日收益同号为负", s_loss["profit_usd_h"] * 24 < 0)
+if fails: print(f"\n{fails} 失败"); sys.exit(1)
+print("\n全部通过(含日收益)")
