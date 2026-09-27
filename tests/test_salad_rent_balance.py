@@ -75,6 +75,56 @@ ck("轮5 portal 恢复: drop 扣掉已估算部分, 不重复计",
 ck("轮5 估算账清零", abs(s["salad_estimated_usd"]["salad"]) < 1e-12)
 ck("轮5 不再标记估算", s.get("salad_cost_estimated") is False)
 
+# 轮5b: 估算多记 → 真实余额回来按实际下降量回扣(总账 + 当初记入的池), 不能把超额永久留在累计里
+_br0 = D.build_rentals
+D.build_rentals = lambda: {
+    "runpod":  {"machines": [{"price": 0.36, "pool": "twpool"}]},
+    "salad":   {"machines": [{"price": 60.0, "pool": "kryptex"}]},   # $60/h × 60s = $1 估算
+    "salad-2": {"machines": [{"price": 0.10, "pool": "twpool"}]},
+}
+FakeTime.t += 60; BAL = {"salad": None, "salad-2": 5.0}
+s = D.tick_spend()
+ck("轮5b-1 估算 $1 记入 kryptex 池", abs(s["salad_estimated_by_pool"]["salad"]["kryptex"] - 1.0) < 1e-9)
+tot_before, kx_before = s["cumulative_usd"], s["cumulative_usd_by_pool"]["kryptex"]
+# 恢复前矿池归属变了(salad 现在挖 twpool), 回扣仍应落在当初记入的 kryptex 池
+D.build_rentals = lambda: {
+    "runpod":  {"machines": [{"price": 0.36, "pool": "twpool"}]},
+    "salad":   {"machines": [{"price": 0.0, "pool": "twpool"}]},
+    "salad-2": {"machines": [{"price": 0.10, "pool": "twpool"}]},
+}
+FakeTime.t += 60; BAL = {"salad": 18.80, "salad-2": 5.0}   # 19 → 18.80, 实际只花 $0.20
+tw_before = s["cumulative_usd_by_pool"]["twpool"]
+s = D.tick_spend()
+ck("轮5b-2 总账回扣 $0.80(估算 $1, 实际 $0.20)", abs(s["cumulative_usd"] - (tot_before + RUN - 0.80)) < 1e-6)
+ck("轮5b-2 kryptex 池回扣到实际 $0.20", abs(s["cumulative_usd_by_pool"]["kryptex"] - (kx_before - 0.80)) < 1e-6)
+ck("轮5b-2 twpool 池不被误扣", abs(s["cumulative_usd_by_pool"]["twpool"] - (tw_before + RUN)) < 1e-6)
+ck("轮5b-2 已核实 → 不再标记估算", s.get("salad_cost_estimated") is False)
+ck("轮5b-2 分池估算账清掉", "salad" not in s["salad_estimated_by_pool"])
+
+# 轮5c: 估算期间充值(余额上升)→ 实际花费无从核实, 估算保留且持续标注"含估算"
+D.build_rentals = _br0
+FakeTime.t += 60; BAL = {"salad": None, "salad-2": 5.0}
+s = D.tick_spend()
+before5c = s["cumulative_usd"]
+FakeTime.t += 60; BAL = {"salad": 50.0, "salad-2": 5.0}   # 18.80 → 50(充值)
+s = D.tick_spend()
+ck("轮5c 充值无法核实 → 估算原样保留(仅 +runpod)", abs(s["cumulative_usd"] - (before5c + RUN)) < 1e-6)
+ck("轮5c 转入无法核实账", abs(s["salad_unverified_usd"]["salad"] - SAL_EST) < 1e-9)
+ck("轮5c 仍标记含估算", s.get("salad_cost_estimated") is True)
+FakeTime.t += 60; BAL = {"salad": 49.0, "salad-2": 5.0}
+s = D.tick_spend()
+ck("轮5c 之后正常按余额计(drop=1)", abs(s["cumulative_usd"] - (before5c + RUN * 2 + 1.0)) < 1e-6)
+ck("轮5c 之后标记仍在(累计里仍含无法核实的估算)", s.get("salad_cost_estimated") is True)
+
+# 轮5d: 估算不足 → 补差额
+D.build_rentals = _br0
+FakeTime.t += 60; BAL = {"salad": None, "salad-2": 5.0}
+s = D.tick_spend()
+before5d = s["cumulative_usd"]
+FakeTime.t += 60; BAL = {"salad": 48.0, "salad-2": 5.0}   # 49 → 48 实际 $1, 估算只有 SAL_EST
+s = D.tick_spend()
+ck("轮5d 少估补差额 = 实际 − 估算", abs(s["cumulative_usd"] - (before5d + RUN + (1.0 - SAL_EST))) < 1e-6)
+
 # 轮6: 非 running 的实例不计费(salad allocating/downloading)
 _br = D.build_rentals
 D.build_rentals = lambda: {
@@ -100,6 +150,18 @@ FakeTime.t += 60; BAL = {"salad": 7.0, "salad-2": 5.0}
 s = D.tick_spend()
 ck("reset 后首轮记 prev 无 drop", s.get("salad_balance_prev") == {"salad": 7.0, "salad-2": 5.0})
 ck("reset 后首轮 cumulative 仅 runpod price×time(salad 无 drop)", abs(s["cumulative_usd"] - RUN) < 1e-9)
+
+# 首次真实读数之前就在估算(无基准)→ 无从核实, 估算保留并标注
+D.reset_stats()
+FakeTime.t += 60; BAL = {"salad": None, "salad-2": 5.0}
+s = D.tick_spend()
+FakeTime.t += 60; BAL = {"salad": 7.0, "salad-2": 5.0}
+s = D.tick_spend()
+ck("首读前的估算保留在累计里", abs(s["cumulative_usd"] - (RUN * 2 + SAL_EST)) < 1e-6)
+ck("首读前的估算转入无法核实账", abs(s["salad_unverified_usd"]["salad"] - SAL_EST) < 1e-9)
+ck("首读前的估算 → 标记含估算", s.get("salad_cost_estimated") is True)
+D.reset_stats()
+ck("reset 清掉无法核实账", "salad_unverified_usd" not in json.load(open(D.STATS_PATH)))
 
 if fails:
     print(f"\n{fails} 失败"); sys.exit(1)

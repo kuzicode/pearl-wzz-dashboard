@@ -64,6 +64,43 @@ ck("无在跑机器 → None", s["profit_usd_h"] is None)
 # 6) 产出卡片字段仍在(主次行交换只是前端展示)
 s = summary([mach(0.30, 300.0)], [])
 ck("cumulative_output_usd / cumulative_output 都在", "cumulative_output_usd" in s and "cumulative_output" in s)
+ck("无在跑机器原因 = no_machines", summary([], [])["profit_unavailable_reason"] == "no_machines")
+
+# 7) 网络产率缺失 → 无法估算, 不能显示成 −时租 的"确定亏损"
+D.network_yield = lambda: {}
+s = summary([mach(0.30, 300.0) | {"value_usd_h": None, "margin_pct": None}], [])
+ck("缺产率 → profit_usd_h None", s["profit_usd_h"] is None)
+ck("缺产率 → 原因 no_yield", s["profit_unavailable_reason"] == "no_yield")
+ck("缺产率 → 1 台未计入", s["profit_missing_machines"] == 1)
+D.network_yield = lambda: {"prl_per_th_h": 0.0011413, "ts": 9e9}
+
+# 8) 币价缺失 → no_price
+D.coin_price = lambda: 0.0
+s = summary([mach(0.30, 300.0) | {"value_usd_h": None}], [])
+ck("缺币价 → None + no_price", s["profit_usd_h"] is None and s["profit_unavailable_reason"] == "no_price")
+D.coin_price = lambda: 1.20
+
+# 9) 算力未上报(hashrate_th None, 宽限期)→ 全部缺数据时 None + no_hashrate
+s = summary([mach(0.30, None)], [])
+ck("算力未上报 → None + no_hashrate", s["profit_usd_h"] is None and s["profit_unavailable_reason"] == "no_hashrate")
+
+# 10) 部分缺数据: 缺数据机器的产值与租金都剔除, 不拉低估算
+ok = summary([mach(0.30, 300.0)], [])
+mixed = summary([mach(0.30, 300.0), mach(0.50, None)], [])
+ck("部分缺数据: 利润只按有数据的机器", abs(mixed["profit_usd_h"] - ok["profit_usd_h"]) < 1e-9)
+ck("部分缺数据: 计入的时租不含缺数据机器", abs(mixed["profit_hourly_usd"] - 0.30) < 1e-9)
+ck("部分缺数据: 总时租仍含全部机器", abs(mixed["current_hourly_usd"] - 0.80) < 1e-9)
+ck("部分缺数据: 计数 1 台", mixed["profit_missing_machines"] == 1)
+
+# 11) 实测 0 算力是真实亏损: 计 0 产值, 租金照算
+z = summary([mach(0.30, 0.0)], [])
+ck("实测 0 算力 → 亏损 −时租", abs(z["profit_usd_h"] - (-0.30)) < 1e-9)
+ck("实测 0 算力 → 不算缺数据", z["profit_missing_machines"] == 0 and z["profit_unavailable_reason"] is None)
+# 但产率缺失时 0 算力也无从判断产值 → 仍按缺数据处理
+D.network_yield = lambda: {}
+z2 = summary([mach(0.30, 0.0)], [])
+ck("缺产率时 0 算力也不显示亏损", z2["profit_usd_h"] is None and z2["profit_unavailable_reason"] == "no_yield")
+D.network_yield = lambda: {"prl_per_th_h": 0.0011413, "ts": 9e9}
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")
 
