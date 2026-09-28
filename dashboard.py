@@ -23,14 +23,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONTROL_DIR = ROOT / "control"
 STATS_PATH = ROOT / "dashboard-stats.json"
-PLATFORMS = ["vast", "runpod", "tensordock", "salad", "quickpod"]
-PLATFORM_ORDER = ["runpod", "vast", "quickpod", "tensordock", "salad"]  # 看板展示顺序(左栏 / 仪表盘 / 配置总览)
+PLATFORMS = ["vast", "runpod", "tensordock", "salad", "quickpod", "clore"]
+PLATFORM_ORDER = ["runpod", "vast", "clore", "quickpod", "tensordock", "salad"]  # 看板展示顺序(左栏 / 仪表盘 / 配置总览)
 KEYNAME = {
     "vast": "VAST_API_KEY",
     "runpod": "RUNPOD_API_KEY",
     "tensordock": "TENSORDOCK_API_TOKEN",
     "salad": "SALAD_API_KEY",
     "quickpod": "QUICKPOD_API_KEY",
+    "clore": "CLORE_API_KEY",
 }
 # 全局(跨账号批量)配置只保留真正共享、不会冲突的字段: 钱包 + 告警。
 # image / prl_host 是"池身份"(由各账号页「新抢矿池」决定, 镜像随 POOLS[pool] 自动选);
@@ -59,8 +60,12 @@ SPECIFIC = {
     "quickpod": [("template_uuid", "str"), ("max_offer_price_usd", "num"), ("min_offer_price_usd", "num"),
                  ("min_host_reliability_pct", "num"), ("disk_gb", "num"), ("prefer_countries", "list"), ("block_countries", "list"),
                  ("hashrate_grace_seconds", "num"), ("creating_timeout_seconds", "num"), ("low_efficiency_stop_seconds", "num")],
+    "clore": [("order_type", "str"), ("max_offer_price_usd", "num"), ("min_offer_price_usd", "num"), ("min_reliability", "num"),
+              ("min_rating", "num"), ("outbid_step_pct", "num"), ("spot_not_winning_seconds", "num"), ("outbid_cooldown_seconds", "num"),
+              ("prefer_countries", "list"), ("block_countries", "list"), ("block_owners", "list"),
+              ("hashrate_grace_seconds", "num"), ("low_efficiency_stop_seconds", "num")],
 }
-HAS_CREATE = {"runpod", "tensordock", "vast", "quickpod"}
+HAS_CREATE = {"runpod", "tensordock", "vast", "quickpod", "clore"}
 NO_BALANCE_API = {"salad", "tensordock"}  # 无公共余额 API → 看板手填(总览内联编辑); salad 另有 portal 实时余额(salad_portal), 有则优先并隐藏手填
 OFFLINE_POOLS = {"twpool", "herominers", "pearlfortune"}  # 已下线/不可用的矿池: 从看板池列表(按钮/下拉/迁移)隐藏; 只保留 pearlhash
 
@@ -116,6 +121,8 @@ def account_console_url(account_id):
         return "https://dashboard.tensordock.com/my-servers"
     if plat == "quickpod":
         return "https://console.quickpod.io/pods"
+    if plat == "clore":
+        return "https://clore.ai/my-orders"
     if plat == "salad":
         sc = read_config(account_id).get("salad", {}) or {}
         org = sc.get("organization_name")
@@ -863,6 +870,11 @@ def platform_balance(account_id, force=False):
             if k:
                 d = _http_json("GET", "https://api.quickpod.org/auth/me", {"X-API-Key": k, "Authorization": "ApiKey " + k})
                 val = d.get("credit")   # 实时扣费后的余额(实测每分钟递减)
+        elif plat == "clore":
+            k = env.get(kv) or os.environ.get(kv, "")
+            if k:   # Cloudflare 拦默认 Python UA(error 1010), 需带 UA
+                d = _http_json("GET", "https://api.clore.ai/v1/wallets", {"auth": k, "User-Agent": "gpu-sniper/1.0"})
+                val = next((w.get("balance") for w in d.get("wallets") or [] if w.get("name") == "USD-Blockchain"), None)
         if val is not None:
             val = round(float(val), 2)
     except Exception:
@@ -893,6 +905,8 @@ def active_rentals(account_id):
                     "worker": (r.get("last_hashrate_lookup") or {}).get("worker"),
                     "provider": r.get("provider"), "external_id": r.get("external_id"),  # 自动关停拉黑交接用
                     "machine_id": r.get("machine_id"), "image": r.get("image")})
+        if r.get("provider") == "clore" and not r.get("running_since_epoch"):
+            out[-1]["state"] = "queued"   # spot 出价未生效/未开始计费: 不计租金与产值(_is_running)
     return out
 
 
@@ -2449,6 +2463,8 @@ def do_terminate(acct, mid, group=None):
             r = S.delete_tensordock_instance(cfg, mid)
         elif plat == "quickpod":
             r = S.destroy_quickpod_instance(mid)
+        elif plat == "clore":
+            r = S.cancel_clore_order(mid)
         elif plat == "salad":
             r = S.reallocate_salad_instance(cfg, group or "", mid)
         else:
@@ -3682,7 +3698,7 @@ const LINKS=[
 {t:'官网',i:'🌐',items:[['Pearl Research','https://pearlresearch.ai/']]},
 {t:'区块浏览器',i:'🔎',items:[['Explorer','https://explorer.pearlresearch.ai/']]},
 {t:'钱包',i:'👛',items:[['Compute Wallet','https://compute.pearlresearch.ai/wallet']]},
-{t:'租卡平台',i:'🖥️',items:[['RunPod','https://runpod.io?ref=9hx2ahkb'],['Vast.ai','https://cloud.vast.ai/'],['TensorDock','https://dashboard.tensordock.com/'],['Salad','https://portal.salad.com/'],['QuickPod','https://console.quickpod.io/']]},
+{t:'租卡平台',i:'🖥️',items:[['RunPod','https://runpod.io?ref=9hx2ahkb'],['Vast.ai','https://cloud.vast.ai/'],['TensorDock','https://dashboard.tensordock.com/'],['Salad','https://portal.salad.com/'],['QuickPod','https://console.quickpod.io/'],['Clore.ai','https://clore.ai/marketplace']]},
 {t:'矿池',i:'⛏️',items:[['PearlHash','http://pearlhash.xyz'],['AlphaPool','https://pearl.alphapool.tech/'],['Kryptex Pool','https://pool.kryptex.com/prl'],['LuckyPool','https://pearl.luckypool.io/'],['HeroMiners','https://pearl.herominers.com/'],['K1Pool','https://k1pool.com/pool/pearl'],['PearlPool.cloud','https://pearlpool.cloud/'],['f2pool','https://www.f2pool.com/coin/pearl']]},
 {t:'Miner 下载',i:'⚙️',items:[['HydraX · 1% RTX50强','https://hydrax.gg/'],['SRBMiner-MULTI · 3%','https://github.com/doktor83/SRBMiner-Multi/releases'],['lpminer · 0% NV简装','https://github.com/BaikalMine-Pools/pearl-miner/releases'],['BzMiner · 2%','https://github.com/bzminer/bzminer/releases'],['PRL-Today 收益悬浮窗','https://github.com/stlin256/prl-today']]},
 {t:'收益计算器',i:'🧮',items:[['Akakay 计算器','https://pearl.akakay.com/'],['Pearl Dashboard','https://pearl-dashboard-pearl.vercel.app/']]},

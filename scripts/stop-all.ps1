@@ -16,7 +16,7 @@ function Stop-ByPattern([string]$label, [string]$pattern) {
   return $false
 }
 
-foreach ($name in @("vast","runpod","tensordock","salad","quickpod")) {
+foreach ($name in @("vast","runpod","tensordock","salad","quickpod","clore")) {
   if (Stop-ByPattern $name "config.$name.json") { $stopped = 1 }
 }
 if (Stop-ByPattern "dashboard" "dashboard.py") { $stopped = 1 }

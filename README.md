@@ -1,6 +1,6 @@
 # 今晚挖珍珠 · Pearl Sniper Dashboard
 
-在 **RunPod / Vast.ai / TensorDock / Salad** 上自动扫描 GPU 报价,低于你设的出价就租下、跑矿机挖 **$pearl**,持续按矿池实测算力和实时币价算每台机器**赚不赚**,不挖 / 亏钱的机器自动销毁换机——全程用一个**网页看板**查看与操作。core 纯 Python 标准库,零依赖;多账号;密码门。
+在 **RunPod / Vast.ai / TensorDock / Salad / QuickPod / Clore.ai** 上自动扫描 GPU 报价,低于你设的出价就租下、跑矿机挖 **$pearl**,持续按矿池实测算力和实时币价算每台机器**赚不赚**,不挖 / 亏钱的机器自动销毁换机——全程用一个**网页看板**查看与操作。core 纯 Python 标准库,零依赖;多账号;密码门。
 
 > ⚠️ 会真实花钱。模板默认 **不租机**(`enabled=false`、`create_enabled=false`,1 台 / $1/h 护栏)。建议先只开「启用」不开「自动建机」看一阵日志(只观察不下单),再小额实跑。
 
@@ -73,6 +73,8 @@ bash scripts/stop-all.sh         #          scripts\stop-all.ps1
 - `.env` 里启用平台的 API key;`DASHBOARD_PASSWORD` 默认 `123456`,公网务必改。
 - Salad:需在其后台预建 container group(镜像推荐 `kuzigmgm/pearl-miner:srb-3.6.9-r3`(Kryptex);PearlHash 用 `v13-wildrig`;env **必须填 `PRL_ADDRESS`**,建议 2 vCPU + 2 GB)+ `SALAD_API_KEY`;台数由 replica 决定,不计入上面两项护栏。
 - TensorDock:需 SSH 密钥对 `ssh-keygen -t ed25519 -f keys/tensordock -N ""`。
+- QuickPod:API key 一般没有建模板的权限,需先在 console 手工建一个私有模板(镜像填 `docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3`),把模板 uuid 写进 `quickpod.template_uuid`。
+- Clore.ai:只能用加密货币充值(USDT/USDC 请走 **ERC-20 或 BEP-20**,其他链转错找不回,最低 $10)。默认用 **spot 竞价**下单,按分钟计费,被更高出价顶掉即停止计费;没有日志 API,算力只看矿池。`clore.block_owners` 可按宿主主人整批排除有问题的机器。
 
 ---
 

@@ -7,7 +7,7 @@ fails=0
 def ck(n,c):
     global fails; print(("  ✓ " if c else "  ✗ ")+n); fails+=0 if c else 1
 cfgs={os.path.basename(f):json.load(open(f,encoding="utf-8")) for f in glob.glob(os.path.join(ROOT,"configs","config.*.example.json"))}
-ck("五个模板都能解析", len(cfgs)==5)
+ck("六个模板都能解析", len(cfgs)==6)
 for name,c in cfgs.items():
     plat=name.split(".")[1]
     sub=c.get(plat,{})
@@ -22,8 +22,8 @@ sd=cfgs["config.salad.example.json"]["salad"]
 ck("salad: include_container_groups 默认空(走 API 自动发现, 避免白名单过期静默漏算整组)", sd.get("include_container_groups")==[])
 t=cfgs["config.tensordock.example.json"]
 ck("tensordock: 轮询 ≥30s, 无死键, storage 30", t["provider_intervals_seconds"]["tensordock"]>=30 and not any(k in t["tensordock"] for k in ("seen_ttl_seconds","max_instance_age_starting_seconds","city")) and t["tensordock"]["storage_gb"]==30)
-ck("RTX 短名与 NVIDIA GeForce 长名成对出现", all(("NVIDIA GeForce "+k) in x["thresholds"] for x in (r,v,t["tensordock"],cfgs["config.quickpod.example.json"]["quickpod"]) for k in x["thresholds"] if k.startswith("RTX ")))
-ck("runpod/vast/salad 模板 image 为 SRBMiner 镜像且 miner=srbminer", all(cfgs[f"config.{p}.example.json"]["image"].endswith("pearl-miner:srb-3.6.9-r3") and cfgs[f"config.{p}.example.json"].get("miner")=="srbminer" for p in ("runpod","vast","salad","quickpod")))
+ck("RTX 短名与 NVIDIA GeForce 长名成对出现", all(("NVIDIA GeForce "+k) in x["thresholds"] for x in (r,v,t["tensordock"],cfgs["config.quickpod.example.json"]["quickpod"],cfgs["config.clore.example.json"]["clore"]) for k in x["thresholds"] if k.startswith("RTX ")))
+ck("runpod/vast/salad 模板 image 为 SRBMiner 镜像且 miner=srbminer", all(cfgs[f"config.{p}.example.json"]["image"].endswith("pearl-miner:srb-3.6.9-r3") and cfgs[f"config.{p}.example.json"].get("miner")=="srbminer" for p in ("runpod","vast","salad","quickpod","clore")))
 ck("runpod/vast/salad 模板默认 Kryptex 池 + TLS 入口; tensordock 仍 pearlhash(仅支持该池)", all(cfgs[f"config.{p}.example.json"]["pool"]=="kryptex" and cfgs[f"config.{p}.example.json"]["prl_host"].startswith("stratum+ssl://prl.kryptex.network") for p in ("runpod","vast","salad")) and cfgs["config.tensordock.example.json"]["pool"]=="pearlhash")
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")

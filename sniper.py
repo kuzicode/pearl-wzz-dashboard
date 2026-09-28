@@ -859,7 +859,7 @@ POOLS = {
     "pearlhash": {"label": "PearlHash",
                   "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
                   "reads_prl_host": True,
-                  "platforms": ["vast", "runpod", "tensordock", "salad", "quickpod"], "requires": {},
+                  "platforms": ["vast", "runpod", "tensordock", "salad", "quickpod", "clore"], "requires": {},
                   "note": "WildRig(OpenCL), 对宿主驱动容错好; 池 0% 抽水; API 给实时算力"},
     "twpool":    {"label": "TW Pool (小幣礦池)",
                   "image": "docker.io/mrkidbk/pearl-miner-twpool:v1.9.1",
@@ -873,7 +873,7 @@ POOLS = {
     "kryptex":   {"label": "Kryptex",
                   "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
                   "reads_prl_host": True,
-                  "platforms": ["vast", "salad", "runpod", "quickpod"],
+                  "platforms": ["vast", "salad", "runpod", "quickpod", "clore"],
                   "requires": {"min_reliability": 0.98, "grace_seconds_min": 1800},   # 池级要求; 矿机相关(min_cuda)在 miners[*].requires
                   # 同一池可选矿机变体(账号 config 顶层 "miner"), 记账/基线仍按 kryptex 一个池; 变体 requires 与池级合并
                   "miners": {
@@ -3339,6 +3339,395 @@ def run_quickpod_cycle(config, state, live):
     try_quickpod_create(config, state, live)
 
 
+# ---------- Clore.ai ----------
+# API base api.clore.ai/v1, 头 `auth: <key>`; 所有端点(含公开 marketplace)统一 1 req/s, 超限 HTTP 429 {"code":5}(未执行, 可安全重试)。
+# Cloudflare 拦 Python 默认 UA(403 error 1010), request_json 默认带 gpu-sniper/1.0 可过。
+# 价格口径: marketplace 的 price.{on_demand,spot}[currency] 是整机每天(宿主底价, 不含费); 租方另付 base fee 一半(spot 1.25% / 按需 5%)。
+# 默认 spot: 按分钟计费, 被更高出价或按需订单顶掉即结束且停止计费(my_orders 里消失)。create_order 只回 {code:0}, 订单 id 靠 my_orders 按 si 回查。
+# 无日志 API → 算力只走矿池 worker(Kryptex 宽限 ≥1800s)。
+CLORE_API = "https://api.clore.ai/v1"
+CLORE_RENTER_FEE = {"spot": 0.0125, "on-demand": 0.05}
+_clore_last_call = [0.0]
+
+
+def clore_key():
+    return os.environ.get("CLORE_API_KEY") or ""
+
+
+def clore_request(method, path, body=None, auth=True, timeout=40):
+    """带 1 req/s 节流 + 429 重试的请求; code!=0 抛 RuntimeError(含 error 字段, 如 too_low_price 的 min_price)。"""
+    headers = {}
+    if auth:
+        if not clore_key():
+            raise RuntimeError("CLORE_API_KEY is not set")
+        headers["auth"] = clore_key()
+    for attempt in range(4):
+        wait = _clore_last_call[0] + 1.1 - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _clore_last_call[0] = time.time()
+        try:
+            data = request_json(method, CLORE_API + path, headers, body, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < 3:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+        if isinstance(data, dict) and data.get("code") == 5 and attempt < 3:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        if not isinstance(data, dict) or data.get("code") not in (0, None):
+            err = RuntimeError(f"clore {path} code={data.get('code') if isinstance(data, dict) else '?'} "
+                               f"error={(data or {}).get('error') if isinstance(data, dict) else data}")
+            err.payload = data
+            raise err
+        return data
+    raise RuntimeError(f"clore {path}: rate limited")
+
+
+def clore_image(image):
+    """Clore 要 Docker Hub 短名(文档示例均无 registry 前缀); 带 docker.io/ 实测订单卡 Deploying 20+ 分钟后被暂停。"""
+    image = str(image or "")
+    return image[len("docker.io/"):] if image.startswith("docker.io/") else image
+
+
+def clore_offer_view(server):
+    net = (server.get("specs") or {}).get("net") or {}
+    return {"id": server.get("id"), "machine_id": server.get("id"), "geolocation": str(net.get("cc") or "")}
+
+
+def clore_hourly(day_price, n_gpus, order_type):
+    """整机每天出价 → 含租方费的整机每小时价。"""
+    return float(day_price) / 24.0 * (1 + CLORE_RENTER_FEE.get(order_type, 0.0125))
+
+
+def find_clore_offers(config, state):
+    if not clore_key():
+        log("Clore skipped: CLORE_API_KEY is not set")
+        return []
+    cfg = config["clore"]
+    order_type = cfg.get("order_type", "spot")
+    currency = cfg.get("currency", "USD-Blockchain")
+    req = pool_requires(active_pool(config), config)
+    min_rel = max(float(cfg.get("min_reliability", 0.95)), float(req.get("min_reliability", 0)))
+    thresholds = cfg.get("thresholds", {})
+    wanted = set(normalize_gpu(x) for x in thresholds.keys())
+    servers = (clore_request("GET", "/marketplace", auth=False, timeout=60) or {}).get("servers") or []
+    matches = []
+    for s in servers:
+        if s.get("rented"):
+            continue   # 被占的多为按需订单, spot 顶不掉(实测 60 台候选 0 台可顶); 空闲机才出价
+        gpus = s.get("gpu_array") or []
+        if not gpus or len(set(gpus)) != 1:
+            continue
+        gpu = gpus[0]
+        if normalize_gpu(gpu) not in wanted:
+            continue
+        n = len(gpus)
+        if n > int(cfg.get("max_gpus_per_instance", 1)):
+            continue
+        if currency not in (s.get("allowed_coins") or []):
+            continue
+        view = clore_offer_view(s)
+        if is_blacklisted(state, "clore", view):
+            continue
+        if str(s.get("owner")) in {str(o) for o in cfg.get("block_owners") or []}:
+            continue   # 按宿主主人整批排除(同一主人名下的机器常共用有问题的物理机/网络, 如 owner 570)
+        if float(s.get("reliability") or 0) < min_rel:
+            continue
+        rating = s.get("rating") or {}
+        if int(rating.get("cnt") or 0) >= int(cfg.get("min_rating_count", 5)) and \
+                float(rating.get("avg") or 0) < float(cfg.get("min_rating", 3.5)):
+            continue
+        key = "spot" if order_type == "spot" else "on_demand"
+        day = ((s.get("price") or {}).get(key) or {}).get(currency)
+        if not day:
+            continue
+        price = clore_hourly(day, n, order_type)
+        max_price = threshold_for(gpu, thresholds)
+        if max_price is None or price / n > max_price or price / n < float(cfg.get("min_offer_price_usd", 0)):
+            continue
+        if price > float(cfg.get("max_offer_price_usd", 1.0)):
+            continue
+        if req.get("min_cuda"):
+            cuda = re.search(r"[0-9]+(?:\.[0-9]+)?", str(s.get("cuda_version") or ""))
+            if not cuda or float(cuda.group(0)) < float(req["min_cuda"]):
+                continue
+        if not is_preferred_location(view, cfg):
+            continue
+        matches.append({"provider": "clore", "id": s["id"], "gpu": gpu, "gpus": n, "price": price, "day_price": float(day), "owner": s.get("owner"),
+                        "location": view["geolocation"], "machine_id": str(s["id"]), "raw": view})
+    return sorted(matches, key=lambda x: x["price"] / x["gpus"])
+
+
+def clore_spot_top_bid(server_id):
+    """该机 spot 队列里「别人」正在生效的最高出价(USD/天, 按接口给的汇率折算); 无则 None。
+    marketplace 的 rented 不反映 spot 占用(实测有人 $2.75/天占着仍显示空闲), 按底价出价只会排队不生效。"""
+    m = (clore_request("GET", f"/spot_marketplace?market={int(server_id)}") or {}).get("market") or {}
+    rates = m.get("currency_rates_in_usd") or {}
+    bids = [float(o.get("bid") or 0) * float(rates.get(o.get("currency"), 1 if o.get("currency") == "USD-Blockchain" else 0))
+            for o in m.get("offers") or [] if o.get("active") and not o.get("my")]
+    return max(bids) if bids else None
+
+
+def list_clore_orders():
+    return (clore_request("GET", "/my_orders") or {}).get("orders") or []
+
+
+def cancel_clore_order(order_id):
+    return clore_request("POST", "/cancel_order", {"id": int(order_id)})
+
+
+def _clore_find_order(server_id, since_epoch):
+    """create_order 不返回 id: 在 my_orders 里找该 server 上、创建于下单之后的未过期订单。"""
+    best = None
+    for o in list_clore_orders():
+        if str(o.get("si")) != str(server_id) or o.get("expired"):
+            continue
+        if float(o.get("ct") or 0) < since_epoch - 120:
+            continue
+        if best is None or float(o.get("ct") or 0) > float(best.get("ct") or 0):
+            best = o
+    return best
+
+
+def rent_clore(config, match, state, live):
+    server_id = match["id"]
+    cfg = config["clore"]
+    order_type = cfg.get("order_type", "spot")
+    if renting_paused("clore") or already_seen(state, "clore", server_id):
+        return False
+    if active_count(state) >= int(config.get("max_active_instances", 1)):
+        log(f"Clore hit but max_active_instances reached: {match['gpu']} ${match['price']:.3f}/h server={server_id}")
+        return False
+    if active_hourly(state) + float(match["price"]) > float(config.get("max_total_hourly_usd", 0)):
+        log(f"Clore hit but max_total_hourly_usd reached: {match['gpu']} ${match['price']:.3f}/h server={server_id}")
+        return False
+    if order_type == "spot":
+        try:
+            top = clore_spot_top_bid(server_id)
+        except Exception as exc:
+            log(f"Clore spot queue check failed: server={server_id} {type(exc).__name__}: {exc}")
+            return False
+        if top is not None:   # 有人占着: 出价须高于对方, 仍在阈值内才抢, 否则冷却
+            need = max(match["day_price"], round(top * (1 + float(cfg.get("outbid_step_pct", 3)) / 100.0) + 0.01, 4))
+            per_card = clore_hourly(need, match["gpus"], order_type) / match["gpus"]
+            if per_card > (threshold_for(match["gpu"], cfg.get("thresholds", {})) or 0):
+                log(f"Clore skip (spot held by others at ${top:.2f}/day, need ${per_card:.3f}/h/gpu > threshold): server={server_id} {match['gpu']}")
+                blacklist_offer(state, "clore", server_id, "spot_held", {"top_bid_usd_day": round(top, 4)},
+                                expires_epoch=epoch_now() + int(cfg.get("outbid_cooldown_seconds", 3600)))
+                return False
+            match = dict(match, day_price=need, price=clore_hourly(need, match["gpus"], order_type))
+    log(f"Clore hit: {match['gpu']} x{match['gpus']} ${match['price']:.3f}/h ({order_type} ${match['day_price']}/day) {match['location']} server={server_id}")
+    if not live:
+        log("Dry run: not renting Clore server")
+        return False
+    mark_seen(state, "clore", server_id, {"gpu": match["gpu"], "price": match["price"]})
+    old_price = cfg.get("_current_price")
+    cfg["_current_price"] = match["price"]
+    env = make_env(config, "clore", match["gpu"], server_id)
+    if old_price is None:
+        cfg.pop("_current_price", None)
+    else:
+        cfg["_current_price"] = old_price
+    body = {"currency": cfg.get("currency", "USD-Blockchain"), "image": clore_image(effective_image(config)),
+            "renting_server": int(server_id), "type": order_type,
+            "env": {k: str(v) for k, v in env.items() if str(v) != ""}}
+    day = float(match["day_price"])
+    if order_type == "spot":
+        day = round(day * (1 + float(cfg.get("spot_bid_premium_pct", 0)) / 100.0), 6)
+        body["spotprice"] = day
+    else:
+        body["required_price"] = day   # 宿主临时改价则不启动
+    t0 = epoch_now()
+    try:
+        clore_request("POST", "/create_order", body, timeout=60)
+    except Exception as exc:
+        payload = getattr(exc, "payload", None) or {}
+        min_price = payload.get("min_price") if isinstance(payload, dict) else None
+        # 底价随币价约每 10 分钟重算: 返回的 min_price 仍在阈值内就重出一次价
+        if order_type == "spot" and min_price and payload.get("error") == "too_low_price" and \
+                clore_hourly(min_price, match["gpus"], order_type) / match["gpus"] <= (threshold_for(match["gpu"], cfg.get("thresholds", {})) or 0):
+            day = float(min_price)
+            body["spotprice"] = day
+            try:
+                clore_request("POST", "/create_order", body, timeout=60)
+                exc = None
+            except Exception as exc2:
+                exc = exc2
+        if exc is not None:
+            log(f"Clore rent failed: server={server_id} {type(exc).__name__}: {exc}")
+            blacklist_offer(state, "clore", server_id, "create_failed", {"gpu": match["gpu"], "price": match["price"]},
+                            expires_epoch=epoch_now() + 3600)
+            return False
+    price = clore_hourly(day, match["gpus"], order_type)
+    order = None
+    try:
+        order = _clore_find_order(server_id, t0)
+    except Exception as exc:
+        log(f"Clore order lookup failed (reconcile will retry): server={server_id} {type(exc).__name__}: {exc}")
+    record_rent(state, "clore", server_id, match["gpu"], price, {"id": order.get("id")} if order else {})
+    rented = state["rented"][-1]
+    rented["env"] = {k: str(v) for k, v in env.items()}
+    rented["image"] = effective_image(config)
+    rented["machine_id"] = str(server_id)
+    rented["order_type"] = order_type
+    rented["owner"] = match.get("owner")
+    rented["day_price"] = day
+    log(f"Clore rent result: server={server_id} order={rented.get('contract_id')} worker={env['PRL_WORKER']} ${price:.3f}/h")
+    notify(config, "Clore GPU rented", f"{match['gpu']} x{match['gpus']} ${price:.3f}/h {match['location']} server={server_id}",
+           priority="high", tags=["white_check_mark", "clore"])
+    return True
+
+
+def _clore_cancel(config, rented, reason):
+    """取消并仅在 API 成功后释放; 失败挂 pending_destroy 下轮重试(同 QuickPod)。"""
+    order_id = rented.get("contract_id")
+    try:
+        result = cancel_clore_order(order_id)
+    except Exception as exc:
+        pend = rented.setdefault("pending_destroy", {"reason": reason, "since_epoch": epoch_now(), "attempts": 0})
+        pend["attempts"] = int(pend.get("attempts", 0)) + 1
+        pend["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        rented["active"] = True
+        log(f"Clore cancel failed (attempt {pend['attempts']}, will retry): order={order_id} reason={reason} error={pend['last_error']}")
+        return False
+    rented.pop("pending_destroy", None)
+    rented["active"] = False
+    rented["inactive_reason"] = reason
+    log(f"Clore cancelled: order={order_id} server={rented.get('machine_id')} gpu={rented.get('gpu')} reason={reason} result={result}")
+    notify(config, "Clore GPU stopped", f"{rented.get('gpu')} order={order_id} {reason}", priority="high", tags=["warning", "clore"])
+    return True
+
+
+def reconcile_clore_instances(config, state):
+    cfg = config.get("clore", {})
+    orders = list_clore_orders()
+    live_orders = {str(o.get("id")): o for o in orders if not o.get("expired")}
+    for rented in state.get("rented", []):
+        if rented.get("provider") != "clore" or not rented.get("active", True):
+            continue
+        server_id = str(rented.get("machine_id") or rented.get("external_id") or "")
+        if not rented.get("contract_id"):   # 下单后没查到 id: 按 server 补
+            o = next((o for o in live_orders.values() if str(o.get("si")) == server_id
+                      and float(o.get("ct") or 0) >= float(rented.get("created_epoch") or 0) - 120), None)
+            if o:
+                rented["contract_id"] = str(o.get("id"))
+            elif epoch_now() - float(rented.get("created_epoch") or 0) > 300:
+                rented["active"] = False
+                rented["inactive_reason"] = "order_not_found"
+                log(f"Clore order never appeared: server={server_id} gpu={rented.get('gpu')}")
+                continue
+            else:
+                continue
+        order_id = str(rented["contract_id"])
+        order = live_orders.get(order_id)
+        pending = rented.get("pending_destroy")
+        if not order:
+            rented["active"] = False
+            rented["inactive_reason"] = (pending or {}).get("reason") or "order_ended"   # 被顶掉 / 到期 / 宿主下线
+            rented.pop("pending_destroy", None)
+            if not pending and rented.get("order_type", "spot") == "spot":
+                # 多半被更高出价或按需订单顶掉: 冷却一段时间, 别马上又出同价
+                blacklist_offer(state, "clore", rented.get("external_id"), "outbid_or_ended",
+                                expires_epoch=epoch_now() + int(cfg.get("outbid_cooldown_seconds", 3600)))
+            log(f"Clore order gone: order={order_id} server={server_id} gpu={rented.get('gpu')} reason={rented['inactive_reason']}")
+            continue
+        if pending:
+            _clore_cancel(config, rented, pending.get("reason") or "pending_destroy")
+            continue
+        if order.get("price"):   # 订单价(每天, 出价)→ 含费每小时
+            rented["price"] = round(clore_hourly(order["price"], 1, "spot" if order.get("spot") else "on-demand"), 5)
+        # spot 出价没生效(排在别人后面)时 my_orders 照样列出, 但 spend 不涨 → 以 spend 增长判定「在跑」
+        now_ts = epoch_now()
+        spend = float(order.get("spend") or 0)
+        prev = rented.get("spend_usd")
+        if prev is None:
+            rented["spend_changed_epoch"] = float(rented.get("created_epoch") or now_ts)
+        elif spend > float(prev):
+            rented["spend_changed_epoch"] = now_ts
+        rented["spend_usd"] = spend
+        stalled = now_ts - float(rented["spend_changed_epoch"])
+        if order.get("spot") and stalled >= int(cfg.get("spot_not_winning_seconds", 600)):
+            if _clore_cancel(config, rented, f"spot_not_winning:{int(stalled)}s"):
+                blacklist_offer(state, "clore", rented.get("external_id"), "spot_not_winning",
+                                expires_epoch=epoch_now() + int(cfg.get("outbid_cooldown_seconds", 3600)))
+            continue
+        if spend <= 0:
+            continue   # 还没开始计费(出价未生效/刚下单), 不做算力判断
+        rented.setdefault("running_since_epoch", now_ts)
+        # mon_container: 0=容器未部署起来(UI 显示 Deploying) / 2=运行中(实测); 计费后长时间不到 2 → 部署失败, 撤单拉黑
+        mon = order.get("mon_container")
+        rented["last_mon_container"] = mon
+        if mon is not None and int(mon) != 2:
+            deploying = now_ts - float(rented["running_since_epoch"])
+            if deploying >= int(cfg.get("creating_timeout_seconds", 900)):
+                blacklist_machine(state, "clore", rented.get("machine_id"), f"deploy_timeout:{int(deploying)}s", {"order": order_id})
+                blacklist_offer(state, "clore", rented.get("external_id"), "deploy_timeout")
+                _clore_cancel(config, rented, f"deploy_timeout:mon={mon}:{int(deploying)}s")
+            continue
+        if not cfg.get("hashrate_watch_enabled", True):
+            continue
+        now_ts = epoch_now()
+        interval = int(cfg.get("hashrate_watch_interval_seconds", 60))
+        if now_ts - float(rented.get("hashrate_last_check_epoch") or 0) < interval:
+            continue
+        rented["hashrate_last_check_epoch"] = now_ts
+        age = now_ts - float(rented.get("running_since_epoch") or now_ts)   # 从开始计费算, 排队时间不计
+        in_grace = age < effective_grace(cfg, rental_pool(rented), 1800)
+        worker = (rented.get("env") or {}).get("PRL_WORKER") or make_worker(config, "clore", rented.get("gpu"), rented.get("external_id"))
+        try:
+            merged, pool_ok = merged_worker_hashrates_ex(config, state)
+        except Exception as exc:
+            log(f"Clore pool worker check failed: order={order_id} worker={worker} {type(exc).__name__}: {exc}")
+            merged, pool_ok = {}, False
+        info = lookup_worker(merged, worker)
+        rented["last_hashrate_lookup"] = {"worker": worker, "found": bool(info)}
+        hashrate_th = resolve_hashrate_from_pool(info, pool_ok, bool(cfg.get("missing_worker_as_zero", True)))
+        if hashrate_th is None:
+            continue
+        if in_grace:
+            if hashrate_th > 0:
+                rented["last_hashrate_th"] = round(hashrate_th, 3)
+            continue
+        cancelled = {}
+        def stop(_oid):
+            result = cancel_clore_order(order_id)   # 异常由 apply_low_efficiency_policy 捕获 → cancelled 为空
+            cancelled["ok"] = True
+            return result
+        if apply_low_efficiency_policy(config, state, "clore", rented, hashrate_th, float(rented.get("price") or 0),
+                                       order_id, stop, {"server": server_id}):
+            reason = rented.get("inactive_reason") or "low_efficiency"
+            blacklist_machine(state, "clore", rented.get("machine_id"), reason, {"order": order_id, "gpu": rented.get("gpu")})
+            if not cancelled.get("ok"):
+                rented["active"] = True
+                rented.pop("inactive_reason", None)
+                rented["pending_destroy"] = {"reason": reason, "since_epoch": epoch_now(), "attempts": 1}
+
+
+def try_clore_create(config, state, live):
+    cfg = config.get("clore", {})
+    if not cfg.get("enabled", False):
+        return
+    if live:   # 监控/回收始终跑, 不受暂停租用 / create_enabled 影响
+        try:
+            reconcile_clore_instances(config, state)
+        except Exception as exc:
+            log(f"Clore reconcile error: {type(exc).__name__}: {exc}")
+    if renting_paused("clore") or not cfg.get("create_enabled", False):
+        return
+    if not pool_supports(active_pool(config), "clore") and not cfg.get("allow_unsupported_pool", False):
+        _unsupported_pool_log("clore", active_pool(config))
+        return
+    for match in find_clore_offers(config, state):
+        if rent_clore(config, match, state, live):
+            break
+
+
+def run_clore_cycle(config, state, live):
+    try_clore_create(config, state, live)
+
+
 def salad_headers():
     api_key = os.environ.get("SALAD_API_KEY")
     if not api_key:
@@ -3875,10 +4264,11 @@ def run_once(config, state, live):
     run_tensordock_cycle(config, state, live)
     run_salad_cycle(config, state, live)
     run_quickpod_cycle(config, state, live)
+    run_clore_cycle(config, state, live)
 
 
 def provider_intervals(config):
-    defaults = {"vast": 2, "runpod": 10, "tensordock": 5, "salad": 30, "quickpod": 10}
+    defaults = {"vast": 2, "runpod": 10, "tensordock": 5, "salad": 30, "quickpod": 10, "clore": 30}
     configured = config.get("provider_intervals_seconds", {})
     return {name: int(configured.get(name, defaults[name])) for name in defaults}
 
@@ -3891,6 +4281,7 @@ def run_provider_loop(config, state, live):
         "tensordock": run_tensordock_cycle,
         "salad": run_salad_cycle,
         "quickpod": run_quickpod_cycle,
+        "clore": run_clore_cycle,
     }
     next_run = {name: 0.0 for name in providers}
     futures = {}
@@ -3974,7 +4365,7 @@ def main():
         raise SystemExit(2)
     # 本 config 启用的平台, 其 API key 仍是模板占位符 → 退出(留空会被 start-all 跳过, 填了占位符则会一直 401)。
     # 只查启用的平台: 旧 .env 里未使用平台残留的占位串不应影响正常账号。
-    key_vars = {"vast": "VAST_API_KEY", "runpod": "RUNPOD_API_KEY", "tensordock": "TENSORDOCK_API_TOKEN", "salad": "SALAD_API_KEY", "quickpod": "QUICKPOD_API_KEY"}
+    key_vars = {"vast": "VAST_API_KEY", "runpod": "RUNPOD_API_KEY", "tensordock": "TENSORDOCK_API_TOKEN", "salad": "SALAD_API_KEY", "quickpod": "QUICKPOD_API_KEY", "clore": "CLORE_API_KEY"}
     for plat, var in key_vars.items():
         if not (config.get(plat) or {}).get("enabled", False):
             continue
@@ -3995,7 +4386,7 @@ def main():
         log(f"Reset low-efficiency timers for {reset_n} active rental(s) on startup (fresh observation window)")
     if not args.once:
         intervals = provider_intervals(config)
-        log(f"Concurrent provider scanner enabled: vast={intervals['vast']}s tensordock={intervals['tensordock']}s runpod={intervals['runpod']}s quickpod={intervals['quickpod']}s")
+        log(f"Concurrent provider scanner enabled: vast={intervals['vast']}s tensordock={intervals['tensordock']}s runpod={intervals['runpod']}s quickpod={intervals['quickpod']}s clore={intervals['clore']}s")
         run_provider_loop(config, state, args.live)
         return
     while True:

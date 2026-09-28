@@ -34,7 +34,7 @@ function Start-Sniper([string]$name) {
 }
 
 Write-Host "启动平台 sniper(live 抢卡):"
-foreach ($p in @("vast","runpod","tensordock","quickpod")) { Start-Sniper $p }
+foreach ($p in @("vast","runpod","tensordock","quickpod","clore")) { Start-Sniper $p }
 
 # Salad 仅在 config.salad.json 的 salad.enabled=true 时启动
 $saladOn = $false

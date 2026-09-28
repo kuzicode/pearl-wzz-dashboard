@@ -2,6 +2,21 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [新平台 Clore.ai(spot 竞价 + Kryptex/SRBMiner)] — 2026-09-28
+
+### Added — 新增
+- **Clore.ai 平台**(`configs/config.clore.json`,key `CLORE_API_KEY`,余额用 USDT/USDC 充值,走 ERC-20 或 BEP-20):扫描 `/marketplace` → 只看空闲、单一型号、单卡、可靠性 ≥ 0.98、评分达标、支持 USD 付款的机器 → 按 **spot 竞价**下单(按分钟计费,租方手续费 1.25%)→ 从矿池查算力监控 → 低效、部署失败、出价未生效或被顶掉时撤单,并拉黑或冷却该机器。
+  - 价格口径:marketplace 给的是整机每天的底价(不含费),单卡时价 = 日价 ÷ 24 × 1.0125 ÷ 卡数,与 `thresholds` 比较。
+  - **下单前查出价队列**(`spot_marketplace`):marketplace 的 `rented` 不反映 spot 占用。有人占着就按「对方出价 × (1 + `outbid_step_pct`) + $0.01」加价,加价后超过阈值就放弃并冷却 `outbid_cooldown_seconds`(默认 3600s)。底价随币价每 10 分钟重算,下单返回 `too_low_price` 时,若返回的 `min_price` 仍在阈值内就重出一次。
+  - `create_order` 只返回 `{code:0}`,订单 id 通过 `my_orders` 按 server id 回查。
+  - 对账:spend 连续 `spot_not_winning_seconds`(600s)不涨,说明出价没有生效或订单被暂停 → 撤单;`mon_container≠2`(容器没部署起来)超过 `creating_timeout_seconds`(900s)→ 撤单并拉黑宿主;订单从 `my_orders` 消失(被顶掉或到期)→ 标记失效并冷却;撤单失败挂 `pending_destroy`,下一轮重试。
+  - 请求层:所有端点统一 1 次/秒节流,HTTP 429 自动重试;必须带 UA(Python 默认 UA 会被 Cloudflare 拦,返回 403 error 1010);镜像名去掉 `docker.io/` 前缀(带前缀会一直卡在 Deploying,见 ISS-028)。
+  - `block_owners`:按宿主主人整批排除(实测某个主人名下的两台 4090 都是起容器约 4 分钟后停掉并被暂停,同一镜像换到别的宿主正常)。
+  - 没有日志 API,算力只能从矿池 worker 查,宽限期按 Kryptex 要求至少 1800s,从开始计费时起算。
+  - 看板:账号卡片、实时余额(`/wallets` 的 USD 余额)、关闭按钮(撤单)、控制台链接;还在排队、未开始计费的 spot 出价不计入租金和产值。
+  - 脚本:`run-clore.{sh,ps1}`,`start-all` / `stop-all` 平台列表加入 clore;`.env.example` 加 `CLORE_API_KEY`。`tests/test_clore.py` 共 23 条断言。
+- 实测(2026-09-28):美国 RTX 4090 按 spot 底价 $2.4/天(约 $0.10/h,回本线约 $0.24/h)下单,约 1 分钟 worker 在 Kryptex 上线;撤单后订单即刻消失。
+
 ## [看板访客模式开关] — 2026-09-28
 
 ### Added — 新增
