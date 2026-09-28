@@ -12,6 +12,7 @@ std_var_for() {  # 平台 → sniper 期望的标准 key 环境变量名
     runpod) echo RUNPOD_API_KEY;;
     tensordock) echo TENSORDOCK_API_TOKEN;;
     salad) echo SALAD_API_KEY;;
+    quickpod) echo QUICKPOD_API_KEY;;
     *) echo "";;
   esac
 }

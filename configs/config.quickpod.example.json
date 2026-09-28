@@ -1,0 +1,73 @@
+{
+  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3",
+  "max_active_instances": 1,
+  "max_total_hourly_usd": 1.0,
+  "poll_seconds": 10,
+  "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
+  "prl_host": "stratum+ssl://prl.kryptex.network:8048",
+  "pool": "kryptex",
+  "miner": "srbminer",
+  "monitor_pools": [
+    "kryptex"
+  ],
+  "provider_intervals_seconds": {
+    "quickpod": 15
+  },
+  "worker_prefix": "auto",
+  "alert_url": "",
+  "quickpod": {
+    "enabled": false,
+    "create_enabled": false,
+    "template_uuid": "",
+    "disk_gb": 20,
+    "max_gpus_per_instance": 1,
+    "min_offer_price_usd": 0.03,
+    "max_offer_price_usd": 0.4,
+    "min_host_reliability_pct": 85,
+    "min_reliability": 0.95,
+    "require_verified": true,
+    "max_instances_per_machine": 2,
+    "prefer_countries": [],
+    "block_countries": [],
+    "allow_other_countries": true,
+    "creating_timeout_seconds": 900,
+    "hashrate_watch_enabled": true,
+    "hashrate_watch_interval_seconds": 60,
+    "hashrate_grace_seconds": 600,
+    "low_efficiency_stop_seconds": 900,
+    "min_th_per_usd_hour": 900,
+    "missing_worker_as_zero": true,
+    "thresholds": {
+      "RTX 5090": 0.32,
+      "RTX 4090": 0.25,
+      "RTX 5080": 0.165,
+      "RTX 4080": 0.13,
+      "RTX 3090": 0.09,
+      "RTX 5060 Ti": 0.07,
+      "RTX 3060 Ti": 0.047,
+      "NVIDIA GeForce RTX 5090": 0.32,
+      "NVIDIA GeForce RTX 4090": 0.25,
+      "NVIDIA GeForce RTX 5080": 0.165,
+      "NVIDIA GeForce RTX 4080": 0.13,
+      "NVIDIA GeForce RTX 3090": 0.09,
+      "NVIDIA GeForce RTX 5060 Ti": 0.07,
+      "NVIDIA GeForce RTX 3060 Ti": 0.047
+    },
+    "min_hashrate_th": {
+      "RTX 5090": 270,
+      "RTX 4090": 210,
+      "RTX 5080": 140,
+      "RTX 4080": 110,
+      "RTX 3090": 75,
+      "RTX 5060 Ti": 60,
+      "RTX 3060 Ti": 40,
+      "NVIDIA GeForce RTX 5090": 270,
+      "NVIDIA GeForce RTX 4090": 210,
+      "NVIDIA GeForce RTX 5080": 140,
+      "NVIDIA GeForce RTX 4080": 110,
+      "NVIDIA GeForce RTX 3090": 75,
+      "NVIDIA GeForce RTX 5060 Ti": 60,
+      "NVIDIA GeForce RTX 3060 Ti": 40
+    }
+  }
+}

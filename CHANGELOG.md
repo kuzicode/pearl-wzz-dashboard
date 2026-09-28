@@ -2,6 +2,32 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [看板访客模式开关] — 2026-09-28
+
+### Added — 新增
+- **访客(偷窥)模式可关闭**:`.env` 新增 `DASHBOARD_GUEST_ENABLED`(默认 `1`,老部署行为不变;设为 `0`/`false`/`off`/`no` 即关闭)。每次请求都现读 `.env`,改了不用重启。关闭后:
+  - 登录页由服务端直接去掉「偷窥模式」入口(不是前端隐藏);
+  - `POST /login {guest:true}` 返回 403;
+  - 已发出的访客 cookie 立即失效(返回 401),管理员登录不受影响。
+- 配置页「账户 · 看板登录」卡片新增「访客模式」勾选框,管理员可随时开关(`POST /api/guest-mode`,仅管理员可调,写入 `.env`)。`tests/test_guest_mode.py` 共 16 条断言,起真实 HTTP server 走完整流程。
+
+## [新平台 QuickPod(Kryptex + SRBMiner)] — 2026-09-28
+
+### Added — 新增
+- **QuickPod 平台**(`configs/config.quickpod.json`,key `QUICKPOD_API_KEY`):扫描 `/rentable` → 按单卡价/可靠性/已验证/磁盘/国家过滤 → `/update/createpod` 建 pod → 监控 → 低效/创建超时回收拉黑。API base `api.quickpod.org`,认证头 `X-API-Key` + `Authorization: ApiKey`。
+  - 建 pod 必须引用**模板**(镜像写在模板里);API key 一般没有建模板的权限(只有 Full access 能建),所以需要在 console 手工建一个私有模板,填 `docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3`、Docker Entrypoint、其余留空,再把 uuid 写入 `quickpod.template_uuid`(不填则按镜像在「我的模板」里查找)。钱包/矿池/worker 名由每个 pod 的 `docker_options` 用 `-e` 注入。
+  - 可靠性口径:宿主 `reliability` 是百分比(社区机普遍 75–97),用 `min_host_reliability_pct`(默认 85)过滤;池要求的 `min_reliability`(Kryptex 0.98)对照「启动成功率」`launch_success_rate`。
+  - 日志是**异步**的:`/update/podlogs` 只负责触发抓取,抓到后回填到 `/mypods` 的 `logs` 字段(用 `<br>` 分行)。sniper 本轮触发、下一轮解析 `hashrate_th_s=`,读不到时回退 Kryptex worker API。
+  - 安全:`/mypods` 响应里带 pod 的 SSH 私钥,`list_quickpod_pods` 只保留白名单字段,不写进 state 和日志。
+  - 看板:账号卡片、实时余额(`/auth/me` credit)、关闭按钮(destroypod)、控制台链接、按租用时记录的镜像识别矿池。
+  - 脚本:`run-quickpod.{sh,ps1}`,`start-all`/`stop-all` 平台列表加 quickpod。`tests/test_quickpod.py` 共 18 条断言。
+- 实测(2026-09-28):RTX 3060 跑 SRBMiner 36–39 TH/s,份额被接受;镜像拉取加启动约 5 分钟;有宿主会卡在 `created` 状态,由 `creating_timeout_seconds`(900s)兜底回收。
+
+### Fixed — 修复(code review, ISS-027)
+- **销毁失败后仍计费的 pod 脱离管理**:原先在调用销毁 API 前就置 `active=False`,一旦请求超时,之后的 reconcile 会跳过这台,预算统计里也不再有它。现改为销毁 API 成功才释放;失败时保持 active(照常计入台数和 $/h 上限)并挂上 `pending_destroy`,下一轮重试,直到销毁成功或 pod 从 `/mypods` 消失。创建超时、坏状态、低效回收三条路径都已覆盖。
+- **旧日志让停挖的机器一直被判健康**:`/mypods.logs` 是上一次抓到的快照,抓取失败时内容不会更新。现只采信带 docker 时间戳、且距今不超过 `log_max_age_seconds`(默认 max(300s, 3×检查间隔))的算力行;过期或没有时间戳时改查 Kryptex worker,worker 不在池里按 0 算力处理,进入低效计时。
+- **切换池或矿机后仍用旧模板,却记成新镜像**:配置了 `template_uuid` 时也要核对模板镜像是否等于当前池/矿机的 `effective_image`;不一致、模板不存在或查询失败时本轮不租,并提示去新建模板。
+
 ## [Code review 修复: Salad 估算校正 / 缺数据不显示亏损 / 估算单价展示(ISS-026)] — 2026-09-27
 
 ### Fixed — 修复

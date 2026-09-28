@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -833,7 +834,7 @@ def record_rent(state, provider, external_id, gpu, price, result):
         result = {k: v for k, v in result.items() if "key" not in k.lower() and "token" not in k.lower()}
     contract_id = None
     if isinstance(result, dict):
-        contract_id = result.get("new_contract") or result.get("id") or result.get("uuid") or result.get("instance_id") or result.get("instanceId")
+        contract_id = result.get("new_contract") or result.get("pod_uuid") or result.get("id") or result.get("uuid") or result.get("instance_id") or result.get("instanceId")
         if not contract_id and isinstance(result.get("data"), dict):
             data = result["data"]
             attrs = data.get("attributes") if isinstance(data.get("attributes"), dict) else {}
@@ -858,7 +859,7 @@ POOLS = {
     "pearlhash": {"label": "PearlHash",
                   "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
                   "reads_prl_host": True,
-                  "platforms": ["vast", "runpod", "tensordock", "salad"], "requires": {},
+                  "platforms": ["vast", "runpod", "tensordock", "salad", "quickpod"], "requires": {},
                   "note": "WildRig(OpenCL), 对宿主驱动容错好; 池 0% 抽水; API 给实时算力"},
     "twpool":    {"label": "TW Pool (小幣礦池)",
                   "image": "docker.io/mrkidbk/pearl-miner-twpool:v1.9.1",
@@ -872,7 +873,7 @@ POOLS = {
     "kryptex":   {"label": "Kryptex",
                   "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
                   "reads_prl_host": True,
-                  "platforms": ["vast", "salad", "runpod"],
+                  "platforms": ["vast", "salad", "runpod", "quickpod"],
                   "requires": {"min_reliability": 0.98, "grace_seconds_min": 1800},   # 池级要求; 矿机相关(min_cuda)在 miners[*].requires
                   # 同一池可选矿机变体(账号 config 顶层 "miner"), 记账/基线仍按 kryptex 一个池; 变体 requires 与池级合并
                   "miners": {
@@ -2937,6 +2938,407 @@ def run_tensordock_cycle(config, state, live):
     try_tensordock_create(config, state, live)
 
 
+# ---------- QuickPod ----------
+# API base api.quickpod.org(读: /rentable /mypods /templates /auth/me; 写/动作: /update/*), 认证头 X-API-Key + Authorization: ApiKey。
+# 建 pod 只能引用模板(镜像在模板里), 每 pod 的 docker_options 里用 -e 注入 PRL_* env; 同一个私有模板所有 pod 共用。
+# 注意: /mypods 响应含 pod 的 ssh_private_key, 只取需要的字段, 绝不把原始 pod 对象写进日志/state。
+QUICKPOD_API = "https://api.quickpod.org"
+QUICKPOD_POD_FIELDS = ("Names", "State", "Status", "hourly_cost", "offers_id", "machines_id", "Image",
+                       "public_ipaddr", "destroyed", "command_successful", "error", "gpu_count", "altname", "intended_state",
+                       "logs", "output")
+
+
+def quickpod_headers():
+    key = os.environ.get("QUICKPOD_API_KEY")
+    if not key:
+        return None
+    return {"X-API-Key": key, "Authorization": f"ApiKey {key}"}
+
+
+def quickpod_request(method, path, body=None, params=None, timeout=30):
+    headers = quickpod_headers()
+    if not headers:
+        raise RuntimeError("QUICKPOD_API_KEY is not set")
+    url = QUICKPOD_API + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    return request_json(method, url, headers, body, timeout=timeout)
+
+
+def _quickpod_template_image(t):
+    path = str(t.get("image_path") or "")
+    tag = str(t.get("version_tag") or "")
+    return f"{path}:{tag}" if tag and ":" not in path.split("/")[-1] else path
+
+
+def quickpod_template_uuid(config):
+    """建 pod 用的模板 uuid; 模板镜像必须等于 effective_image(config), 否则返回 None 阻止租用。
+    配了 quickpod.template_uuid 也要校验: 看板切池/切矿机只改 config, 旧模板仍是旧镜像, 不校验会跑旧矿机却按新池记账。
+    未配则在「我的模板」里按镜像找。API key 通常没有模板写权限(只有 Full access 能建), 不自动建, 缺了就提示去 console 手建。"""
+    cfg = config.get("quickpod", {})
+    uuid = str(cfg.get("template_uuid") or "").strip()
+    image = effective_image(config)
+    try:
+        templates = quickpod_request("GET", "/templates") or []
+    except Exception as exc:
+        log(f"QuickPod template lookup failed: {type(exc).__name__}: {exc}; 本轮不租")
+        return None
+    if uuid:
+        t = next((t for t in templates if str(t.get("template_uuid")) == uuid), None)
+        if not t:
+            log(f"QuickPod 模板 {uuid} 不存在(或 key 无 templates:read), 不租")
+            return None
+        actual = _quickpod_template_image(t)
+        if actual != image:
+            log(f"QuickPod 模板 {uuid} 的镜像是 {actual}, 与当前池/矿机要求的 {image} 不一致, 不租: "
+                f"请在 console 建镜像为 {image} 的模板并更新 quickpod.template_uuid")
+            return None
+        return uuid
+    for t in templates:
+        if not t.get("is_public") and _quickpod_template_image(t) == image and t.get("template_uuid"):
+            cfg["template_uuid"] = t["template_uuid"]
+            log(f"QuickPod template found for {image}: {t['template_uuid']} ({t.get('template_name')})")
+            return t["template_uuid"]
+    log(f"QuickPod 没有镜像为 {image} 的私有模板: 请在 console.quickpod.io 建模板(Docker Image Path 填该镜像, Docker Entrypoint, 其余留空)并把 uuid 写入 quickpod.template_uuid")
+    return None
+
+
+def quickpod_offer_view(offer):
+    """/rentable 条目 → 通用过滤函数认得的字段(machine_id / geolocation)。"""
+    m = offer.get("_machines") or {}
+    return {"id": offer.get("id"), "machine_id": offer.get("machines_id") or m.get("id"),
+            "geolocation": m.get("geolocation") or ""}
+
+
+def find_quickpod_offers(config, state):
+    if not quickpod_headers():
+        log("QuickPod skipped: QUICKPOD_API_KEY is not set")
+        return []
+    cfg = config["quickpod"]
+    req = pool_requires(active_pool(config), config)
+    min_launch = max(float(cfg.get("min_reliability", 0.95)), float(req.get("min_reliability", 0)))
+    thresholds = cfg.get("thresholds", {})
+    wanted_gpus = set(normalize_gpu(x) for x in thresholds.keys())
+    offers = quickpod_request("GET", "/rentable", timeout=45) or []
+    matches = []
+    for offer in offers:
+        m = offer.get("_machines") or {}
+        view = quickpod_offer_view(offer)
+        if offer.get("occupied") or offer.get("onjob") or offer.get("offer_type", "GPU") != "GPU":
+            continue
+        if not m.get("online", True) or m.get("banned") or not m.get("listed", True):
+            continue
+        if cfg.get("require_verified", True) and not m.get("verification"):
+            continue
+        if is_blacklisted(state, "quickpod", view):
+            continue
+        gpu = offer.get("gpu_type") or ""
+        if normalize_gpu(gpu) not in wanted_gpus:
+            continue
+        n = int(offer.get("num_gpus") or 1)
+        if n > int(cfg.get("max_gpus_per_instance", 1)):
+            continue
+        max_price = threshold_for(gpu, thresholds)   # thresholds 按单卡价, 多卡 offer 按总价/卡数比
+        if max_price is None:
+            continue
+        price = float(offer.get("hourly_cost") or 999)
+        if price / n < float(cfg.get("min_offer_price_usd", 0)) or price / n > max_price:
+            continue
+        if price > float(cfg.get("max_offer_price_usd", 1.0)):
+            continue
+        # 口径: machine reliability 是百分比(社区机普遍 75–97); 池要求的 min_reliability(Kryptex 0.98)对照「启动成功率」
+        if float(m.get("reliability") or 0) < float(cfg.get("min_host_reliability_pct", 85)):
+            continue
+        if float(m.get("launch_success_rate") or 0) / 100.0 < min_launch:
+            continue
+        if float(offer.get("max_disk_size") or m.get("avail_disk_space") or 0) < float(cfg.get("disk_gb", 20)):
+            continue
+        if req.get("min_cuda"):
+            cuda = re.search(r"[0-9]+(?:\.[0-9]+)?", str(m.get("max_cuda") or ""))
+            if not cuda or float(cuda.group(0)) < float(req["min_cuda"]):
+                continue
+        if not is_preferred_location(view, cfg):
+            continue
+        matches.append({
+            "provider": "quickpod",
+            "id": offer["id"],
+            "gpu": gpu,
+            "price": price,
+            "location": view["geolocation"],
+            "machine_id": str(view["machine_id"] or ""),
+            "raw": view,
+        })
+    return sorted(matches, key=lambda x: x["price"])
+
+
+def quickpod_docker_options(env):
+    return " ".join(f"-e {k}={shlex.quote(str(v))}" for k, v in env.items() if str(v) != "")
+
+
+def rent_quickpod(config, match, state, live):
+    offer_id = match["id"]
+    cfg = config["quickpod"]
+    if renting_paused("quickpod") or already_seen(state, "quickpod", offer_id):
+        return False
+    if active_count(state) >= int(config.get("max_active_instances", 1)):
+        log(f"QuickPod hit but max_active_instances reached: {match['gpu']} ${match['price']:.3f}/h offer={offer_id}")
+        return False
+    if active_hourly(state) + float(match["price"]) > float(config.get("max_total_hourly_usd", 0)):
+        log(f"QuickPod hit but max_total_hourly_usd reached: {match['gpu']} ${match['price']:.3f}/h offer={offer_id}")
+        return False
+    per_machine = int(cfg.get("max_instances_per_machine", 2))
+    if per_machine > 0 and match.get("machine_id"):
+        have = machine_instance_count(state, "quickpod", [match["machine_id"]])
+        if have >= per_machine:
+            log(f"QuickPod hit but max_instances_per_machine reached: offer={offer_id} machine={match['machine_id']} have={have}/{per_machine}")
+            return False
+    log(f"QuickPod hit: {match['gpu']} ${match['price']:.3f}/h {match['location']} offer={offer_id} machine={match.get('machine_id')}")
+    if not live:
+        log("Dry run: not renting QuickPod offer")
+        return False
+    template = quickpod_template_uuid(config)
+    if not template:
+        return False
+    try:
+        if quickpod_request("GET", "/update/offer_is_busy", params={"offer_id": offer_id}) is True:
+            blacklist_offer(state, "quickpod", offer_id, "offer_busy", expires_epoch=epoch_now() + 1800)
+            return False
+    except Exception as exc:
+        log(f"QuickPod offer_is_busy check failed: offer={offer_id} {type(exc).__name__}: {exc}")
+    mark_seen(state, "quickpod", offer_id, {"gpu": match["gpu"], "price": match["price"]})
+    old_price = cfg.get("_current_price")
+    cfg["_current_price"] = match["price"]
+    env = make_env(config, "quickpod", match["gpu"], offer_id)
+    if old_price is None:
+        cfg.pop("_current_price", None)
+    else:
+        cfg["_current_price"] = old_price
+    body = {
+        "offers_id": offer_id,
+        "template_uuid": template,
+        "disk_size": str(int(cfg.get("disk_gb", 20))),
+        "docker_options": quickpod_docker_options(env),
+        "altname": env["PRL_WORKER"],
+        "coupon_code": "",
+    }
+    try:
+        result = quickpod_request("POST", "/update/createpod", body, timeout=90)
+    except urllib.error.HTTPError as exc:
+        try:
+            body_text = exc.read().decode("utf-8")
+        except Exception:
+            body_text = str(exc)
+        log(f"QuickPod rent failed: offer={offer_id} HTTP {exc.code} {body_text[:500]}")
+        blacklist_offer(state, "quickpod", offer_id, f"create_failed:{exc.code}", {"gpu": match["gpu"], "price": match["price"]},
+                        expires_epoch=epoch_now() + 3600)
+        return False
+    if not isinstance(result, dict) or result.get("status") != "success" or not result.get("pod_uuid"):
+        log(f"QuickPod rent failed: offer={offer_id} result={str(result)[:500]}")
+        blacklist_offer(state, "quickpod", offer_id, "create_failed", {"gpu": match["gpu"], "price": match["price"]},
+                        expires_epoch=epoch_now() + 3600)
+        return False
+    record_rent(state, "quickpod", offer_id, match["gpu"], match["price"], result)
+    rented = state["rented"][-1]
+    rented["env"] = {k: str(v) for k, v in env.items()}
+    rented["image"] = effective_image(config)   # 看板按镜像识别矿池
+    if match.get("machine_id"):
+        rented["machine_id"] = match["machine_id"]
+    log(f"QuickPod rent result: offer={offer_id} pod={result['pod_uuid']} worker={env['PRL_WORKER']}")
+    notify(config, "QuickPod GPU rented",
+           f"{match['gpu']} ${float(match['price']):.3f}/h {match['location']} offer={offer_id} pod={result['pod_uuid']}",
+           priority="high", tags=["white_check_mark", "quickpod"])
+    return True
+
+
+def list_quickpod_pods():
+    """在租 pod, 只保留 QUICKPOD_POD_FIELDS(去掉 ssh 私钥等)。"""
+    data = quickpod_request("GET", "/mypods") or []
+    return [{k: p.get(k) for k in QUICKPOD_POD_FIELDS} for p in data if isinstance(p, dict)]
+
+
+def destroy_quickpod_instance(pod_uuid):
+    return quickpod_request("GET", "/update/destroypod", params={"pod_uuid": pod_uuid}, timeout=60)
+
+
+def quickpod_request_logs(pod_uuid):
+    """日志是异步的: /update/podlogs 只是让宿主守护进程去抓(返回里没有日志), 抓到后写进 /mypods 的 logs 字段(<br> 分行)。
+    所以本轮触发、下一轮从 pod 对象读(实测 ~1 分钟内到)。"""
+    return quickpod_request("GET", "/update/podlogs", params={"pod_uuid": pod_uuid})
+
+
+def quickpod_pod_log_text(pod):
+    """pod 对象里现成的日志: logs(podlogs 触发后回填, <br> 分行) + output(创建/动作命令的最近输出)。"""
+    logs = str(pod.get("logs") or "")
+    if logs.strip() == "No Logs":
+        logs = ""
+    return str(pod.get("output") or "") + "\n" + logs.replace("<br>", "\n")
+
+
+def _quickpod_destroy(config, rented, pod_uuid, reason):
+    """销毁并仅在 API 成功后释放(active=False)。失败则保持 active(继续计入台数/预算)并挂 pending_destroy, 下轮 reconcile 重试,
+    直到销毁成功或 pod 从 /mypods 消失。否则一次超时就让仍在计费的 pod 永久脱离管理。"""
+    try:
+        result = destroy_quickpod_instance(pod_uuid)
+    except Exception as exc:
+        pend = rented.setdefault("pending_destroy", {"reason": reason, "since_epoch": epoch_now(), "attempts": 0})
+        pend["attempts"] = int(pend.get("attempts", 0)) + 1
+        pend["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
+        rented["active"] = True
+        log(f"QuickPod destroy failed (attempt {pend['attempts']}, will retry): pod={pod_uuid} reason={reason} error={pend['last_error']}")
+        return False
+    rented.pop("pending_destroy", None)
+    rented["active"] = False
+    rented["inactive_reason"] = reason
+    log(f"QuickPod destroyed: pod={pod_uuid} gpu={rented.get('gpu')} reason={reason} result={result}")
+    notify(config, "QuickPod GPU stopped", f"{rented.get('gpu')} pod={pod_uuid} {reason}", priority="high", tags=["warning", "quickpod"])
+    return True
+
+
+def _quickpod_retire(config, state, rented, pod_uuid, reason, details=None):
+    """坏机: 拉黑 offer 与宿主 + 销毁(成功才标失效)。"""
+    rented["last_state"] = details or {}
+    blacklist_offer(state, "quickpod", rented.get("external_id"), reason, {"gpu": rented.get("gpu"), "price": rented.get("price")})
+    blacklist_machine(state, "quickpod", rented.get("machine_id"), reason, {"pod": pod_uuid, "gpu": rented.get("gpu")})
+    return _quickpod_destroy(config, rented, pod_uuid, reason)
+
+
+QUICKPOD_LOG_TS = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?Z")
+
+
+def quickpod_log_hashrate(pod, max_age_seconds, now_ts=None):
+    """从 pod 缓存日志取最新一条带时间戳的算力 → (TH/s, 距今秒数)。
+    /mypods 的 logs 是上次抓取的快照, 抓取失败/守护进程不再回填时会一直停留在旧内容;
+    超过 max_age_seconds 或无 docker 时间戳(无法判断新旧)都返回 (None, age), 调用方回退矿池核实。"""
+    now_ts = epoch_now() if now_ts is None else now_ts
+    best = None
+    for line in quickpod_pod_log_text(pod).splitlines():
+        th = parse_latest_hashrate(line)
+        if th is None:
+            continue
+        m = QUICKPOD_LOG_TS.search(line)
+        if not m:
+            continue
+        ts = dt.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc).timestamp()
+        if best is None or ts >= best[1]:
+            best = (th, ts)
+    if best is None:
+        return None, None
+    age = now_ts - best[1]
+    return (best[0], age) if age <= max_age_seconds else (None, age)
+
+
+QUICKPOD_DEAD_STATES = {"exited", "dead", "removing"}
+
+
+def reconcile_quickpod_instances(config, state):
+    cfg = config.get("quickpod", {})
+    pods = list_quickpod_pods()
+    by_id = {str(p.get("Names") or ""): p for p in pods if not p.get("destroyed")}
+    for rented in state.get("rented", []):
+        if rented.get("provider") != "quickpod" or not rented.get("active", True):
+            continue
+        pod_uuid = str(rented.get("contract_id") or "")
+        pod = by_id.get(pod_uuid)
+        pending = rented.get("pending_destroy")
+        if not pod:
+            rented["active"] = False
+            rented["inactive_reason"] = (pending or {}).get("reason") or "missing_from_quickpod_pods"
+            rented.pop("pending_destroy", None)
+            log(f"QuickPod pod gone: pod={pod_uuid} gpu={rented.get('gpu')}")
+            continue
+        if pending:   # 上次销毁失败: 先重试, 成功前不做别的判断
+            _quickpod_destroy(config, rented, pod_uuid, pending.get("reason") or "pending_destroy")
+            continue
+        if pod.get("hourly_cost"):
+            rented["price"] = float(pod["hourly_cost"])   # 实际计费价(含存储), 比 offer 价略高
+        if not rented.get("machine_id") and pod.get("machines_id"):
+            rented["machine_id"] = str(pod["machines_id"])
+        st = str(pod.get("State") or "").lower()
+        rented["last_pod_state"] = st
+        age = epoch_now() - float(rented.get("created_epoch") or epoch_now())
+        if st != "running":
+            if st in QUICKPOD_DEAD_STATES or pod.get("error"):
+                if age >= int(cfg.get("hashrate_grace_seconds", 600)):
+                    _quickpod_retire(config, state, rented, pod_uuid, f"pod_{st or 'error'}:{int(age)}s",
+                                     {"state": st, "status": pod.get("Status"), "error": str(pod.get("error") or "")[:200]})
+            elif age >= int(cfg.get("creating_timeout_seconds", 900)):
+                _quickpod_retire(config, state, rented, pod_uuid, f"create_timeout:{int(age)}s", {"state": st, "status": pod.get("Status")})
+            continue
+        rented.setdefault("running_since_epoch", epoch_now())
+        if not cfg.get("hashrate_watch_enabled", True):
+            continue
+        now_ts = epoch_now()
+        if now_ts - float(rented.get("hashrate_last_check_epoch") or 0) < int(cfg.get("hashrate_watch_interval_seconds", 30)):
+            continue
+        rented["hashrate_last_check_epoch"] = now_ts
+        pool_grace = effective_grace(cfg, rental_pool(rented), 600)
+        own_grace = int(cfg.get("hashrate_grace_seconds", 600))
+        in_grace = age < pool_grace
+        interval = int(cfg.get("hashrate_watch_interval_seconds", 30))
+        max_log_age = int(cfg.get("log_max_age_seconds", max(300, 3 * interval)))
+        hashrate_th, log_age = quickpod_log_hashrate(pod, max_log_age, now_ts)   # 上一轮触发抓取的日志, 过期不用
+        if hashrate_th is None and log_age is not None:
+            log(f"QuickPod log hashrate stale: pod={pod_uuid} age={int(log_age)}s > {max_log_age}s; falling back to pool worker API")
+        if hashrate_th is not None and in_grace and age >= own_grace:
+            in_grace = False   # 日志即时算力 → 不必等池的 30 分钟均值
+        try:
+            quickpod_request_logs(pod_uuid)   # 触发下一轮的日志
+        except Exception as exc:
+            log(f"QuickPod podlogs request failed: pod={pod_uuid} {type(exc).__name__}: {exc}")
+        if hashrate_th is None:
+            worker = (rented.get("env") or {}).get("PRL_WORKER") or make_worker(config, "quickpod", rented.get("gpu"), rented.get("external_id"))
+            try:
+                merged, pool_ok = merged_worker_hashrates_ex(config, state)
+            except Exception as exc:
+                log(f"QuickPod pool worker check failed: pod={pod_uuid} worker={worker} {type(exc).__name__}: {exc}")
+                merged, pool_ok = {}, False
+            info = lookup_worker(merged, worker)
+            rented["last_hashrate_lookup"] = {"worker": worker, "found": bool(info)}
+            hashrate_th = resolve_hashrate_from_pool(info, pool_ok, bool(cfg.get("missing_worker_as_zero", True)))
+        else:
+            rented["last_hashrate_lookup"] = {"worker": (rented.get("env") or {}).get("PRL_WORKER"), "found": True, "source": "log"}
+        if hashrate_th is None:
+            continue
+        if in_grace:
+            if hashrate_th > 0:
+                rented["last_hashrate_th"] = round(hashrate_th, 3)
+            continue
+        destroyed = {}
+        def stop(pid):
+            result = destroy_quickpod_instance(pid)   # 异常由 apply_low_efficiency_policy 捕获 → destroyed 为空
+            destroyed["ok"] = True
+            return result
+        if apply_low_efficiency_policy(config, state, "quickpod", rented, hashrate_th, float(rented.get("price") or 0),
+                                       pod_uuid, stop, {"state": st}):
+            reason = rented.get("inactive_reason") or "low_efficiency"
+            blacklist_machine(state, "quickpod", rented.get("machine_id"), reason, {"pod": pod_uuid, "gpu": rented.get("gpu")})
+            if not destroyed.get("ok"):   # 策略已置 active=False, 但 pod 仍在计费 → 恢复管理并下轮重试销毁
+                rented["active"] = True
+                rented.pop("inactive_reason", None)
+                rented["pending_destroy"] = {"reason": reason, "since_epoch": epoch_now(), "attempts": 1}
+
+
+def try_quickpod_create(config, state, live):
+    cfg = config.get("quickpod", {})
+    if not cfg.get("enabled", False):
+        return
+    if live:   # 监控/回收始终跑, 不受暂停租用 / create_enabled 影响
+        try:
+            reconcile_quickpod_instances(config, state)
+        except Exception as exc:
+            log(f"QuickPod reconcile error: {type(exc).__name__}: {exc}")
+    if renting_paused("quickpod") or not cfg.get("create_enabled", False):
+        return
+    if not pool_supports(active_pool(config), "quickpod") and not cfg.get("allow_unsupported_pool", False):
+        _unsupported_pool_log("quickpod", active_pool(config))
+        return
+    for match in find_quickpod_offers(config, state):
+        if rent_quickpod(config, match, state, live):
+            break
+
+
+def run_quickpod_cycle(config, state, live):
+    try_quickpod_create(config, state, live)
+
+
 def salad_headers():
     api_key = os.environ.get("SALAD_API_KEY")
     if not api_key:
@@ -3472,10 +3874,11 @@ def run_once(config, state, live):
     run_runpod_cycle(config, state, live)
     run_tensordock_cycle(config, state, live)
     run_salad_cycle(config, state, live)
+    run_quickpod_cycle(config, state, live)
 
 
 def provider_intervals(config):
-    defaults = {"vast": 2, "runpod": 10, "tensordock": 5, "salad": 30}
+    defaults = {"vast": 2, "runpod": 10, "tensordock": 5, "salad": 30, "quickpod": 10}
     configured = config.get("provider_intervals_seconds", {})
     return {name: int(configured.get(name, defaults[name])) for name in defaults}
 
@@ -3487,6 +3890,7 @@ def run_provider_loop(config, state, live):
         "runpod": run_runpod_cycle,
         "tensordock": run_tensordock_cycle,
         "salad": run_salad_cycle,
+        "quickpod": run_quickpod_cycle,
     }
     next_run = {name: 0.0 for name in providers}
     futures = {}
@@ -3570,7 +3974,7 @@ def main():
         raise SystemExit(2)
     # 本 config 启用的平台, 其 API key 仍是模板占位符 → 退出(留空会被 start-all 跳过, 填了占位符则会一直 401)。
     # 只查启用的平台: 旧 .env 里未使用平台残留的占位串不应影响正常账号。
-    key_vars = {"vast": "VAST_API_KEY", "runpod": "RUNPOD_API_KEY", "tensordock": "TENSORDOCK_API_TOKEN", "salad": "SALAD_API_KEY"}
+    key_vars = {"vast": "VAST_API_KEY", "runpod": "RUNPOD_API_KEY", "tensordock": "TENSORDOCK_API_TOKEN", "salad": "SALAD_API_KEY", "quickpod": "QUICKPOD_API_KEY"}
     for plat, var in key_vars.items():
         if not (config.get(plat) or {}).get("enabled", False):
             continue
@@ -3591,7 +3995,7 @@ def main():
         log(f"Reset low-efficiency timers for {reset_n} active rental(s) on startup (fresh observation window)")
     if not args.once:
         intervals = provider_intervals(config)
-        log(f"Concurrent provider scanner enabled: vast={intervals['vast']}s tensordock={intervals['tensordock']}s runpod={intervals['runpod']}s")
+        log(f"Concurrent provider scanner enabled: vast={intervals['vast']}s tensordock={intervals['tensordock']}s runpod={intervals['runpod']}s quickpod={intervals['quickpod']}s")
         run_provider_loop(config, state, args.live)
         return
     while True:

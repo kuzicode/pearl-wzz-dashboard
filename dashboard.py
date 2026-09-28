@@ -23,13 +23,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONTROL_DIR = ROOT / "control"
 STATS_PATH = ROOT / "dashboard-stats.json"
-PLATFORMS = ["vast", "runpod", "tensordock", "salad"]
-PLATFORM_ORDER = ["runpod", "vast", "tensordock", "salad"]  # 看板展示顺序(左栏 / 仪表盘 / 配置总览)
+PLATFORMS = ["vast", "runpod", "tensordock", "salad", "quickpod"]
+PLATFORM_ORDER = ["runpod", "vast", "quickpod", "tensordock", "salad"]  # 看板展示顺序(左栏 / 仪表盘 / 配置总览)
 KEYNAME = {
     "vast": "VAST_API_KEY",
     "runpod": "RUNPOD_API_KEY",
     "tensordock": "TENSORDOCK_API_TOKEN",
     "salad": "SALAD_API_KEY",
+    "quickpod": "QUICKPOD_API_KEY",
 }
 # 全局(跨账号批量)配置只保留真正共享、不会冲突的字段: 钱包 + 告警。
 # image / prl_host 是"池身份"(由各账号页「新抢矿池」决定, 镜像随 POOLS[pool] 自动选);
@@ -55,8 +56,11 @@ SPECIFIC = {
               ("log_lookback_seconds", "num"), ("missing_worker_as_zero", "bool"),
               ("alphapool_worker_api_enabled", "bool"), ("alphapool_reallocate_enabled", "bool"),
               ("balance_usd", "num")],
+    "quickpod": [("template_uuid", "str"), ("max_offer_price_usd", "num"), ("min_offer_price_usd", "num"),
+                 ("min_host_reliability_pct", "num"), ("disk_gb", "num"), ("prefer_countries", "list"), ("block_countries", "list"),
+                 ("hashrate_grace_seconds", "num"), ("creating_timeout_seconds", "num"), ("low_efficiency_stop_seconds", "num")],
 }
-HAS_CREATE = {"runpod", "tensordock", "vast"}
+HAS_CREATE = {"runpod", "tensordock", "vast", "quickpod"}
 NO_BALANCE_API = {"salad", "tensordock"}  # 无公共余额 API → 看板手填(总览内联编辑); salad 另有 portal 实时余额(salad_portal), 有则优先并隐藏手填
 OFFLINE_POOLS = {"twpool", "herominers", "pearlfortune"}  # 已下线/不可用的矿池: 从看板池列表(按钮/下拉/迁移)隐藏; 只保留 pearlhash
 
@@ -110,6 +114,8 @@ def account_console_url(account_id):
         return "https://cloud.vast.ai/instances/"
     if plat == "tensordock":
         return "https://dashboard.tensordock.com/my-servers"
+    if plat == "quickpod":
+        return "https://console.quickpod.io/pods"
     if plat == "salad":
         sc = read_config(account_id).get("salad", {}) or {}
         org = sc.get("organization_name")
@@ -234,6 +240,15 @@ def set_env_key(name, value):
     if not found:
         out.append(f"{name}={env_quote(value)}")
     open(path, "w").write("\n".join(out) + "\n")
+
+def guest_enabled():
+    """访客(偷窥)模式开关: .env DASHBOARD_GUEST_ENABLED, 默认开; 0/false/off/no 关闭。每次请求现读 .env, 改了无需重启。"""
+    v = read_env().get("DASHBOARD_GUEST_ENABLED", os.environ.get("DASHBOARD_GUEST_ENABLED", "1"))
+    return str(v).strip().lower() not in ("0", "false", "off", "no")
+
+def set_guest_enabled(enabled):
+    set_env_key("DASHBOARD_GUEST_ENABLED", "1" if enabled else "0")
+    return {"ok": True, "guest_enabled": guest_enabled()}
 
 def set_dashboard_password(newpw):
     newpw = str(newpw or "")
@@ -843,6 +858,11 @@ def platform_balance(account_id, force=False):
                                {"Authorization": "Bearer " + k, "Content-Type": "application/json"},
                                body={"query": "query{myself{clientBalance}}"})
                 val = ((d.get("data") or {}).get("myself") or {}).get("clientBalance")
+        elif plat == "quickpod":
+            k = env.get(kv) or os.environ.get(kv, "")
+            if k:
+                d = _http_json("GET", "https://api.quickpod.org/auth/me", {"X-API-Key": k, "Authorization": "ApiKey " + k})
+                val = d.get("credit")   # 实时扣费后的余额(实测每分钟递减)
         if val is not None:
             val = round(float(val), 2)
     except Exception:
@@ -872,7 +892,7 @@ def active_rentals(account_id):
                     "created_epoch": r.get("created_epoch"),
                     "worker": (r.get("last_hashrate_lookup") or {}).get("worker"),
                     "provider": r.get("provider"), "external_id": r.get("external_id"),  # 自动关停拉黑交接用
-                    "machine_id": r.get("machine_id")})
+                    "machine_id": r.get("machine_id"), "image": r.get("image")})
     return out
 
 
@@ -2238,6 +2258,7 @@ def build_full_config():
             "account": {k: cfg.get(k) for k in ACCOUNT_KEYS},
         }
     return {"common": common, "common_diff": common_diff, "platforms": plats, "auto_stop": auto_stop_settings(),
+            "guest_enabled": guest_enabled(),
             "coin_price_usd": coin_price(),   # 配置页把关停阈值换算成 PRL 成本价展示, 与机器表同口径
             "pools": [{"id": k, "label": v["label"], "image": v["image"], "reads_prl_host": v["reads_prl_host"],
                        "platforms": v.get("platforms") or [], "requires": v.get("requires") or {}, "note": v.get("note") or "",
@@ -2426,6 +2447,8 @@ def do_terminate(acct, mid, group=None):
             r = S.delete_runpod_pod(mid)
         elif plat == "tensordock":
             r = S.delete_tensordock_instance(cfg, mid)
+        elif plat == "quickpod":
+            r = S.destroy_quickpod_instance(mid)
         elif plat == "salad":
             r = S.reallocate_salad_instance(cfg, group or "", mid)
         else:
@@ -2606,6 +2629,8 @@ def session_role(token):
         role, exp, sig = str(token).split(".", 2)
         good = hmac.new(_secret(), f"{role}.{exp}".encode(), hashlib.sha256).hexdigest()
         if role in ("admin", "guest") and hmac.compare_digest(sig, good) and time.time() < float(exp):
+            if role == "guest" and not guest_enabled():
+                return None   # 访客模式关闭: 已发出的访客 cookie 立即失效
             return role
     except Exception:
         pass
@@ -2654,7 +2679,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/":
-            return self._send(200, HTML, "text/html")
+            return self._send(200, HTML if guest_enabled() else HTML_NO_GUEST, "text/html")
         if path.startswith("/api/"):
             role = self._role()
             if not role:
@@ -2699,6 +2724,8 @@ class H(BaseHTTPRequestHandler):
         data = self._body_json()
         if path == "/login":
             if data.get("guest"):
+                if not guest_enabled():
+                    return self._send(403, {"error": "访客模式已关闭"})
                 tok = new_session("guest")
                 return self._send(200, {"ok": True, "role": "guest"}, extra={
                     "Set-Cookie": f"sniper_session={tok}; Path=/; Max-Age={SESS_TTL}; HttpOnly; SameSite=Lax"})
@@ -2745,6 +2772,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, restart_platform(str(data.get("platform", ""))))
         if path == "/api/account-label":
             return self._send(200, save_account_label(str(data.get("platform", "")), data.get("label", "")))
+        if path == "/api/guest-mode":
+            return self._send(200, set_guest_enabled(bool(data.get("enabled"))))
         if path == "/api/dashboard-password":
             return self._send(200, set_dashboard_password(data.get("password", "")))
         if path == "/api/reset-stats":
@@ -3128,8 +3157,8 @@ th{font-family:'IBM Plex Sans','Noto Sans SC',sans-serif;text-transform:none;let
 <button type=submit class=lbtn>登录 / LOGIN</button>
 </form>
 <div class=ldiv></div>
-<div class=fnote>没有密码?点下面进访客模式</div>
-<div class=foot role=button tabindex=0 onclick=guestLogin() onkeydown="if(event.key=='Enter'||event.key==' '){event.preventDefault();guestLogin()}"><span class=hand>👉</span><span class=ftxt><span>👁 偷窥模式 · 仅看仪表盘</span><span class=lmono>PEEK MODE · 无需密码</span></span></div>
+<!--GUEST--><div class=fnote>没有密码?点下面进访客模式</div>
+<div class=foot role=button tabindex=0 onclick=guestLogin() onkeydown="if(event.key=='Enter'||event.key==' '){event.preventDefault();guestLogin()}"><span class=hand>👉</span><span class=ftxt><span>👁 偷窥模式 · 仅看仪表盘</span><span class=lmono>PEEK MODE · 无需密码</span></span></div><!--/GUEST-->
 </section></main></div>
 
 <div class=mtopbar><button class=mtoggle onclick=toggleSide() aria-label="菜单">☰</button><span class=mbrand>今晚挖珍珠</span></div>
@@ -3491,7 +3520,11 @@ ${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="
 <div class=fld>用户名</div><input value="admin" disabled>
 <div class=fld>新密码</div><input id=newpw type=password placeholder="至少 4 位">
 </div><div class=row style=margin-top:12px><button class=b-acc onclick=savePw()>更新密码</button>
-<span class=hint>立即生效, 下次登录用新密码</span></div></div>`;}
+<span class=hint>立即生效, 下次登录用新密码</span></div>
+<div class=grid2 style=margin-top:12px>
+<div class=fld>访客模式</div><label class=ckrow><input type=checkbox id=guest_on ${d.guest_enabled?'checked':''} onchange=saveGuest(this.checked)><span class=hint>允许无密码「偷窥模式」只读查看仪表盘; 关闭后登录页隐藏入口, 已登录的访客立即失效(写入 .env, 无需重启)</span></label>
+</div></div>`;}
+async function saveGuest(on){let r=await api('/api/guest-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});toast(r.error?('失败: '+r.error):(r.guest_enabled?'访客模式已开启':'访客模式已关闭, 外部访客无法再查看'));renderConfigTab();}
 function poolOk(o,plat){return !(o.platforms||[]).length||(o.platforms||[]).includes(plat);}
 function poolReqText(o){const r=o.requires||{};const parts=[];if(r.min_cuda)parts.push('宿主 CUDA ≥ '+r.min_cuda);if(r.min_reliability)parts.push('可靠度 ≥ '+r.min_reliability);if(r.grace_seconds_min)parts.push('回收宽限 ≥ '+Math.round(r.grace_seconds_min/60)+' 分钟');return parts.join(' · ');}
 function minerSelHtml(p,v){const o=(CFG.pools||[]).find(x=>x.id==v.pool);const ms=(o&&o.miners)||{};const keys=Object.keys(ms);if(!keys.length)return '';
@@ -3649,7 +3682,7 @@ const LINKS=[
 {t:'官网',i:'🌐',items:[['Pearl Research','https://pearlresearch.ai/']]},
 {t:'区块浏览器',i:'🔎',items:[['Explorer','https://explorer.pearlresearch.ai/']]},
 {t:'钱包',i:'👛',items:[['Compute Wallet','https://compute.pearlresearch.ai/wallet']]},
-{t:'租卡平台',i:'🖥️',items:[['RunPod','https://runpod.io?ref=9hx2ahkb'],['Vast.ai','https://cloud.vast.ai/'],['TensorDock','https://dashboard.tensordock.com/'],['Salad','https://portal.salad.com/']]},
+{t:'租卡平台',i:'🖥️',items:[['RunPod','https://runpod.io?ref=9hx2ahkb'],['Vast.ai','https://cloud.vast.ai/'],['TensorDock','https://dashboard.tensordock.com/'],['Salad','https://portal.salad.com/'],['QuickPod','https://console.quickpod.io/']]},
 {t:'矿池',i:'⛏️',items:[['PearlHash','http://pearlhash.xyz'],['AlphaPool','https://pearl.alphapool.tech/'],['Kryptex Pool','https://pool.kryptex.com/prl'],['LuckyPool','https://pearl.luckypool.io/'],['HeroMiners','https://pearl.herominers.com/'],['K1Pool','https://k1pool.com/pool/pearl'],['PearlPool.cloud','https://pearlpool.cloud/'],['f2pool','https://www.f2pool.com/coin/pearl']]},
 {t:'Miner 下载',i:'⚙️',items:[['HydraX · 1% RTX50强','https://hydrax.gg/'],['SRBMiner-MULTI · 3%','https://github.com/doktor83/SRBMiner-Multi/releases'],['lpminer · 0% NV简装','https://github.com/BaikalMine-Pools/pearl-miner/releases'],['BzMiner · 2%','https://github.com/bzminer/bzminer/releases'],['PRL-Today 收益悬浮窗','https://github.com/stlin256/prl-today']]},
 {t:'收益计算器',i:'🧮',items:[['Akakay 计算器','https://pearl.akakay.com/'],['Pearl Dashboard','https://pearl-dashboard-pearl.vercel.app/']]},
@@ -3753,6 +3786,7 @@ function refresh(){if(view=='ov')renderOverview();else if(view=='lk')renderLinks
 setInterval(()=>{let c=document.getElementById('clock');if(c)c.textContent=new Date().toLocaleTimeString();},1000);
 setInterval(()=>{if(view=='ov')renderOverview();},10000);initTheme();initRole();refresh();
 </script></body></html>"""
+HTML_NO_GUEST = re.sub(r"<!--GUEST-->.*?<!--/GUEST-->", "", HTML, flags=re.S)   # 访客模式关闭时登录页不显示偷窥入口
 
 
 def main():
