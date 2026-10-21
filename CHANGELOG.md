@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [代码按领域拆分 · 第一期] — 2026-10-21
+
+### Changed — 变更(重构, 不改行为)
+- 看板前端(1005 行内联 HTML/CSS/JS)原样移到 `static/index.html`,`dashboard.HTML` 启动时读入;`dashboard.py` 3908 → 2904 行。部署须同时上传 `static/`。
+
 ## [看板: Vast 置顶 + 成本价标红口径] — 2026-10-21
 
 ### Changed — 变更
