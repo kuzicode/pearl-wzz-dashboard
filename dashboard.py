@@ -36,7 +36,7 @@ KEYNAME = {
 # 全局(跨账号批量)配置只保留真正共享、不会冲突的字段: 钱包 + 告警。
 # image / prl_host 是"池身份"(由各账号页「新抢矿池」决定, 镜像随 POOLS[pool] 自动选);
 # worker 前缀 / 最多同时租 / 时租上限 / 轮询 是账号级(各账号独立预算), 在账号页编辑(ACCOUNT_KEYS)。
-COMMON_KEYS = ["prl_address", "alert_url"]
+COMMON_KEYS = ["prl_address", "f2pool_account", "alert_url"]
 # 账号级顶层键(写在 config 顶层, 不在 cfg[plat] 里), 账号页「基础/高级设置」可编辑
 ACCOUNT_KEYS = ["prl_address", "worker_prefix", "max_active_instances", "max_total_hourly_usd", "poll_seconds"]
 # 每平台结构化暴露的特定字段: (key, type)  type in num/str/list/bool
@@ -69,7 +69,7 @@ HAS_CREATE = {"runpod", "tensordock", "vast", "quickpod", "clore"}
 NO_BALANCE_API = {"salad", "tensordock"}  # 无公共余额 API → 看板手填(总览内联编辑); salad 另有 portal 实时余额(salad_portal), 有则优先并隐藏手填
 OFFLINE_POOLS = {"twpool", "herominers", "pearlfortune"}  # 已下线/不可用的矿池: 从看板池列表(按钮/下拉/迁移)隐藏; 只保留 pearlhash
 
-POOL_DISPLAY_ORDER = ["kryptex", "pearlhash"]   # 看板按钮 / 下拉顺序: Kryptex 为默认推荐方案, 放最前
+POOL_DISPLAY_ORDER = ["kryptex", "pearlhash", "f2pool"]   # 看板按钮 / 下拉顺序: Kryptex 为默认推荐方案, 放最前
 
 def available_pools(S):
     """看板展示的可用矿池: 排除 OFFLINE_POOLS, 按 POOL_DISPLAY_ORDER 排序(未列出的排后)。"""
@@ -172,6 +172,9 @@ COIN_PRICE_USD = float(os.environ.get("COIN_PRICE_USD") or 0.75)  # 兜底默认
 PRICE_TTL      = 60.0   # 后台刷新间隔内视为新鲜; 请求线程直接读缓存
 PRICE_STALE_MAX = 300.0  # 超此值(后台异常)才在请求线程同步重拉
 _SAFETRADE_URL = "https://safetrade.com/api/v2/peatio/public/markets/prlusdt/tickers"
+# 备用源: CoinGecko 'pearl-2' = Pearl PoUW(官网 pearlresearch.ai, 聚合 SafeTrade/Ourbit/BigONE)。
+# 2026-10-21 起 SafeTrade API 被 Cloudflare 整体 403。注意 MEXC/Gate 的 "PRL" 是另一个币(Perle, ~$0.09), 不能用。
+_COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price?ids=pearl-2&vs_currencies=usd"
 _price_cache: dict = {}  # {"prl": (price_float, ts)}
 _kline_cache: dict = {}  # {period_int: (data_list, ts)}
 KLINE_TTL = {15: 30, 60: 120, 240: 300, 1440: 600}  # 各周期缓存秒数
@@ -185,7 +188,7 @@ YIELD_TTL = 600.0          # 后台预热周期内视为新鲜
 YIELD_STALE_MAX = 1800.0   # 超此值请求线程兜底重拉; 自动关停要求产率不老于此
 YIELD_DIFF_SCALE = float(os.environ.get("YIELD_DIFF_SCALE") or 2 ** 48)
 _yield_cache: dict = {}    # {"v": {...}, "ts": float}
-POOL_FEE = {"pearlhash": 0.01, "kryptex": 0.02}   # PearlHash 1%; Kryptex PRL PPS+ 2%(SOLO 1%), 2026-09 官网
+POOL_FEE = {"pearlhash": 0.01, "kryptex": 0.03, "f2pool": 0.03}   # PearlHash 1%; Kryptex PRL PPS+ 3%(SOLO 1%), 2026-10 官网; F2Pool 未公开, 按其预估产率反推约 3%(待核实)
 POOL_FEE_DEFAULT = 0.01
 # ---- 自动关停亏损机(.env, 每 tick 重读, 改了无需重启) ----
 AUTO_STOP_DEFAULTS = {"AUTO_STOP_ENABLED": "1", "AUTO_STOP_LOSS_PCT": "20", "AUTO_STOP_MIN_AGE_MIN": "30",
@@ -210,6 +213,14 @@ def prl_address():
         w = read_config(a).get("prl_address")
         if w:
             return w
+    return ""
+
+def f2pool_account():
+    """F2Pool 账户名(全局 COMMON_KEYS, 取第一个填了的账号 config); 未填 → ""。"""
+    for a in list_accounts():
+        n = str(read_config(a).get("f2pool_account") or "").strip()
+        if n:
+            return n
     return ""
 
 def read_state(plat):
@@ -485,6 +496,8 @@ def pool_of_image(image):
         return "pearlfortune"
     if "twpool" in s or "conishc" in s:
         return "twpool"
+    if "f2pool" in s:   # srb-f2pool-*: 须在 srb 判断之前, 否则被认成 Kryptex
+        return "f2pool"
     if "kryptex" in s or "krig" in s or "srb" in s:   # srb-* = SRBMiner 变体镜像, 同属 Kryptex 池
         return "kryptex"
     return "pearlhash"
@@ -1082,6 +1095,10 @@ def _refresh_once():
     except Exception:
         pass
     try:
+        f2pool_data(force=True)
+    except Exception:
+        pass
+    try:
         fetch_network_yield(force=True)
     except Exception:
         pass
@@ -1175,8 +1192,8 @@ def tick_output(pool=None):
             if _bk in s and _pbk in s:
                 continue
             _v = POOL_MONITORS[_pk]["view"]()        # 归一化视图(含 pool_balance/pool_paid); error 不设(留待重试)
-            if _v.get("pool_error"):
-                continue
+            if _v.get("pool_error") or _v.get("pool_unconfigured"):
+                continue   # 未配置(如 F2Pool 无 token)也不设: 否则基线=0, 日后配上 token 会把历史余额全算成重置后产出
             _p = _v.get("pool_paid")
             if _bk not in s:
                 _b = _v.get("pool_balance") or 0.0
@@ -1244,25 +1261,27 @@ def update_output_snapshot(merged_out):
 
 # ---------- 实时币价(SafeTrade REST) / 重置统计 ----------
 def fetch_coin_price(force=False):
-    """从 SafeTrade 拉取 PRL/USDT 最新成交价(ticker.last)。
+    """拉取 PRL/USDT 最新价: SafeTrade ticker.last 优先, 失败退 CoinGecko pearl-2。
     serve-stale: 后台刷新; 超 PRICE_STALE_MAX 才在请求线程同步重拉。
-    API 失败时 fallback 到缓存旧值, 再 fallback 到 COIN_PRICE_USD 默认值。"""
+    两源都失败时 fallback 到缓存旧值, 再 fallback 到 COIN_PRICE_USD 默认值(此时 coin_price_live=False, 自动关停暂停)。"""
     now = time.time()
     cached = _price_cache.get("prl")
     if cached and not force and (now - cached[1] < PRICE_STALE_MAX):
         return cached[0]
-    try:
-        req = urllib.request.Request(_SAFETRADE_URL,
-                                     headers={"User-Agent": "sniper-dashboard/1.0"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            d = json.loads(r.read().decode("utf-8"))
-        p = float(d["ticker"]["last"])
-        _price_cache["prl"] = (p, now)
-        return p
-    except Exception:
-        if cached:
-            return cached[0]
-        return COIN_PRICE_USD
+    for url, pick in ((_SAFETRADE_URL, lambda d: d["ticker"]["last"]),
+                      (_COINGECKO_URL, lambda d: d["pearl-2"]["usd"])):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "sniper-dashboard/1.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                p = float(pick(json.loads(r.read().decode("utf-8"))))
+            if p > 0:
+                _price_cache["prl"] = (p, now)
+                return p
+        except Exception:
+            continue
+    if cached:
+        return cached[0]
+    return COIN_PRICE_USD
 
 def coin_price():
     return fetch_coin_price()
@@ -1717,6 +1736,59 @@ def _kryptex_view():
             "pool_error": err}
 
 
+# ---------- F2Pool 池(SRBMiner, 账户名挖矿)----------
+# PRL 不在 v2 API 币种列表; v1 认 'pearl'(GET /pearl/<账户名>, header F2P-API-SECRET; 无 token 403, 未知币种 404)。
+# token 放 .env F2POOL_API_TOKEN(F2Pool 账户设置里申请 v1 token)。未配账户名或 token → 视图标 pool_unconfigured, 不报错。
+_f2pool = {"data": None, "ts": 0.0}
+
+def f2pool_data(force=False):
+    """F2Pool v1 用户数据(balance / paid / workers), serve-stale 缓存。未配置 → {"_unconfigured": True}。"""
+    now = time.time()
+    if _f2pool["data"] is not None and not force and (now - _f2pool["ts"] < POOL_STALE_MAX):
+        return _f2pool["data"]
+    account = f2pool_account()
+    token = str(read_env().get("F2POOL_API_TOKEN") or "").strip()
+    if not account or not token:
+        data = {"_unconfigured": True}
+    else:
+        try:
+            req = urllib.request.Request(f"https://api.f2pool.com/pearl/{urllib.parse.quote(account)}",
+                headers={"F2P-API-SECRET": token, "Accept": "application/json", "User-Agent": "sniper-dashboard/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("error"), dict):   # v1 错误体 {"error": {"code", "message"}}
+                data = {"_error": f"f2pool {data['error'].get('code')}: {data['error'].get('message')}"}
+        except Exception as e:
+            data = {"_error": f"{type(e).__name__}: {e}"}
+    _f2pool["data"] = data
+    _f2pool["ts"] = now
+    return data
+
+def _f2pool_view():
+    """f2pool 视图: {workers, total_hashrate_th, pool_balance, pool_paid, pool_error, pool_unconfigured}。
+    v1 字段(2026-10-21 生产实测): balance / paid / value_today(PRL), workers 每项 [name, 当前算力 H/s, ...](sniper.f2pool_v1_rows 同口径解析)。"""
+    d = f2pool_data()
+    base = {"workers": [], "total_hashrate_th": 0.0, "pool_balance": None, "pool_paid": None, "pool_error": None}
+    if not isinstance(d, dict) or d.get("_unconfigured"):
+        return {**base, "pool_unconfigured": True}
+    if d.get("_error"):
+        return {**base, "pool_error": d["_error"]}
+    import sniper as _S
+    wlist, total = [], 0.0
+    for name, hs in _S.f2pool_v1_rows(d):
+        wth = hashrate_th(hs)
+        total += wth
+        wlist.append({"name": name, "th": round(wth, 2), "ip": None, "gpus": []})
+    def _num(k):
+        try:
+            return float(d.get(k)) if d.get(k) is not None else None
+        except (TypeError, ValueError):
+            return None
+    # balance 每日结算才入账, 当日已挖未结算在 value_today(实测 v1 字段); 作为待成熟计入产出, 免得看板产出滞后一天
+    return {**base, "workers": wlist, "total_hashrate_th": round(total, 2),
+            "pool_balance": _num("balance"), "pool_paid": _num("paid"), "pending_balance": _num("value_today")}
+
+
 # 池监控适配器注册表(方案 B): pool_id → {fetch, view}。新增矿池只在此登记 + POOLS 即可。
 POOL_MONITORS = {
     "pearlhash":    {"fetch": pool_data,         "view": _pearlhash_view},
@@ -1724,6 +1796,7 @@ POOL_MONITORS = {
     "herominers":   {"fetch": herominers_data,   "view": _herominers_view},
     "pearlfortune": {"fetch": pearlfortune_data, "view": _pearlfortune_view},
     "kryptex":      {"fetch": kryptex_data,      "view": _kryptex_view},
+    "f2pool":       {"fetch": f2pool_data,       "view": _f2pool_view},
 }
 
 def pool_view(which):
@@ -2018,6 +2091,8 @@ def build_summary(pool_key="merged"):
         "avg_output_per_hour": avg_output_per_hour,
         "cumulative_output_usd": output_usd,
         "cumulative_profit_usd": round(output_usd - rent, 2),
+        # 单池视图且该池产出不可查(F2Pool 未配 token): 前端产出 / 利润显示 "—", 不把 0 产出当亏损
+        "output_unavailable": bool(pool_key in POOL_MONITORS and POOL_MONITORS[pool_key]["view"]().get("pool_unconfigured")),
         "efficiency_th_per_usd": eff,
         "cost_cumulative_usd": cost_cumulative_usd,
         "cost_recent3h_usd": cost_recent3h_usd,
@@ -3252,7 +3327,7 @@ let phUrl='https://pearlhash.xyz/account/'+encodeURIComponent(d.wallet);
 let twUrl='https://tw-pool.com/workers/'+encodeURIComponent(d.wallet);
 let pvk=d.pool_view||'merged';
 let PL={};(d.pools||[]).forEach(o=>PL[o.id]=o.label);
-let POOL_URL={pearlhash:phUrl, twpool:twUrl, herominers:'https://pearl.herominers.com/', pearlfortune:'https://pearlfortune.org/#miner='+encodeURIComponent(d.wallet||''), kryptex:'https://pool.kryptex.com/zh-cn/prl/miner/stats/'+encodeURIComponent(d.wallet||'')+'?source=search'};
+let POOL_URL={pearlhash:phUrl, twpool:twUrl, herominers:'https://pearl.herominers.com/', pearlfortune:'https://pearlfortune.org/#miner='+encodeURIComponent(d.wallet||''), kryptex:'https://pool.kryptex.com/zh-cn/prl/miner/stats/'+encodeURIComponent(d.wallet||'')+'?source=search', f2pool:'https://www.f2pool.com/'};
 let poolLinks=(pvk=='merged'?(d.pools||[]).map(o=>o.id):[pvk]).filter(id=>POOL_URL[id]).map(id=>`<div class=go title="在 ${esc(PL[id]||id)} 打开本钱包地址的矿池面板(算力/收益, 新标签)" onclick="window.open('${POOL_URL[id]}','_blank')">${esc(PL[id]||id)} →</div>`).join('');
 let pe=d.pool_error?`<div class=muted style="color:var(--warn);margin-top:10px">POOL_API: ${esc(d.pool_error)}</div>`:'';
 let bp=Object.entries(d.running_by_platform).map(([k,v])=>`${k} ${v}`).join('  ·  ');
@@ -3319,8 +3394,8 @@ ${poolLinks}
 <div class=card><div class=k>在跑机器</div><div class=v>${d.running_machines}</div><div class=sub>${pv=='merged'?poolBreak:esc(bp)}</div></div>
 <div class=card><div class=k>总算力 矿池实测</div><div class=v>${fnum(d.total_hashrate_th)} <small>TH/s</small></div></div>
 <div class=card><div class=k>累计租金${d.rent_has_estimate?' <span class=muted style=font-weight:400 title="含 Salad 按 单价 × 在跑时长 估算、尚未(或无法)用 portal 余额核实的租金; 余额恢复后按实际下降量自动校正">· 含估算</span>':''}</div><div class=v>$${fnum(d.cumulative_rent_usd)}</div><div class=sub>$${fnum(d.current_hourly_usd)}/h · ${pv=='merged'?'自重置起算':'自更新起按池'}</div></div>
-<div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
-<div class=card><div class=k>累计折合利润</div><div class="v tip" style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}" data-tip="${esc(proflabel)}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${(()=>{const ph=d.profit_usd_h;const nm=d.profit_missing_machines||0;if(ph==null){const R={no_yield:'缺网络产率',no_price:'缺币价',no_hashrate:'在跑机器尚无算力数据'};const r=R[d.profit_unavailable_reason];return r?`<span class=muted title="${esc(r+', 无法估算产值; 不代表亏损')}">暂无法估算(${r})</span>`:'<span class=muted>暂无在跑机器</span>';}const miss=nm?`<span class=muted title="${nm} 台在跑机器缺算力/产值数据, 其产值与租金都未计入本估算"> · ${nm} 台未计入</span>`:'';const c=ph>=0?'var(--acc)':'#ff6b6b';const sg=ph>=0?'+':'−';return `<span class=tip data-tip="${esc('当前算力预计产值 $'+fnum(d.value_usd_h_total,2)+'/h − 租金 $'+fnum(d.profit_hourly_usd??d.current_hourly_usd,2)+'/h = '+sg+'$'+fnum(Math.abs(ph),2)+'/h; 按此速率 24h 约 '+sg+'$'+fnum(Math.abs(ph)*24,2))}">预计 <b style="color:${c}">${sg}$${fnum(Math.abs(ph),2)}</b>/h · <b style="color:${c}">${sg}$${fnum(Math.abs(ph)*24,2)}</b>/天</span>${miss}`;})()}</div></div>
+<div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${d.output_unavailable?'<span class=muted title="F2Pool 未配置 API token(.env F2POOL_API_TOKEN), 拿不到矿池余额">—</span>':fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
+<div class=card><div class=k>累计折合利润</div><div class="v tip" style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}" data-tip="${esc(proflabel)}">${d.output_unavailable?'<span class=muted title="产出不可查, 无法计算累计利润; 下方预计利润按理论产值估算">—</span>':'$'+fnum(d.cumulative_profit_usd)}</div><div class=sub>${(()=>{const ph=d.profit_usd_h;const nm=d.profit_missing_machines||0;if(ph==null){const R={no_yield:'缺网络产率',no_price:'缺币价',no_hashrate:'在跑机器尚无算力数据'};const r=R[d.profit_unavailable_reason];return r?`<span class=muted title="${esc(r+', 无法估算产值; 不代表亏损')}">暂无法估算(${r})</span>`:'<span class=muted>暂无在跑机器</span>';}const miss=nm?`<span class=muted title="${nm} 台在跑机器缺算力/产值数据, 其产值与租金都未计入本估算"> · ${nm} 台未计入</span>`:'';const c=ph>=0?'var(--acc)':'#ff6b6b';const sg=ph>=0?'+':'−';return `<span class=tip data-tip="${esc('当前算力预计产值 $'+fnum(d.value_usd_h_total,2)+'/h − 租金 $'+fnum(d.profit_hourly_usd??d.current_hourly_usd,2)+'/h = '+sg+'$'+fnum(Math.abs(ph),2)+'/h; 按此速率 24h 约 '+sg+'$'+fnum(Math.abs(ph)*24,2))}">预计 <b style="color:${c}">${sg}$${fnum(Math.abs(ph),2)}</b>/h · <b style="color:${c}">${sg}$${fnum(Math.abs(ph)*24,2)}</b>/天</span>${miss}`;})()}</div></div>
 </div>
 <div class=econ>网络产率 <b>${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)}</b> PRL/TH·天<span class=dot style="background:${d.yield_live?'var(--ok)':'var(--warn)'}" title="${d.yield_live?'prlscan 实时':'产率数据过期(自动关停暂停)'}"></span> · 回本线 <b style="color:var(--bad)" title="挖到 1 PRL 的租金成本高于此值即亏损; 数值就是当前币价, 与机器表「PRL 成本价」列同口径">${d.coin_price_usd==null?'—':'$'+fnum(d.coin_price_usd,3)}</b>/PRL · 在跑产值 <b>$${fnum(d.value_usd_h_total,3)}</b>/h vs 时租 <b>$${fnum(d.current_hourly_usd,3)}</b>/h · 自动关停 ${(d.auto_stop||{}).enabled?'<span style="color:var(--ok);font-weight:600">开</span>':'<span class=muted>关</span>'} <span class=muted>(亏 ≥${fnum((d.auto_stop||{}).loss_pct,0)}%${(d.auto_stop||{}).max_cost_per_prl>0?' 或 PRL 成本 &gt; $'+fnum(d.auto_stop.max_cost_per_prl,2):''} 持续 ${fnum((d.auto_stop||{}).persist_min,0)} 分钟且机龄 ≥${fnum((d.auto_stop||{}).min_age_min,0)} 分钟才关; Salad 不参与)</span></div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
@@ -3521,6 +3596,7 @@ return `<div class=lbl>配置总览</div>
 <div class=platbox><div class=top><b>全局 · 钱包与告警</b><span class=muted>保存会写入全部 ${n} 个账号 config(其余参数在各账号页单独设置)</span></div>
 <div class=grid2>
 ${cf('prl_address','钱包地址 prl_address',1,'你的 $pearl 钱包, 否则挖给别人')}
+${cf('f2pool_account','F2Pool 账户名 (可空)',0,'选 F2Pool 时必填: 账户名挖矿, 收益记在该账户')}
 ${cf('alert_url','告警 URL (可空)',0,'ntfy 等')}
 </div>
 <div class=row style=margin-top:12px><button class=b-acc onclick=saveCommon()>保存全局配置</button>
@@ -3576,7 +3652,7 @@ ${(v.platform||p)=='tensordock'?'<div class=hint style="color:var(--warn);margin
 <div class=grid2>
 <div class=fld>${N(2)}启用本账号</div><label class=ckrow><input type=checkbox id="en_${p}" ${v.enabled?'checked':''}><span class=hint>${isS?'关掉则不监控 Salad 容器组(不影响容器组本身运行)':'关掉则不扫描不租用'}</span></label>
 ${v.has_create?`<div class=fld>自动建机</div><label class=ckrow><input type=checkbox id="ce_${p}" ${v.create_enabled?'checked':''}><span class=hint>价格达标自动下单; 关掉只观察不租</span></label>`:''}
-${isS?`<div class=fld>机器数 / 矿池</div><div class=hint style="padding-top:9px">由 Salad portal 里的容器组决定: replicas = 台数, 镜像 = 矿池(krig / srb → Kryptex, wildrig → PearlHash); 本页不设租用上限与出价</div>`:`<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}${poolOk(o,v.platform||p)?'':' (该平台不支持)'}</option>`).join('')}</select>${minerSelHtml(p,v)} <span class=hint>只影响之后新租的机器, 镜像随矿池(及矿机)自动决定; 在跑机器保持原池, 照常监控回收</span>${poolReqHtml(v.pool,v.platform||p,v.miner)}</div>
+${isS?`<div class=fld>机器数 / 矿池</div><div class=hint style="padding-top:9px">由 Salad portal 里的容器组决定: replicas = 台数, 镜像 = 矿池(srb-f2pool → F2Pool, krig / srb → Kryptex, wildrig → PearlHash); 本页不设租用上限与出价</div>`:`<div class=fld>${N(3)}新抢矿池</div><div><select id="pool_${p}" onchange="setPool('${esc(p)}',this.value)">${(CFG.pools||[]).map(o=>`<option value="${o.id}" ${v.pool==o.id?'selected':''}>${esc(o.label)}${poolOk(o,v.platform||p)?'':' (该平台不支持)'}</option>`).join('')}</select>${minerSelHtml(p,v)} <span class=hint>只影响之后新租的机器, 镜像随矿池(及矿机)自动决定; 在跑机器保持原池, 照常监控回收</span>${poolReqHtml(v.pool,v.platform||p,v.miner)}</div>
 <div class=fld>${N(4)}最多同时租 (台)</div><input id="ac_${p}_max_active_instances" value="${av('max_active_instances')}" placeholder="1">
 <div class=fld>总时租上限 ($/h)</div><input id="ac_${p}_max_total_hourly_usd" value="${av('max_total_hourly_usd')}" placeholder="1.0">`}
 </div>
@@ -3670,7 +3746,7 @@ else if(s.type=='list')patch[s.key]=el.value.split(',').map(x=>x.trim()).filter(
 else patch[s.key]=el.value;});
 let r=await api('/api/save-platform',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:p,data:patch})});
 toast(r.error?('保存失败: '+r.error):p+' 配置已保存, 点重启生效');}
-async function saveCommon(){let data={};['prl_address','alert_url'].forEach(k=>{let el=document.getElementById('cm_'+k);if(el)data[k]=el.value.trim();});
+async function saveCommon(){let data={};['prl_address','f2pool_account','alert_url'].forEach(k=>{let el=document.getElementById('cm_'+k);if(el)data[k]=el.value.trim();});
 if(!data.prl_address){toast('钱包地址必填');return;}
 // P2-E: 若有字段当前各平台不一致, 覆盖前确认
 let diff=(CFG&&CFG.common_diff)||{};let clash=Object.keys(data).filter(k=>diff[k]);
@@ -3743,7 +3819,7 @@ function docGuide(){return `<div class=doc>
 <p>你<b>不用</b>手动登录每台租来的机器装环境。流程全自动:</p>
 <ol>
 <li>sniper 调用各平台 API <b>租到一块 GPU</b>。</li>
-<li>下单时把一个 <b>docker 矿机镜像</b>(随所选矿池 / 矿机自动决定: <b>Kryptex → SRBMiner-MULTI</b> <b>kuzigmgm/pearl-miner:srb-3.6.9-r3</b>(推荐, 旧驱动宿主也能跑); PearlHash → WildRig <b>v13-wildrig</b>)+ 一组<b>环境变量</b>(你的钱包 PRL_ADDRESS、矿池 PRL_HOST、worker 名等)一起下发给平台。</li>
+<li>下单时把一个 <b>docker 矿机镜像</b>(随所选矿池 / 矿机自动决定: <b>Kryptex → SRBMiner-MULTI</b> <b>kuzigmgm/pearl-miner:srb-3.7.9-r1</b>(推荐, 旧驱动宿主也能跑); F2Pool → <b>srb-f2pool-3.7.9-r1</b>(账户名挖矿, 另注入 F2POOL_ACCOUNT); PearlHash → WildRig <b>v13-wildrig</b>)+ 一组<b>环境变量</b>(你的钱包 PRL_ADDRESS、矿池 PRL_HOST、worker 名等)一起下发给平台。</li>
 <li>平台自动 <b>docker pull 拉取镜像</b> → 在租来的 GPU 上跑起容器 → 容器里的矿机<b>连上矿池开始挖 PRL</b>(Kryptex 为 PPS+ 稳定结算, 每满 1 PRL 自动付到钱包; PearlHash 按小时 epoch 分配), 收益直接进你的钱包地址。</li>
 <li>镜像内矿机会自报算力;面板通过矿池 API <b>盯着每台</b>,算力低于门槛(坏卡 / 老驱动 / 虚标)就让它停、再换一台。</li>
 </ol>

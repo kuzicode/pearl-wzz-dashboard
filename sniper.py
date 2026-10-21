@@ -252,7 +252,7 @@ _PRLSCAN_BLOCKS = "https://api.prlscan.com/v1/blocks?limit=1"
 YIELD_TTL = 600.0
 YIELD_STALE_MAX = 1800.0   # 超过此值不再信任缓存, 退回静态阈值
 YIELD_DIFF_SCALE = float(os.environ.get("YIELD_DIFF_SCALE") or 2 ** 48)
-POOL_FEE = {"pearlhash": 0.01, "kryptex": 0.02}
+POOL_FEE = {"pearlhash": 0.01, "kryptex": 0.03, "f2pool": 0.03}   # 与 dashboard.py 同口径; Kryptex PRL PPS+ 3%, 2026-10 官网; F2Pool 未公开, 按其预估产率反推约 3%(待核实)
 POOL_FEE_DEFAULT = 0.01
 _yield_cache = {}           # {"y": float, "ts": float(成功时间), "try": float(上次尝试)}
 _dyn_cap_log = {}           # {provider: (摘要, 上次打印时间)}
@@ -611,11 +611,41 @@ def pearlfortune_worker_hashrates(config):
     return out
 
 
+def f2pool_v1_rows(data):
+    """F2Pool v1 用户接口的 workers → [(name, H/s)]。v1 每项为数组 [name, 当前算力, 1h 算力, ...](H/s), 也兼容 dict 形态。"""
+    rows = []
+    for w in (data or {}).get("workers") or []:
+        if isinstance(w, (list, tuple)) and w:
+            name, hs = w[0], (w[1] if len(w) > 1 else 0)
+        elif isinstance(w, dict):
+            name = w.get("worker_name") or w.get("name")
+            hs = w.get("hashrate") if w.get("hashrate") is not None else w.get("hash_rate")
+        else:
+            continue
+        if name:
+            rows.append((str(name), hs))
+    return rows
+
+
+def f2pool_worker_hashrates(config):
+    """F2Pool 池逐-worker 算力(v1: GET https://api.f2pool.com/pearl/<账户名>, header F2P-API-SECRET)。
+    PRL 不在 v2 币种列表, v1 认 'pearl'(无 token 403, 未知币种 404)。未配账户名或 .env 无 F2POOL_API_TOKEN → None:
+    表示"该池无法查询"(不是"查询成功但没 worker"), 调用方不得据此把机器判成 0 算力。"""
+    account = str(config.get("f2pool_account") or "").strip()
+    token = os.environ.get("F2POOL_API_TOKEN", "").strip()
+    if not account or not token:
+        return None
+    url = f"https://api.f2pool.com/pearl/{urllib.parse.quote(account)}"
+    data = request_json("GET", url, {"F2P-API-SECRET": token}, timeout=20)
+    return {name: {"hashrate_th": hashrate_to_th(hs), "gpu_info": []} for name, hs in f2pool_v1_rows(data)}
+
+
 _POOL_HASHRATE_FN = {
     "pearlhash": pearl_worker_hashrates,
     "twpool": twpool_worker_hashrates,
     "pearlfortune": pearlfortune_worker_hashrates,
     "kryptex": kryptex_worker_hashrates,
+    "f2pool": f2pool_worker_hashrates,   # 无 token 时返回 None(不可查), 见 merged_worker_hashrates_ex
 }
 
 def monitored_pools(config, state=None):
@@ -646,11 +676,13 @@ def merged_worker_hashrates_ex(config, state=None):
         if not fn:
             continue
         try:
-            wh = fn(config) or {}
-            pool_ok = True
+            wh = fn(config)
         except Exception as exc:
             log(f"pool {pool} hashrate check failed: {type(exc).__name__}: {exc}")
             continue
+        if wh is None:   # 该池不可查(如 F2Pool 未配 token): 不算查询成功, 免得 "worker 不在池" 被当成 0 算力
+            continue
+        pool_ok = True
         for w, info in wh.items():
             cur = merged.get(w)
             if cur is None or float(info.get("hashrate_th") or 0) > float(cur.get("hashrate_th") or 0):
@@ -940,7 +972,7 @@ POOLS = {
                      "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
-                  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
+                  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.7.9-r1",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
                   "reads_prl_host": True,
                   "platforms": ["vast", "salad", "runpod", "quickpod", "clore"],
                   "requires": {"min_reliability": 0.98, "grace_seconds_min": 1800},   # 池级要求; 矿机相关(min_cuda)在 miners[*].requires
@@ -949,12 +981,20 @@ POOLS = {
                       "krig":     {"label": "KRig 1.5.2", "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.2",
                                    "requires": {"min_cuda": 13.0},
                                    "note": "Kryptex 官方 miner, 0% dev fee; 宿主驱动需支持 CUDA ≥ 13(≥580)且显存独占, RunPod 社区机约半数 cuInit 失败"},
-                      "srbminer": {"label": "SRBMiner-MULTI 3.6.9", "image": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3",
+                      "srbminer": {"label": "SRBMiner-MULTI 3.7.9", "image": "docker.io/kuzigmgm/pearl-miner:srb-3.7.9-r1",
                                    "requires": {},
                                    "note": "pearlhash 不硬性要求 CUDA 13, 旧驱动宿主可跑(5000 系建议 ≥580); dev fee 2%; 无 TTY 不输出故镜像用 script 伪终端包裹, 每分钟打 hashrate_th_s= 行"},
                   },
                   "default_miner": "srbminer",   # 2026-09-22 起默认 SRBMiner(RunPod 只有它跑得起来); 账号 config 顶层 miner=krig 可回退
                   "note": "只认官方 TLS 入口; 矿池只给 30 分钟均值, 新机前 30 分钟算力偏低; 矿机默认 SRBMiner(旧驱动可跑, dev fee 2%), 可选 KRig(需 CUDA 13, 0% fee)"},
+    # F2Pool: 账户名挖矿(登录 "账户名.矿工名", 账号 config 顶层 f2pool_account), 官方教程只给明文 pearl.f2pool.com:5500。
+    # 镜像 = docker-srb 以 --build-arg PRL_POOL=f2pool 构建, tag 含 f2pool(pool_of_image 靠它识别)。
+    "f2pool":    {"label": "F2Pool",
+                  "image": "docker.io/kuzigmgm/pearl-miner:srb-f2pool-3.7.9-r1",
+                  "reads_prl_host": True,
+                  "platforms": ["vast", "salad", "runpod", "quickpod", "clore"],
+                  "requires": {"min_reliability": 0.98},
+                  "note": "账户名挖矿(需填 f2pool_account), 明文 5500 入口; 池费 3% 为推算待核实; 矿池算力/余额需 .env F2POOL_API_TOKEN(v1), 未配时 RunPod 无法判低效"},
 }
 
 def _raw_pool(config):
@@ -1051,6 +1091,8 @@ def pool_of_image(image):
         return "pearlfortune"
     if "twpool" in s or "conishc" in s:
         return "twpool"
+    if "f2pool" in s:   # srb-f2pool-*: 须在 srb 判断之前, 否则被认成 Kryptex
+        return "f2pool"
     if "kryptex" in s or "krig" in s or "srb" in s:   # srb-* = SRBMiner 变体镜像, 同属 Kryptex 池
         return "kryptex"
     return "pearlhash"
@@ -1058,9 +1100,9 @@ def pool_of_image(image):
 
 def make_worker_name(config, provider, gpu, external_id):
     """矿池侧 worker 名。Kryptex 对 rig 名限 32 字符(实测 32 过 / 36 拒 "Invalid login"), 且镜像还会追加 "-<主机名前 8 位>",
-    故 kryptex 池用短名 <prefix>-<provider 前 2 位>-<external_id 末 8 位>(≤23 字符); 其它池沿用长名(≤63)。"""
+    故 kryptex 池用短名 <prefix>-<provider 前 2 位>-<external_id 末 8 位>(≤23 字符); f2pool 长度限制未知, 同用短名; 其它池沿用长名(≤63)。"""
     prefix = str(config.get("worker_prefix", "auto"))
-    if active_pool(config) == "kryptex":
+    if active_pool(config) in ("kryptex", "f2pool"):
         tail = re.sub(r"[^A-Za-z0-9]", "", str(external_id))[-8:] or "0"
         return f"{prefix}-{provider[:2]}-{tail}"[:23]
     safe_gpu = re.sub(r"[^A-Za-z0-9]+", "-", gpu).strip("-").lower()
@@ -1072,7 +1114,7 @@ def make_env(config, provider, gpu, external_id):
     provider_cfg = config.get(provider, {}) if isinstance(config.get(provider, {}), dict) else {}
     price = float(provider_cfg.get("_current_price", 0) or 0)
     min_hashrate = gpu_map_value(gpu, provider_cfg.get("min_hashrate_th", {}), 0) or 0
-    return {
+    env = {
         "PRL_ADDRESS": config["prl_address"],
         "PRL_HOST": config["prl_host"],
         "PRL_WORKER": worker[:63],
@@ -1084,6 +1126,16 @@ def make_env(config, provider, gpu, external_id):
         "HASHRATE_ZERO_RECOVER_SECONDS": str(provider_cfg.get("hashrate_zero_recover_seconds", 120)),
         "LOW_EFFICIENCY_STOP_SECONDS": str(provider_cfg.get("low_efficiency_stop_seconds", 900)),
     }
+    env.update(pool_env_extra(config, active_pool(config)))
+    return env
+
+
+def pool_env_extra(config, pool_id):
+    """池专属的额外容器 env(建机 make_env 与迁移 migrate_account 共用)。
+    F2Pool 账户名挖矿: 镜像用 "F2POOL_ACCOUNT.worker" 登录, 缺账户名会拒绝启动。"""
+    if pool_id == "f2pool":
+        return {"PRL_POOL": "f2pool", "F2POOL_ACCOUNT": str(config.get("f2pool_account") or "").strip()}
+    return {}
 
 
 def make_worker(config, provider, gpu, external_id):
@@ -1479,7 +1531,7 @@ def migrate_account(config, state, account_id, target_pool, live=True):
         for pod in pods:
             pid = pod.get("id")
             worker = ((pod.get("env") or {}).get("PRL_WORKER")) or pod.get("name")
-            env = {"PRL_ADDRESS": config["prl_address"], "PRL_WORKER": worker}
+            env = {"PRL_ADDRESS": config["prl_address"], "PRL_WORKER": worker, **pool_env_extra(config, target_pool)}
             if reads_host:
                 env["PRL_HOST"] = config["prl_host"]
             try:
@@ -1515,7 +1567,7 @@ def migrate_account(config, state, account_id, target_pool, live=True):
         for g in groups:
             gname = g.get("name")
             worker = salad_group_worker_name(g) or gname
-            env = {"PRL_ADDRESS": config["prl_address"], "PRL_WORKER": worker}
+            env = {"PRL_ADDRESS": config["prl_address"], "PRL_WORKER": worker, **pool_env_extra(config, target_pool)}
             if reads_host:
                 env["PRL_HOST"] = config["prl_host"]
             try:
@@ -4176,7 +4228,7 @@ def run_salad_cycle(config, state, live):
         log_by_machine = {e.get("machine_id"): e for e in log_rates.values() if e.get("machine_id")}  # 按 machine_id 索引日志算力(instance_id 不稳时用)
         current_pool = pool_of_image(str(((group.get("container") or {}).get("image") or ""))) or "unknown"
         # 池权威 = 有可靠 TH 刻度 worker 算力的池(pearlhash/twpool/pearlfortune); herominers(share×vardiff 指标不可靠) / unknown → 强制容器日志判定
-        pool_authoritative = current_pool in ("pearlhash", "twpool", "pearlfortune", "kryptex")   # kryptex: workers API 按 rig 名(kx-<machine id 前 8 位>)命中
+        pool_authoritative = current_pool in ("pearlhash", "twpool", "pearlfortune", "kryptex", "f2pool")   # kryptex: workers API 按 rig 名(kx-<machine id 前 8 位>)命中
         for instance in running_instances:
             instance_id = str(instance.get("instance_id") or instance.get("id") or "")
             machine_id = str(instance.get("machine_id") or "")
@@ -4464,6 +4516,12 @@ def main():
         val = os.environ.get(var, "")
         if val.startswith("replace_with"):
             log(f"配置错误: 已启用 {plat} 但 .env 的 {var} 仍是占位符, 请填真实 key 或留空")
+            raise SystemExit(2)
+    # F2Pool 账户名挖矿: 没填账户名 → 镜像拒绝启动, 每台都白烧宽限期, 直接退出
+    if active_pool(config) == "f2pool":
+        acct = str(config.get("f2pool_account") or "").strip()
+        if not acct or "REPLACE" in acct.upper():
+            log(f"配置错误: {config_path} 选了 F2Pool 但 f2pool_account 未填或仍是占位符, 请填 F2Pool 账户名(或子账户名)后再启动")
             raise SystemExit(2)
     global ACCOUNT
     m = re.match(r"^config\.(.+)\.json$", config_path.name)

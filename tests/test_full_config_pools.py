@@ -17,7 +17,7 @@ ck("pearlhash reads_prl_host=True", by.get("pearlhash",{}).get("reads_prl_host")
 ck("kryptex image 为默认矿机(srbminer)镜像, 且 miners 含 krig/srbminer", "srb-" in (by.get("kryptex",{}).get("image") or "") and set((by.get("kryptex",{}).get("miners") or {}))=={"krig","srbminer"} and by.get("kryptex",{}).get("default_miner")=="srbminer")
 ck("kryptex reads_prl_host=True(镜像读 PRL_HOST 选入口)", by.get("kryptex",{}).get("reads_prl_host") is True)
 pool_ids = {p["id"] for p in full["pools"]}
-ck("full_config pools 只含在线池(下线池已过滤)", pool_ids == {"pearlhash","kryptex"})
+ck("full_config pools 只含在线池(下线池已过滤)", pool_ids == {"pearlhash","kryptex","f2pool"})
 ck("下线池(herominers 等)不在 pools 里", not any(p["id"]=="herominers" for p in full["pools"]))
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")

@@ -2,6 +2,26 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [第三矿池 F2Pool + SRBMiner 3.7.9] — 2026-10-21
+
+### Added — 新增
+- **F2Pool 矿池**(`pool: "f2pool"`):镜像 `kuzigmgm/pearl-miner:srb-f2pool-3.7.9-r1`(docker-srb 以 `--build-arg PRL_POOL=f2pool` 构建)。F2Pool 是账户名挖矿,配置总览新增全局字段 `f2pool_account`(选 F2Pool 未填会拒绝启动),建机 / 迁移时注入 `PRL_POOL=f2pool` 与 `F2POOL_ACCOUNT`;入口默认 `stratum+tcp://pearl.f2pool.com:5500`。池费按 3% 计(F2Pool 未公开,由其预估产率反推,待核实)。支持 Vast / Salad / RunPod / QuickPod / Clore。
+- **F2Pool 矿池数据(可选)**:`.env` 新增 `F2POOL_API_TOKEN`(F2Pool v1 API token)。配置后 sniper 用 `GET https://api.f2pool.com/pearl/<账户名>` 取逐矿工算力,看板取余额 / 已付。未配置时:sniper 把该池视为「不可查」(不会把机器判成 0 算力回收),看板 F2Pool 视图的累计产出 / 累计利润显示「—」,不写产出基线,也不在合并视图报错。
+
+### Fixed — 修复
+- **币价显示「离线」$0.75**:SafeTrade 行情 API 被 Cloudflare 整体拦截(403),重启清掉内存缓存后看板退回默认价 $0.75,自动关停也因「无实时币价」暂停。`fetch_coin_price` 改为 SafeTrade 失败时用 CoinGecko `pearl-2`(即 Pearl PoUW,聚合 SafeTrade/Ourbit/BigONE)。注意 MEXC / Gate 上的 "PRL" 是另一个币(Perle,约 $0.09),不能当价格源。K 线仍走 SafeTrade,暂时为空。
+
+### Changed — 变更
+- **SRBMiner 升级到 3.7.9**(Kryptex 默认矿机镜像 `srb-3.6.9-r3` → `srb-3.7.9-r1`,只影响新租机器):3.7.7–3.7.9 改进 30/40/50 系 pearlhash 效率,修复 5000 系在 615+ 驱动上的问题。3.7.x 安装包多一层子目录,Dockerfile 自动识别。**QuickPod 需要在 console 新建镜像为 `srb-3.7.9-r1` 的模板**并更新 `quickpod.template_uuid`,否则模板镜像不一致会拒租。
+- `docker-srb/entrypoint.sh` 按 `PRL_POOL`(kryptex 默认 / f2pool)选择登录方式和默认入口;Kryptex 行为不变。
+- `pool_of_image` 先认 `f2pool` 再认 `srb`(两份副本同改),否则 F2Pool 镜像会被认成 Kryptex。
+
+## [Kryptex 池费 2% → 3%] — 2026-10-21
+
+### Fixed — 修复
+- **Kryptex 池费过时**:Kryptex 官网 PRL PPS+ 费率已为 3%(SOLO 1%),`dashboard.py` 与 `sniper.py` 的 `POOL_FEE["kryptex"]` 仍是 2%,导致 Kryptex 机器产值 / 利润率高估约 1%、动态限价略偏松。两处统一改为 3%。
+- 顺带复核网络产率口径(无需改动):产率每 10 分钟取 prlscan 最新区块的奖励与难度实时计算,PRL 的平滑减产(每块奖励 3229.6 → 2237,约 −4%/月)与难度上涨都会自动反映;`YIELD_DIFF_SCALE = 2^48` 由 bits 推得(diff 1 ↔ target 2^208),反推全网 71.3 EH/s 与 WhatToMine 一致。
+
 ## [可选获币成本封顶(默认关) + QuickPod 心跳 + Clore 修复] — 2026-10-09
 
 > 动态限价和按成本关停都是**可选项,默认不启用**:不配 `max_cost_per_prl`、`AUTO_STOP_MAX_COST_PER_PRL=0` 时行为与之前一致。

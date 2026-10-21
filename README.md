@@ -47,8 +47,9 @@ bash scripts/stop-all.sh         #          scripts\stop-all.ps1
 
 | 矿池 | 矿机镜像 | 说明 |
 |---|---|---|
-| **Kryptex**(默认推荐) | SRBMiner-MULTI `kuzigmgm/pearl-miner:srb-3.6.9-r3`;可选 KRig `krig-1.5.2` | PPS+ 按份额稳定结算(每满 1 PRL 自动付),池费 2%。SRBMiner 旧驱动宿主也能跑、起不来会快速失败换机,dev fee 2%;KRig 0% fee 但宿主需 CUDA 13(≥580 驱动),RunPod 社区机多半起不来 |
+| **Kryptex**(默认推荐) | SRBMiner-MULTI `kuzigmgm/pearl-miner:srb-3.7.9-r1`;可选 KRig `krig-1.5.2` | PPS+ 按份额稳定结算(每满 1 PRL 自动付),池费 3%。SRBMiner 旧驱动宿主也能跑、起不来会快速失败换机,dev fee 2%;KRig 0% fee 但宿主需 CUDA 13(≥580 驱动),RunPod 社区机多半起不来 |
 | **PearlHash** | WildRig Multi `kuzigmgm/pearl-miner:v13-wildrig` | 按小时 epoch 分配、有运气波动,池费 1%,OpenCL;作为对照或备选;TensorDock 只支持此池 |
+| **F2Pool** | SRBMiner-MULTI `kuzigmgm/pearl-miner:srb-f2pool-3.7.9-r1` | **账户名挖矿**:登录用 `F2Pool账户名.矿工名`,收益记在 F2Pool 账户(在其后台绑定 PRL 钱包后自动付款),须在配置总览填 `f2pool_account`;入口 `stratum+tcp://pearl.f2pool.com:5500`(官方只给明文)。池费未公开,按其预估产率反推约 3%。矿池余额 / 逐矿工算力要 `.env` 的 `F2POOL_API_TOKEN`(F2Pool 账户设置里申请 API v1 token);不配也能挖,看板 F2Pool 产出显示「—」,RunPod 上无法按矿池算力判低效 |
 
 模板默认 Kryptex + SRBMiner。每账号「新抢矿池」/「矿机」下拉切换,只影响之后新租的机器;在跑机器保持原池继续监控回收。PearlHash 是 PRL 的算法名,各卡参考算力两个池通用。
 
@@ -70,10 +71,11 @@ bash scripts/stop-all.sh         #          scripts\stop-all.ps1
 ### 必须配置(否则白挖 / 跑不起来)
 
 - `prl_address`(每份 config):**你自己的 $pearl 钱包**,占位符不改会拒绝启动。
+- 选 F2Pool 时:`f2pool_account`(配置总览)填 F2Pool 账户名或子账户名,不填会拒绝启动。
 - `.env` 里启用平台的 API key;`DASHBOARD_PASSWORD` 默认 `123456`,公网务必改。
-- Salad:需在其后台预建 container group(镜像推荐 `kuzigmgm/pearl-miner:srb-3.6.9-r3`(Kryptex);PearlHash 用 `v13-wildrig`;env **必须填 `PRL_ADDRESS`**,建议 2 vCPU + 2 GB)+ `SALAD_API_KEY`;台数由 replica 决定,不计入上面两项护栏。
+- Salad:需在其后台预建 container group(镜像推荐 `kuzigmgm/pearl-miner:srb-3.7.9-r1`(Kryptex);F2Pool 用 `srb-f2pool-3.7.9-r1` 且 env 加 `F2POOL_ACCOUNT`;PearlHash 用 `v13-wildrig`;env **必须填 `PRL_ADDRESS`**,建议 2 vCPU + 2 GB)+ `SALAD_API_KEY`;台数由 replica 决定,不计入上面两项护栏。
 - TensorDock:需 SSH 密钥对 `ssh-keygen -t ed25519 -f keys/tensordock -N ""`。
-- QuickPod:API key 一般没有建模板的权限,需先在 console 手工建一个私有模板(镜像填 `docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3`),把模板 uuid 写进 `quickpod.template_uuid`。
+- QuickPod:API key 一般没有建模板的权限,需先在 console 手工建一个私有模板(镜像填 `docker.io/kuzigmgm/pearl-miner:srb-3.7.9-r1`;选 F2Pool 则填 `srb-f2pool-3.7.9-r1`),把模板 uuid 写进 `quickpod.template_uuid`。
 - Clore.ai:只能用加密货币充值(USDT/USDC 请走 **ERC-20 或 BEP-20**,其他链转错找不回,最低 $10)。默认用 **spot 竞价**下单,按分钟计费,被更高出价顶掉即停止计费;没有日志 API,算力只看矿池。`clore.block_owners` 可按宿主主人整批排除有问题的机器。
 
 ---

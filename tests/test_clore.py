@@ -70,7 +70,7 @@ body = [c[2] for c in calls if c[1] == "/create_order"][0]
 r = state["rented"][-1]
 ck("无人占用 → 按底价出 spot 单, USD 付款, env 注入钱包/worker", ok and body["type"] == "spot" and body["spotprice"] == 3.0
    and body["currency"] == "USD-Blockchain" and body["env"]["PRL_ADDRESS"] == "prl1testaddr" and body["renting_server"] == 1)
-ck("镜像去掉 docker.io/ 前缀(Clore 用 Docker Hub 短名)", body["image"] == "kuzigmgm/pearl-miner:srb-3.6.9-r3" and r["image"].startswith("docker.io/"))
+ck("镜像去掉 docker.io/ 前缀(Clore 用 Docker Hub 短名)", body["image"] == "kuzigmgm/pearl-miner:srb-3.7.9-r1" and r["image"].startswith("docker.io/"))
 ck("订单 id 从 my_orders 按 server 回查为 contract_id", r["contract_id"] == "9000" and r["machine_id"] == "1" and r["provider"] == "clore")
 ck("worker 名 kryptex 短名 <prefix>-cl-<server>", r["env"]["PRL_WORKER"].endswith("-cl-1"))
 ck("满额后不再租", S.rent_clore(config, next(m for m in S.find_clore_offers(config, state) if m["id"] == 10), state, True) is False)

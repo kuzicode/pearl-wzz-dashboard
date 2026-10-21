@@ -25,7 +25,7 @@ calls = []
 OFFERS = [offer(1), offer(2, price=0.06), offer(3, rel=80), offer(4, launch=97), offer(5, verified=False), offer(6, occupied=True),
           offer(7, gpu="NVIDIA GeForce RTX 3060 Laptop GPU", price=0.03), offer(8, n=2, price=0.09), offer(9, gpu="NVIDIA RTX A4000", price=0.02)]
 PODS = []
-TEMPLATES = [{"template_uuid": "tpl-1", "image_path": "docker.io/kuzigmgm/pearl-miner:srb-3.6.9-r3", "version_tag": "", "is_public": False}]
+TEMPLATES = [{"template_uuid": "tpl-1", "image_path": "docker.io/kuzigmgm/pearl-miner:srb-3.7.9-r1", "version_tag": "", "is_public": False}]
 FAIL_DESTROY = [0]
 def fake(method, path, body=None, params=None, timeout=30):
     calls.append((method, path, body, params))
@@ -54,7 +54,7 @@ ck("live 建 pod 成功并记录 pod_uuid 为 contract_id", ok and r["contract_i
 ck("createpod 带模板 / 20GB / -e 注入钱包与 worker", body["template_uuid"] == "tpl-1" and body["disk_size"] == "20"
    and "-e PRL_ADDRESS=prl1testaddr" in body["docker_options"] and f"-e PRL_WORKER={r['env']['PRL_WORKER']}" in body["docker_options"])
 ck("worker 名 kryptex 短名 <prefix>-qu-<offer>", r["env"]["PRL_WORKER"] == "auto-qu-1")
-ck("记录镜像供看板识别矿池 + 宿主 id", r["image"].endswith("srb-3.6.9-r3") and r["machine_id"] == "1001")
+ck("记录镜像供看板识别矿池 + 宿主 id", r["image"].endswith("srb-3.7.9-r1") and r["machine_id"] == "1001")
 ck("满额后不再租第二台", S.rent_quickpod(config, S.find_quickpod_offers(config, state)[0] if S.find_quickpod_offers(config, state) else m, state, True) is False)
 
 # 异步日志: pod.logs 用 <br> 分行, output 带换行
