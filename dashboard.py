@@ -1609,6 +1609,8 @@ def _pearlfortune_view():
 _kryptex = {"data": None, "ts": 0.0}
 _kryptex_paid = {"total": None, "ts": 0.0, "count": 0, "items": []}   # 已付总额(payouts 翻页求和), ISS-020
 KRYPTEX_PAID_TTL = 600.0
+KRYPTEX_PAYOUT_MAX_PAGES = 400   # 每页 15 笔、约每 2h 一笔 → ~6000 笔够一年多; 2026-10-21 已 40 页(原上限 50 约两周后触顶)
+KRYPTEX_PAYOUT_VOID = ("FAIL", "CANCEL", "REJECT", "ERROR", "REVERT")   # 实测只见过 FINISHED / PENDING; 失败类名称未知, 按关键字排除
 KRYPTEX_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
 def kryptex_data(force=False):
@@ -1641,8 +1643,9 @@ def kryptex_data(force=False):
     return data
 
 def kryptex_payouts_total(force=False):
-    """Kryptex 已付总额: /prl/api/v1/miner/payouts(DRF 分页, 跟 next 到底, ≤50 页)。只计 FINISHED;
-    任一页失败 → 整体保留旧值(绝不写部分和)。同时记逐笔 [ts, amount] 供基线迁移。返回 float 或 None(从未成功)。"""
+    """Kryptex 已付总额: /prl/api/v1/miner/payouts(DRF 分页, 跟 next 到底)。除失败/取消外都计入——
+    付款一发起(PENDING)Kryptex 就从余额扣走, 只计 FINISHED 会让这笔钱两边都不算, 每次付款后产出掉一截(ISS-031)。
+    任一页失败或翻页超上限 → 整体保留旧值(绝不写部分和)。同时记逐笔 [ts, amount] 供基线迁移。返回 float 或 None(从未成功)。"""
     now = time.time()
     if _kryptex_paid["total"] is not None and not force and (now - _kryptex_paid["ts"] < KRYPTEX_PAID_TTL):
         return _kryptex_paid["total"]
@@ -1652,21 +1655,25 @@ def kryptex_payouts_total(force=False):
     url = f"https://pool.kryptex.com/prl/api/v1/miner/payouts/{urllib.parse.quote(addr)}"
     total, items, pages = 0.0, [], 0
     try:
-        while url and pages < 50:
+        while url and pages < KRYPTEX_PAYOUT_MAX_PAGES:
             _host = (urllib.parse.urlparse(str(url)).hostname or "").lower()   # next 指向 prl-api.kryptex.network(非 pool.kryptex.com), 认 kryptex 域即可
             if not (_host.endswith("kryptex.com") or _host.endswith("kryptex.network")):
+                url = None   # 不跟随外部域名: 视为翻完(不是"超页数上限")
                 break
             req = urllib.request.Request(url, headers={"User-Agent": KRYPTEX_UA, "Accept": "application/json"})
             with urllib.request.urlopen(req, timeout=15) as r:
                 d = json.loads(r.read().decode("utf-8"))
             for it in (d.get("results") or []):
-                if str(it.get("status") or "").upper() != "FINISHED":
-                    continue
+                if any(k in str(it.get("status") or "").upper() for k in KRYPTEX_PAYOUT_VOID):
+                    continue   # 失败 / 取消的付款会退回余额, 不算已付
                 amt = float(it.get("amount") or 0)
                 total += amt
                 items.append([int(float(it.get("date") or 0)), amt])
             url = d.get("next")
             pages += 1
+        if url:   # 还有下一页却到了上限: 部分和会让已付停涨、产出越算越少
+            print(f"[kryptex] payouts 超过 {KRYPTEX_PAYOUT_MAX_PAGES} 页仍未翻完, 保留旧值; 需调大 KRYPTEX_PAYOUT_MAX_PAGES", flush=True)
+            return _kryptex_paid["total"]
     except Exception:
         return _kryptex_paid["total"]
     _kryptex_paid.update({"total": round(total, 8), "ts": now, "count": len(items), "items": items})

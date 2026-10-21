@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ISS-020: Kryptex 已付 payouts 翻页求和(只计 FINISHED; 任一页失败保留旧值) + _kryptex_view.pool_paid +
+"""ISS-020/031: Kryptex 已付 payouts 翻页求和(PENDING 也算、失败/取消不算; 任一页失败或超页数上限保留旧值) + _kryptex_view.pool_paid +
 tick_output 基线迁移(paid 首次出现时只把重置前的付款并入基线)。运行: python3 tests/test_kryptex_paid.py"""
 import os, sys, json, time, tempfile, pathlib
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,11 +22,11 @@ def _open(req, timeout=0):
 D.urllib.request.urlopen=_open
 BASE="https://pool.kryptex.com/prl/api/v1/miner/payouts/prl1pX"
 RESET=1_790_000_000
-PAGES[BASE]={"count":3,"next":BASE+"?page=2","results":[{"date":str(RESET+100),"amount":"2.5","status":"FINISHED"},{"date":str(RESET+50),"amount":"9.9","status":"PENDING"}]}
-PAGES[BASE+"?page=2"]={"count":3,"next":None,"results":[{"date":str(RESET-100),"amount":"1.5","status":"FINISHED"}]}
+PAGES[BASE]={"count":4,"next":BASE+"?page=2","results":[{"date":str(RESET+100),"amount":"2.5","status":"FINISHED"},{"date":str(RESET+50),"amount":"9.9","status":"PENDING"},{"date":str(RESET+60),"amount":"7.0","status":"FAILED"}]}
+PAGES[BASE+"?page=2"]={"count":4,"next":None,"results":[{"date":str(RESET-100),"amount":"1.5","status":"FINISHED"}]}
 D._kryptex_paid.update({"total":None,"ts":0,"count":0,"items":[]})
 t=D.kryptex_payouts_total(force=True)
-ck("两页求和 只计 FINISHED = 4.0", abs(t-4.0)<1e-9 and D._kryptex_paid["count"]==2)
+ck("两页求和: FINISHED + PENDING 计入, FAILED 不计 = 13.9(ISS-031: PENDING 已从余额扣走)", abs(t-13.9)<1e-9 and D._kryptex_paid["count"]==3)
 # next 跨域名(真实: prl-api.kryptex.network) 也要翻页; 无关域名不跟随
 PAGES[BASE]={"count":3,"next":"https://prl-api.kryptex.network/api/v1/miner/payouts/prl1pX?page=2","results":[{"date":str(RESET+100),"amount":"2.5","status":"FINISHED"}]}
 PAGES["https://prl-api.kryptex.network/api/v1/miner/payouts/prl1pX?page=2"]={"count":3,"next":"https://evil.example.com/x","results":[{"date":str(RESET-100),"amount":"1.5","status":"FINISHED"}]}
@@ -60,5 +60,11 @@ D.STATS_PATH.write_text(json.dumps({"reset_epoch":RESET}))
 D.tick_output({"pending_rewards":{"total_pending_prl":0},"balance_transactions":[]})
 s=json.loads(D.STATS_PATH.read_text())
 ck("新基线 = balance+paid = 13.8, paid 键 4.0", abs(s["output_kryptex_baseline"]-13.8)<1e-9 and abs(s["output_kryptex_paid_baseline"]-4.0)<1e-9)
+# ISS-031: 翻页到上限仍有 next → 保留旧值(原上限 50 页时会写部分和, 已付停涨, 产出越算越少)
+_old=D._kryptex_paid["total"]; _cap=D.KRYPTEX_PAYOUT_MAX_PAGES; D.KRYPTEX_PAYOUT_MAX_PAGES=1
+PAGES[BASE]={"count":2,"next":BASE+"?page=2","results":[{"date":"1","amount":"100","status":"FINISHED"}]}
+PAGES[BASE+"?page=2"]={"count":2,"next":None,"results":[{"date":"2","amount":"1","status":"FINISHED"}]}
+ck("超页数上限 → 保留旧值, 不写部分和 100", D.kryptex_payouts_total(force=True)==_old)
+D.KRYPTEX_PAYOUT_MAX_PAGES=_cap
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")
