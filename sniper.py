@@ -256,6 +256,12 @@ YIELD_STALE_MAX = 1800.0   # 超过此值不再信任缓存, 退回静态阈值
 YIELD_DIFF_SCALE = float(os.environ.get("YIELD_DIFF_SCALE") or 2 ** 48)
 _yield_cache = {}           # {"y": float, "ts": float(成功时间), "try": float(上次尝试)}
 _dyn_cap_log = {}           # {provider: (摘要, 上次打印时间)}
+# 币价与看板 fetch_coin_price 同源(SafeTrade ticker 优先, CoinGecko pearl-2 兜底; MEXC/Gate 的 PRL 是另一个币)
+_SAFETRADE_TICKER = "https://safetrade.com/api/v2/peatio/public/markets/prlusdt/tickers"
+_COINGECKO_PRICE = "https://api.coingecko.com/api/v3/simple/price?ids=pearl-2&vs_currencies=usd"
+PRICE_TTL = 300.0
+PRICE_STALE_MAX = 1800.0   # 超过此值不再信任缓存, 按利润率出价退回静态阈值
+_price_cache = {}           # {"p": float, "ts": float(成功时间), "try": float(上次尝试)}
 
 
 def network_yield_prl_per_th_h():
@@ -281,38 +287,109 @@ def network_yield_prl_per_th_h():
     return None
 
 
+def coin_price_usd():
+    """PRL 实时币价。5 分钟内用缓存; 两源都失败保留旧值, 超 30 分钟没成功返回 None(不用默认价, 免得按假币价出价)。"""
+    now_ts = time.time()
+    if now_ts - float(_price_cache.get("try") or 0) >= PRICE_TTL:
+        _price_cache["try"] = now_ts
+        errors = []
+        for url, pick in ((_SAFETRADE_TICKER, lambda d: d["ticker"]["last"]),
+                          (_COINGECKO_PRICE, lambda d: d["pearl-2"]["usd"])):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "gpu-sniper/1.0", "Accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    p = float(pick(json.loads(r.read().decode("utf-8"))))
+                if p > 0:
+                    _price_cache["p"], _price_cache["ts"] = p, now_ts
+                    break
+                errors.append(f"{url.split('/')[2]}: price={p}")
+            except Exception as exc:
+                errors.append(f"{url.split('/')[2]}: {type(exc).__name__}: {exc}")
+        else:
+            log(f"Coin price fetch failed: {'; '.join(errors)}")
+    if _price_cache.get("p") and now_ts - float(_price_cache.get("ts") or 0) < PRICE_STALE_MAX:
+        return float(_price_cache["p"])
+    return None
+
+
+def target_margin_pct(cfg, config):
+    """目标利润率 %(利润 ÷ 租金): <平台>.target_margin_pct 优先, 否则账号顶层; 未配/非数字 → None(不按利润率出价)。"""
+    v = cfg.get("target_margin_pct", (config or {}).get("target_margin_pct"))
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if v > -100 else None
+
+
+def expected_th(key, cfg):
+    """期望算力: <平台>.expected_hashrate_th, 否则 GPU 目录 ref_th; 都没有 → None。"""
+    th = gpu_map_value(key, cfg.get("expected_hashrate_th", {}))
+    if th is None:
+        th = (catalog_entry(key) or {}).get("ref_th")
+    return float(th) if th else None
+
+
 def effective_thresholds(cfg, config, provider=None):
-    """静态 thresholds 与「max_cost_per_prl × 产率 × (1−池费) × 期望算力」取小。
-    max_cost_per_prl 取 <平台>.max_cost_per_prl, 否则账号顶层; 未配/≤0 → 原样返回静态阈值。
-    期望算力取 <平台>.expected_hashrate_th, 否则 GPU 目录 ref_th; 都没有的卡保持静态阈值。产率不可用 → 静态阈值。"""
+    """按动态口径调整静态 thresholds(期望算力见 expected_th; 没有期望算力的卡保持静态值):
+    - target_margin_pct: 上限 = 期望算力 × 产率 × 币价 × (1−池费) ÷ (1+利润率), 随币价/难度可升可降, 取代静态值
+      (thresholds 的 key 仍决定要哪些卡; 值只在产率或币价不可用时兜底)。
+    - max_cost_per_prl(<平台> 优先, 否则账号顶层): 再与「max_cost_per_prl × 产率 × (1−池费) × 期望算力」取小。
+    两者都未配 → 原样返回静态阈值; 产率不可用 → 静态阈值。"""
     static = dict(cfg.get("thresholds", {}) or {})
     target = float(cfg.get("max_cost_per_prl", (config or {}).get("max_cost_per_prl", 0)) or 0)
-    if target <= 0 or not static:
+    margin = target_margin_pct(cfg, config)
+    if (target <= 0 and margin is None) or not static:
         return static
     y = network_yield_prl_per_th_h()
     if not y:
         return static
-    per_th = target * y * (1 - POOL_FEE.get(active_pool(config), POOL_FEE_DEFAULT))
+    keep = 1 - POOL_FEE.get(active_pool(config), POOL_FEE_DEFAULT)
+    price = coin_price_usd() if margin is not None else None
     out, changed = {}, []
     for key, cap in static.items():
-        th = gpu_map_value(key, cfg.get("expected_hashrate_th", {}))
-        if th is None:
-            th = (catalog_entry(key) or {}).get("ref_th")
+        th = expected_th(key, cfg)
         if not th:
             out[key] = cap
             continue
-        dyn = round(per_th * float(th), 4)
-        out[key] = min(float(cap), dyn)
-        if dyn < float(cap) and key == normalize_gpu(key):
-            changed.append(f"{key} {float(cap):.3f}→{dyn:.3f}")
-    provider = provider or "account"
+        v = float(cap)
+        if margin is not None and price:
+            v = round(th * y * price * keep / (1 + margin / 100), 4)
+        if target > 0:
+            v = min(v, round(target * y * keep * th, 4))
+        out[key] = v
+        if v != float(cap) and key == normalize_gpu(key):
+            changed.append(f"{key} {float(cap):.3f}→{v:.3f}")
+    _log_dyn_caps(provider or "account", config, y, margin, price, target, changed)
+    return out
+
+
+def _log_dyn_caps(provider, config, y, margin, price, target, changed):
+    """动态上限日志: 调整结果变化时或每小时打一条。"""
+    mode = []
+    if margin is not None:
+        mode.append(f"margin={margin:g}% price=" + (f"${price:.3f}" if price else "unavailable(static)"))
+    if target > 0:
+        mode.append(f"target=${target:.2f}/PRL")
     summary = ", ".join(changed) or "none"
     last = _dyn_cap_log.get(provider)
     if not last or last[0] != summary or time.time() - last[1] > 3600:
         _dyn_cap_log[provider] = (summary, time.time())
-        log(f"{provider} dynamic price cap: target=${target:.2f}/PRL yield={y * 24:.5f} PRL/TH·day "
-            f"pool={active_pool(config)} lowered: {summary}")
-    return out
+        log(f"{provider} dynamic price cap: {' '.join(mode)} yield={y * 24:.5f} PRL/TH·day "
+            f"pool={active_pool(config)} adjusted: {summary}")
+
+
+def effective_min_th_per_usd_hour(cfg, config, default=0.0):
+    """低效回收线 TH/($/h)。配了 target_margin_pct 且产率/币价可用 → 保本线 1 ÷ (产率 × 币价 × (1−池费)), 随币价走
+    (出价随币价调了, 静态回收线会在币价涨时回收赚钱的机器、跌时放过亏钱的); 否则静态 min_th_per_usd_hour。"""
+    static = float(cfg.get("min_th_per_usd_hour", default) or 0)
+    if target_margin_pct(cfg, config) is None:
+        return static
+    y = network_yield_prl_per_th_h()
+    price = coin_price_usd() if y else None
+    if not (y and price):
+        return static
+    return round(1.0 / (y * price * (1 - POOL_FEE.get(active_pool(config), POOL_FEE_DEFAULT))), 1)
 
 
 # GPU 目录(配置页下拉 + 建议出价/算力)。key = normalize_gpu 输出; aliases = 写入 config 的同义 key(vast gpu_name / runpod gpuTypeId);
@@ -1287,7 +1364,7 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
             rented["last_hashrate_th"] = round(hashrate_th, 3)
             rented["last_hashrate_efficiency"] = round(efficiency, 3)
         return False
-    min_eff = float(cfg.get("min_th_per_usd_hour", 250))
+    min_eff = effective_min_th_per_usd_hour(cfg, config, 250)
     min_hash = gpu_map_value(inst.get("gpu_name") or rented.get("gpu"), cfg.get("min_hashrate_th", {}))
     low = efficiency < min_eff or (min_hash is not None and hashrate_th < float(min_hash))
     rented["last_hashrate_th"] = round(hashrate_th, 3)
@@ -1556,7 +1633,7 @@ def apply_low_efficiency_policy(config, state, provider, rented, hashrate_th, pr
     if hashrate_th is None or price <= 0:
         return False
     efficiency = hashrate_th / price
-    min_eff = float(cfg.get("min_th_per_usd_hour", 0) or 0)
+    min_eff = effective_min_th_per_usd_hour(cfg, config)
     min_hash = gpu_map_value(rented.get("gpu"), cfg.get("min_hashrate_th", {}))
     low = (min_eff > 0 and efficiency < min_eff) or (min_hash is not None and hashrate_th < float(min_hash))
     rented["last_hashrate_th"] = round(hashrate_th, 3)

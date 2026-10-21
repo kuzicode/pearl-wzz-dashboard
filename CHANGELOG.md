@@ -2,6 +2,13 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [出价按目标利润率自动调整] — 2026-10-21
+
+### Added — 新增
+- **`target_margin_pct`(可选, 平台级优先, 否则账号顶层)**:出价上限 = 期望算力 × 产率 × 币价 × (1−池费) ÷ (1+利润率),随币价 / 全网难度自动升降,不用再手改 `thresholds`。`thresholds` 的 key 仍决定要哪些卡,值只在产率或币价不可用时兜底;配了 `max_cost_per_prl` 时两者取小。期望算力取 `expected_hashrate_th`,否则 GPU 目录参考值。
+- sniper 自带实时币价(SafeTrade 优先、CoinGecko 兜底,5 分钟缓存;超 30 分钟拉不到返回空,不用默认价出价)。
+- 配了 `target_margin_pct` 时低效回收线 `min_th_per_usd_hour` 改为随币价的保本线,避免币价上涨后回收赚钱的机器、下跌后放过亏钱的机器。
+
 ## [死代码清理] — 2026-10-21
 
 ### Changed — 变更(重构, 不改行为)
