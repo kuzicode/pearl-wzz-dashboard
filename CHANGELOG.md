@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [代码健康报告脚本] — 2026-10-21
+
+### Added — 新增
+- `scripts/health.sh [--full]`:只报告、恒 exit 0 的代码健康报告——超 400 行文件、死代码(vulture)、未用导入 / 变量(ruff F)、圈复杂度 > 10(ruff C901 + radon 排名)、重复块(jscpd)。工具经 `uvx` / `npx` 固定版本临时运行,不进 `pyproject.toml` / `uv.lock`,项目运行时仍零依赖。首次结果:复杂度 > 10 的函数 40 个,死代码 / 未用变量 3 处,重复 0.4%。
+
 ## [第三矿池 F2Pool + SRBMiner 3.7.9] — 2026-10-21
 
 ### Added — 新增
