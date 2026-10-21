@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent
 CONTROL_DIR = ROOT / "control"
 STATS_PATH = ROOT / "dashboard-stats.json"
 PLATFORMS = ["vast", "runpod", "tensordock", "salad", "quickpod", "clore"]
-PLATFORM_ORDER = ["runpod", "vast", "clore", "quickpod", "tensordock", "salad"]  # 看板展示顺序(左栏 / 仪表盘 / 配置总览)
+PLATFORM_ORDER = ["vast", "runpod", "clore", "quickpod", "tensordock", "salad"]  # 看板展示顺序(左栏 / 仪表盘 / 配置总览)
 KEYNAME = {
     "vast": "VAST_API_KEY",
     "runpod": "RUNPOD_API_KEY",
@@ -3371,15 +3371,15 @@ let mgv=m=>{const g=parseFloat(m.margin_pct);return isFinite(g)?g:null;};
 const SK=MSORT.key,SD=MSORT.dir=='asc'?1:-1;
 const skey=SK=='margin'?mgv:cpt;
 mlist=mlist.slice().sort((x,y)=>{const a=skey(x),b=skey(y);if(a==null&&b==null)return 0;if(a==null)return -1;if(b==null)return 1;return (a-b)*SD;});
-let cpts=mlist.map(cpt).filter(x=>x!=null);let cptMed=cpts.length?cpts.slice().sort((a,b)=>a-b)[Math.floor(cpts.length/2)]:null;
 const COIN=d.coin_price_usd;
+const COST_WARN_MARGIN=0.2;   // PRL 成本价距币价的余量不到 20% 即标红(成本价 > 币价 × 0.8)
 const AS=d.auto_stop||{};const LOSS=parseFloat(AS.loss_pct)||20;const BE=d.breakeven_usd_per_100th;const WATCH=AS.watch||{};
 let rows=mlist.map(m=>{let a=(ROLE=='admin'&&m.id)?`<button class=b-bad onclick="term('${aid}','${p}','${esc(m.id)}','${esc(m.group||'')}')">关闭</button>`:'';
 
 let price=(m.price_estimated&&m.price!=null)?'<span title="GPU 型号尚未从日志识别, 按同组已知机器中位单价估算(参与租金记账与成本价)">~$'+fnum(m.price,3)+'/h</span>':(m.price_label?esc(m.price_label):(m.price==null?'-':'$'+fnum(m.price,3)+'/h'));
 let gpu=(m.gpu&&m.gpu!='?')?esc(m.gpu):'<span class=muted>—</span>';
 let idcell=p=='salad'?`<td title="实例 ${esc(m.id)}${m.machine_id?(' · 机器(worker 后缀) '+esc(m.machine_id)):''}">${esc(m.machine_id||m.id)}</td>`:`<td>${esc(m.id)}</td>`;
-return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${(()=>{const c=cpt(m);if(c==null)return '<span class=muted title="无算力数据(宽限中/未连池)">—</span>';const bad=(COIN!=null&&c>COIN)||(cptMed!=null&&c>cptMed*1.15);return `<span style="${bad?'color:var(--bad);font-weight:600':''}" title="挖到 1 PRL 的租金成本 = 单价 ÷ 每小时到手产币量; 红色 = 高于币价(租金超过产值)或比本账号中位数贵 15% 以上">$${fnum(c,3)}/PRL</span>`;})()}</td><td title="算力 × 网络产率 × 币价 × (1−池费)">${m.value_usd_h==null?'<span class=muted>—</span>':'$'+fnum(m.value_usd_h,3)+'/h'}</td><td>${(()=>{const mg=m.margin_pct;if(mg==null)return '<span class=muted title="无算力或产率/币价数据">—</span>';const col=mg>=0?'var(--ok)':(mg>-LOSS?'var(--warn)':'var(--bad)');const w=WATCH[aid+':'+m.id];return `<span style="color:${col};font-weight:600" title="(产值 − 单价) ÷ 单价; 红 = 亏损超过 ${LOSS}%(自动关停阈值), 黄 = 成本线附近${w?' · 自动关停观察中 '+fnum(w.elapsed_min,0)+'/'+fnum(AS.persist_min,0)+' 分钟':''}">${mg>=0?'+':''}${fnum(mg,1)}%</span>${w?`<span class=muted style="font-size:10px"> ⏱${fnum(w.elapsed_min,0)}/${fnum(AS.persist_min,0)}m</span>`:''}`;})()}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?11:10} class=muted>无符合机器</td></tr>`;
+return `<tr>${p=='salad'?('<td>'+esc(m.group||'')+'</td>'):''}${idcell}<td>${gpu}</td><td>${price}</td><td>${dur(m.duration_seconds)}</td><td>${m.hashrate_th==null?'<span class=muted>—</span>':fnum(m.hashrate_th)+' TH/s'}</td><td>${(()=>{const c=cpt(m);if(c==null)return '<span class=muted title="无算力数据(宽限中/未连池)">—</span>';const bad=COIN!=null&&c>COIN*(1-COST_WARN_MARGIN);return `<span style="${bad?'color:var(--bad);font-weight:600':''}" title="挖到 1 PRL 的租金成本 = 单价 ÷ 每小时到手产币量; 红色 = 距币价的余量不到 ${Math.round(COST_WARN_MARGIN*100)}%(成本价 &gt; ${COIN==null?'—':'$'+fnum(COIN*(1-COST_WARN_MARGIN),3)})">$${fnum(c,3)}/PRL</span>`;})()}</td><td title="算力 × 网络产率 × 币价 × (1−池费)">${m.value_usd_h==null?'<span class=muted>—</span>':'$'+fnum(m.value_usd_h,3)+'/h'}</td><td>${(()=>{const mg=m.margin_pct;if(mg==null)return '<span class=muted title="无算力或产率/币价数据">—</span>';const col=mg>=0?'var(--ok)':(mg>-LOSS?'var(--warn)':'var(--bad)');const w=WATCH[aid+':'+m.id];return `<span style="color:${col};font-weight:600" title="(产值 − 单价) ÷ 单价; 红 = 亏损超过 ${LOSS}%(自动关停阈值), 黄 = 成本线附近${w?' · 自动关停观察中 '+fnum(w.elapsed_min,0)+'/'+fnum(AS.persist_min,0)+' 分钟':''}">${mg>=0?'+':''}${fnum(mg,1)}%</span>${w?`<span class=muted style="font-size:10px"> ⏱${fnum(w.elapsed_min,0)}/${fnum(AS.persist_min,0)}m</span>`:''}`;})()}</td><td>${poolName(m.pool)}</td><td>${a}</td></tr>`;}).join('')||`<tr><td colspan=${p=='salad'?11:10} class=muted>无符合机器</td></tr>`;
 let beRow=(COIN!=null&&mlist.length)?`<tr class=beline><td colspan=${p=='salad'?6:5} style="text-align:right">回本线 ▶</td><td>$${fnum(COIN,3)}/PRL</td><td colspan=4 style="font-weight:400;color:var(--mut)">成本价高于此值 = 租金超过产值(币价 $${fnum(COIN,3)} · ${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)} PRL/TH·天)</td></tr>`:'';
 let _pt=v.console_url?`<b><a class=platlink href="${esc(v.console_url)}" target=_blank rel=noopener title="打开 ${esc(v.label||aid)} 后台 ↗">${esc(v.label||aid)} ↗</a></b>`:`<b>${esc(v.label||aid)}</b>`;
 plat+=`<div class=platbox><div class=top>${_pt}${badges}${bh}${pv!='merged'?`<span class=muted style="font-size:11px;margin-left:8px">本池 $${fnum(acctBurn,3)}/h (${poolName(pv)})</span>`:''}</div>${sstat}
