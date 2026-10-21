@@ -19,6 +19,7 @@ import urllib.error
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from pools import POOL_FEE, POOL_FEE_DEFAULT, pool_of_image, pool_fee  # noqa: F401 — 与 sniper 共用一份(原副本已删); POOL_FEE 供 D.POOL_FEE 重导出
 
 ROOT = Path(__file__).resolve().parent
 CONTROL_DIR = ROOT / "control"
@@ -188,8 +189,6 @@ YIELD_TTL = 600.0          # 后台预热周期内视为新鲜
 YIELD_STALE_MAX = 1800.0   # 超此值请求线程兜底重拉; 自动关停要求产率不老于此
 YIELD_DIFF_SCALE = float(os.environ.get("YIELD_DIFF_SCALE") or 2 ** 48)
 _yield_cache: dict = {}    # {"v": {...}, "ts": float}
-POOL_FEE = {"pearlhash": 0.01, "kryptex": 0.03, "f2pool": 0.03}   # PearlHash 1%; Kryptex PRL PPS+ 3%(SOLO 1%), 2026-10 官网; F2Pool 未公开, 按其预估产率反推约 3%(待核实)
-POOL_FEE_DEFAULT = 0.01
 # ---- 自动关停亏损机(.env, 每 tick 重读, 改了无需重启) ----
 AUTO_STOP_DEFAULTS = {"AUTO_STOP_ENABLED": "1", "AUTO_STOP_LOSS_PCT": "20", "AUTO_STOP_MIN_AGE_MIN": "30",
                       "AUTO_STOP_PERSIST_MIN": "20", "AUTO_STOP_BLACKLIST_HOURS": "6",
@@ -483,24 +482,6 @@ def account_machine_ids(acct):
     """{instance_id: machine_id}, 来自 account_machine_images 同一次拉取的缓存(不额外外呼)。"""
     slot = _machine_images.get(acct) or {}
     return dict(slot.get("mids") or {})
-
-
-def pool_of_image(image):
-    """按镜像判定矿池: 先认 herominers/pearlfortune; twpool 镜像→'twpool'; 其它非空→'pearlhash'; 空→None(交兜底)。"""
-    s = str(image or "").lower()
-    if not s:
-        return None
-    if "herominers" in s:
-        return "herominers"
-    if "pearlfortune" in s:
-        return "pearlfortune"
-    if "twpool" in s or "conishc" in s:
-        return "twpool"
-    if "f2pool" in s:   # srb-f2pool-*: 须在 srb 判断之前, 否则被认成 Kryptex
-        return "f2pool"
-    if "kryptex" in s or "krig" in s or "srb" in s:   # srb-* = SRBMiner 变体镜像, 同属 Kryptex 池
-        return "kryptex"
-    return "pearlhash"
 
 
 def _worker_in(pool_workers, worker):
@@ -1345,8 +1326,6 @@ def yield_fresh(max_age=None):
     limit = float(max_age if max_age is not None else YIELD_STALE_MAX)
     return bool(v) and (time.time() - float(v.get("ts") or 0)) < limit
 
-def pool_fee(pool):
-    return POOL_FEE.get(pool, POOL_FEE_DEFAULT)
 
 def machine_economics(price, th, y, cp, fee=POOL_FEE_DEFAULT):
     """单机经济性: 产值 $/h = 算力 × 产率 × 币价 × (1−池费); 回本线 $/100TH·h = 产率 × 币价 × (1−池费) × 100;

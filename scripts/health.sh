@@ -5,7 +5,7 @@
 # 用法: bash scripts/health.sh [--full]   (--full 输出全部明细, 默认只给计数 + 前几条)
 cd "$(dirname "$0")/.." || exit 0
 FULL=0; [ "${1:-}" = "--full" ] && FULL=1
-SRC=(sniper.py dashboard.py salad_portal.py salad_login.py salad_autologin.py)
+SRC=(sniper.py dashboard.py pools.py salad_portal.py salad_login.py salad_autologin.py)
 VULTURE="vulture==2.14"; RUFF="ruff==0.6.9"; RADON="radon==6.0.1"; JSCPD="jscpd@4.0.5"
 FAILED=()
 ERR=$(mktemp); trap 'rm -f "$ERR"' EXIT

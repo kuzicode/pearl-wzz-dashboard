@@ -6,6 +6,7 @@
 
 ### Changed — 变更(重构, 不改行为)
 - 看板前端(1005 行内联 HTML/CSS/JS)原样移到 `static/index.html`,`dashboard.HTML` 启动时读入;`dashboard.py` 3908 → 2904 行。部署须同时上传 `static/`。
+- 新增 `pools.py`:矿池注册表 `POOLS`、池费、`pool_of_image` / `pool_of_host` / `pool_host`、矿机变体、`pool_env_extra` 收成一份,sniper 与 dashboard 共用(删掉 dashboard 里的 `POOL_FEE` / `pool_of_image` 副本,ISS-030 的根源之一);旧名字经 sniper / dashboard 重导出照常可用。部署须同时上传 `pools.py`。
 
 ## [看板: Vast 置顶 + 成本价标红口径] — 2026-10-21
 
