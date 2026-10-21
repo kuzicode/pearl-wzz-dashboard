@@ -189,7 +189,8 @@ POOL_FEE = {"pearlhash": 0.01, "kryptex": 0.02}   # PearlHash 1%; Kryptex PRL PP
 POOL_FEE_DEFAULT = 0.01
 # ---- 自动关停亏损机(.env, 每 tick 重读, 改了无需重启) ----
 AUTO_STOP_DEFAULTS = {"AUTO_STOP_ENABLED": "1", "AUTO_STOP_LOSS_PCT": "20", "AUTO_STOP_MIN_AGE_MIN": "30",
-                      "AUTO_STOP_PERSIST_MIN": "20", "AUTO_STOP_BLACKLIST_HOURS": "6"}
+                      "AUTO_STOP_PERSIST_MIN": "20", "AUTO_STOP_BLACKLIST_HOURS": "6",
+                      "AUTO_STOP_MAX_COST_PER_PRL": "0"}   # PRL 成本上限 $/PRL, 0 = 不按成本关
 AUTO_STOP_MAX_PER_TICK = 2
 AUTO_STOP_HISTORY_MAX = 50
 
@@ -2497,14 +2498,17 @@ def auto_stop_settings():
             "loss_pct": _f("AUTO_STOP_LOSS_PCT", float),
             "min_age_min": _f("AUTO_STOP_MIN_AGE_MIN", float),
             "persist_min": _f("AUTO_STOP_PERSIST_MIN", float),
-            "blacklist_hours": _f("AUTO_STOP_BLACKLIST_HOURS", float)}
+            "blacklist_hours": _f("AUTO_STOP_BLACKLIST_HOURS", float),
+            "max_cost_per_prl": _f("AUTO_STOP_MAX_COST_PER_PRL", float)}
 
 def save_auto_stop_settings(data):
     if not isinstance(data, dict):
         return {"error": "参数无效"}
-    rng = {"loss_pct": (5, 90), "min_age_min": (5, 1440), "persist_min": (1, 240), "blacklist_hours": (0, 168)}
+    rng = {"loss_pct": (5, 90), "min_age_min": (5, 1440), "persist_min": (1, 240), "blacklist_hours": (0, 168),
+           "max_cost_per_prl": (0, 100)}
     keys = {"loss_pct": "AUTO_STOP_LOSS_PCT", "min_age_min": "AUTO_STOP_MIN_AGE_MIN",
-            "persist_min": "AUTO_STOP_PERSIST_MIN", "blacklist_hours": "AUTO_STOP_BLACKLIST_HOURS"}
+            "persist_min": "AUTO_STOP_PERSIST_MIN", "blacklist_hours": "AUTO_STOP_BLACKLIST_HOURS",
+            "max_cost_per_prl": "AUTO_STOP_MAX_COST_PER_PRL"}
     vals = {}
     for k, (lo, hi) in rng.items():
         if k in data and data[k] not in (None, ""):
@@ -2551,6 +2555,7 @@ def auto_stop_tick(now=None):
         summary["skipped"] = "yield_stale"; return summary
     rentals = build_rentals()
     loss = float(st["loss_pct"]); min_age = float(st["min_age_min"]) * 60; persist = float(st["persist_min"]) * 60
+    max_cost = float(st.get("max_cost_per_prl") or 0)
     candidates, seen, running_n = [], set(), 0
     with _lock:
         s = read_json(STATS_PATH, {})
@@ -2570,6 +2575,9 @@ def auto_stop_tick(now=None):
                 except Exception:
                     continue
                 losing = th > 0 and pr > 0 and val is not None and float(val) < pr * (1 - loss / 100.0)
+                cost = m.get("cost_usd_per_prl")
+                if max_cost > 0 and th > 0 and pr > 0 and cost is not None and float(cost) > max_cost:
+                    losing = True   # 获币成本超上限(与币价无关), 即使按币价仍有利润也关
                 if not losing or age < min_age:
                     watch.pop(key, None)
                     continue
@@ -2605,7 +2613,7 @@ def auto_stop_tick(now=None):
                                             "expires_epoch": now + hours * 3600})
         rec = {"ts": int(now), "acct": acct, "id": m.get("id"), "gpu": m.get("gpu"), "price": m.get("price"),
                "th": m.get("hashrate_th"), "value_usd_h": m.get("value_usd_h"), "margin_pct": m.get("margin_pct"),
-               "since": int(since)}
+               "cost_usd_per_prl": m.get("cost_usd_per_prl"), "since": int(since)}
         with _lock:
             s = read_json(STATS_PATH, {})
             hist = list(s.get("auto_stop_history") or []); hist.append(rec)
@@ -3314,7 +3322,7 @@ ${poolLinks}
 <div class=card><div class=k>累计产出</div><div class="v${(d.output_confirmed!=null||d.output_pending!=null)?' tip':''}" style=color:var(--acc) data-tip="${(d.output_confirmed!=null||d.output_pending!=null)?esc('已确认 '+fnum(d.output_confirmed,4)+' · 待成熟 +'+fnum(d.output_pending,4)+' PRL'):''}">${fnum(d.cumulative_output,4)} <small>PEARL</small></div><div class=sub>≈ $${fnum(d.cumulative_output_usd)} · 平均 ${d.avg_output_per_hour==null?'—':fnum(d.avg_output_per_hour,4)} <small>PEARL/h</small></div></div>
 <div class=card><div class=k>累计折合利润</div><div class="v tip" style="color:${d.cumulative_profit_usd>=0?'var(--acc)':'#ff6b6b'}" data-tip="${esc(proflabel)}">$${fnum(d.cumulative_profit_usd)}</div><div class=sub>${(()=>{const ph=d.profit_usd_h;const nm=d.profit_missing_machines||0;if(ph==null){const R={no_yield:'缺网络产率',no_price:'缺币价',no_hashrate:'在跑机器尚无算力数据'};const r=R[d.profit_unavailable_reason];return r?`<span class=muted title="${esc(r+', 无法估算产值; 不代表亏损')}">暂无法估算(${r})</span>`:'<span class=muted>暂无在跑机器</span>';}const miss=nm?`<span class=muted title="${nm} 台在跑机器缺算力/产值数据, 其产值与租金都未计入本估算"> · ${nm} 台未计入</span>`:'';const c=ph>=0?'var(--acc)':'#ff6b6b';const sg=ph>=0?'+':'−';return `<span class=tip data-tip="${esc('当前算力预计产值 $'+fnum(d.value_usd_h_total,2)+'/h − 租金 $'+fnum(d.profit_hourly_usd??d.current_hourly_usd,2)+'/h = '+sg+'$'+fnum(Math.abs(ph),2)+'/h; 按此速率 24h 约 '+sg+'$'+fnum(Math.abs(ph)*24,2))}">预计 <b style="color:${c}">${sg}$${fnum(Math.abs(ph),2)}</b>/h · <b style="color:${c}">${sg}$${fnum(Math.abs(ph)*24,2)}</b>/天</span>${miss}`;})()}</div></div>
 </div>
-<div class=econ>网络产率 <b>${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)}</b> PRL/TH·天<span class=dot style="background:${d.yield_live?'var(--ok)':'var(--warn)'}" title="${d.yield_live?'prlscan 实时':'产率数据过期(自动关停暂停)'}"></span> · 回本线 <b style="color:var(--bad)" title="挖到 1 PRL 的租金成本高于此值即亏损; 数值就是当前币价, 与机器表「PRL 成本价」列同口径">${d.coin_price_usd==null?'—':'$'+fnum(d.coin_price_usd,3)}</b>/PRL · 在跑产值 <b>$${fnum(d.value_usd_h_total,3)}</b>/h vs 时租 <b>$${fnum(d.current_hourly_usd,3)}</b>/h · 自动关停 ${(d.auto_stop||{}).enabled?'<span style="color:var(--ok);font-weight:600">开</span>':'<span class=muted>关</span>'} <span class=muted>(亏 ≥${fnum((d.auto_stop||{}).loss_pct,0)}% 持续 ${fnum((d.auto_stop||{}).persist_min,0)} 分钟且机龄 ≥${fnum((d.auto_stop||{}).min_age_min,0)} 分钟才关; Salad 不参与)</span></div>
+<div class=econ>网络产率 <b>${d.yield_prl_per_th_h==null?'—':fnum(d.yield_prl_per_th_h*24,4)}</b> PRL/TH·天<span class=dot style="background:${d.yield_live?'var(--ok)':'var(--warn)'}" title="${d.yield_live?'prlscan 实时':'产率数据过期(自动关停暂停)'}"></span> · 回本线 <b style="color:var(--bad)" title="挖到 1 PRL 的租金成本高于此值即亏损; 数值就是当前币价, 与机器表「PRL 成本价」列同口径">${d.coin_price_usd==null?'—':'$'+fnum(d.coin_price_usd,3)}</b>/PRL · 在跑产值 <b>$${fnum(d.value_usd_h_total,3)}</b>/h vs 时租 <b>$${fnum(d.current_hourly_usd,3)}</b>/h · 自动关停 ${(d.auto_stop||{}).enabled?'<span style="color:var(--ok);font-weight:600">开</span>':'<span class=muted>关</span>'} <span class=muted>(亏 ≥${fnum((d.auto_stop||{}).loss_pct,0)}%${(d.auto_stop||{}).max_cost_per_prl>0?' 或 PRL 成本 &gt; $'+fnum(d.auto_stop.max_cost_per_prl,2):''} 持续 ${fnum((d.auto_stop||{}).persist_min,0)} 分钟且机龄 ≥${fnum((d.auto_stop||{}).min_age_min,0)} 分钟才关; Salad 不参与)</span></div>
 ${ROLE=='admin'?`<div class=row style="gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
 <span class=muted style="font-size:12px">PRL/USDT <b style="color:var(--hi);font-family:var(--mono)">$${fnum(d.coin_price_usd,4)}</b>${d.coin_price_live?' <span style="color:var(--ok);font-size:10px;letter-spacing:.4px">● 实时</span>':' <span style="color:var(--warn);font-size:10px">离线</span>'}</span>
 <button class=b-bad onclick="resetStats()">重置统计</button>
@@ -3340,7 +3348,7 @@ ${paPanel(d)}
 ${hrPanel}
 <div class=sec><div class=lbl>账号总览</div><div class=platbox><div class=ovtw><table class=ovt><thead><tr><th>账号</th><th>状态</th><th>矿池</th><th>在跑</th><th>总算力</th><th>时租</th><th>最多同时租 · 时租上限</th></tr></thead><tbody>${acctRows}</tbody></table></div></div></div>
 <div class=sec><div class=lbl>各平台租用情况</div>${plat}</div>
-${(((d.auto_stop||{}).history)||[]).length?`<div class=sec><div class=lbl>自动关停记录 <span class=muted style="font-size:11px;font-weight:400">· 最近 ${Math.min(10,d.auto_stop.history.length)} 条 / 共 ${d.auto_stop.history.length}</span></div><div class=platbox><div class=tscroll><table class=rtab><tr><th>时间</th><th>账号</th><th>实例</th><th>GPU</th><th>单价</th><th>算力</th><th>产值</th><th>利润率</th><th>亏损持续</th></tr>${d.auto_stop.history.slice(-10).reverse().map(h=>`<tr><td>${new Date(h.ts*1000).toLocaleString()}</td><td>${esc(h.acct)}</td><td>${esc(h.id)}</td><td>${esc(h.gpu||'')}</td><td>$${fnum(h.price,3)}/h</td><td>${fnum(h.th)} TH/s</td><td>$${fnum(h.value_usd_h,3)}/h</td><td style="color:var(--bad);font-weight:600">${fnum(h.margin_pct,1)}%</td><td>${h.since?dur(h.ts-h.since):'-'}</td></tr>`).join('')}</table></div></div></div>`:''}`;
+${(((d.auto_stop||{}).history)||[]).length?`<div class=sec><div class=lbl>自动关停记录 <span class=muted style="font-size:11px;font-weight:400">· 最近 ${Math.min(10,d.auto_stop.history.length)} 条 / 共 ${d.auto_stop.history.length}</span></div><div class=platbox><div class=tscroll><table class=rtab><tr><th>时间</th><th>账号</th><th>实例</th><th>GPU</th><th>单价</th><th>算力</th><th>产值</th><th>利润率</th><th>PRL 成本</th><th>亏损持续</th></tr>${d.auto_stop.history.slice(-10).reverse().map(h=>`<tr><td>${new Date(h.ts*1000).toLocaleString()}</td><td>${esc(h.acct)}</td><td>${esc(h.id)}</td><td>${esc(h.gpu||'')}</td><td>$${fnum(h.price,3)}/h</td><td>${fnum(h.th)} TH/s</td><td>$${fnum(h.value_usd_h,3)}/h</td><td style="color:${h.margin_pct<0?'var(--bad)':'inherit'};font-weight:600">${fnum(h.margin_pct,1)}%</td><td>${h.cost_usd_per_prl==null?'-':'$'+fnum(h.cost_usd_per_prl,3)}</td><td>${h.since?dur(h.ts-h.since):'-'}</td></tr>`).join('')}</table></div></div></div>`:''}`;
 let _pvsel=document.getElementById('poolView'); if(_pvsel)_pvsel.value=pv;
 if(_paopen){const pp=document.getElementById('papanel');if(pp)pp.classList.add('open');}
 // renderOverview 每次重建 DOM 后恢复 K线展开状态
@@ -3525,12 +3533,13 @@ ${(d.pools||[]).map(o=>`<div>• <b>${esc(o.label)}</b> → 镜像 <code style="
 <div class=grid2>
 <div class=fld>启用</div><label class=ckrow><input type=checkbox id=as_enabled ${as.enabled?'checked':''}><span class=hint>关掉只显示产值/利润率列, 不自动关机</span></label>
 <div class=fld>亏损阈值 %</div><input id=as_loss value="${esc(as.loss_pct==null?'':as.loss_pct)}" placeholder="20">
+<div class=fld>PRL 成本上限 $</div><input id=as_cost value="${esc(as.max_cost_per_prl==null?'':as.max_cost_per_prl)}" placeholder="0 = 不按成本关">
 <div class=fld>最短机龄 (分钟)</div><input id=as_age value="${esc(as.min_age_min==null?'':as.min_age_min)}" placeholder="30">
 <div class=fld>持续亏损 (分钟)</div><input id=as_persist value="${esc(as.persist_min==null?'':as.persist_min)}" placeholder="20">
 <div class=fld>关停后拉黑 (小时)</div><input id=as_bl value="${esc(as.blacklist_hours==null?'':as.blacklist_hours)}" placeholder="6">
 </div>
 <div class=row style=margin-top:12px><button class=b-acc onclick=saveAutoStop() style="white-space:nowrap">保存</button>
-<span class=hint>写入 .env 立即生效, 无需重启。产值 &lt; 单价 × (1 − 阈值) 且持续够久、机龄够长才关 —— 换算到机器表就是 <b>PRL 成本价 &gt; 币价 ÷ (1 − 阈值)</b>(当前 ${d.coin_price_usd==null?'—':'$'+fnum(d.coin_price_usd/(1-(parseFloat(as.loss_pct)||20)/100),3)}/PRL); 成本线附近 / 新机 / 币价或产率数据过期 / 账号进程没跑 都不动; 每分钟最多关 2 台, 候选超过在跑一半时暂停(防数据异常误杀); Salad 不参与; 关停后经 control/ 交接让 sniper 拉黑该机器</span></div></div>
+<span class=hint>写入 .env 立即生效, 无需重启。产值 &lt; 单价 × (1 − 阈值) 且持续够久、机龄够长才关 —— 换算到机器表就是 <b>PRL 成本价 &gt; 币价 ÷ (1 − 阈值)</b>(当前 ${d.coin_price_usd==null?'—':'$'+fnum(d.coin_price_usd/(1-(parseFloat(as.loss_pct)||20)/100),3)}/PRL); 另设「PRL 成本上限」&gt; 0 时, 机器表 PRL 成本价超过它也算该关(与币价无关, 用于把获币成本封顶); 成本线附近 / 新机 / 币价或产率数据过期 / 账号进程没跑 都不动; 每分钟最多关 2 台, 候选超过在跑一半时暂停(防数据异常误杀); Salad 不参与; 关停后经 control/ 交接让 sniper 拉黑该机器</span></div></div>
 <div class=platbox><div class=top><b>账户 · 看板登录</b></div>
 <div class=grid2>
 <div class=fld>用户名</div><input value="admin" disabled>
@@ -3601,7 +3610,7 @@ ${spec?`<div class=lbl style=margin-top:14px>平台特定参数</div><div class=
 <span class=hint>logs/${p}.log · 实时后台输出</span></div>
 <pre class=logbox id="log_${p}" style=display:none></pre>
 </div>`;}
-async function saveAutoStop(){const g=id=>document.getElementById(id).value.trim();let data={enabled:document.getElementById('as_enabled').checked,loss_pct:g('as_loss'),min_age_min:g('as_age'),persist_min:g('as_persist'),blacklist_hours:g('as_bl')};
+async function saveAutoStop(){const g=id=>document.getElementById(id).value.trim();let data={enabled:document.getElementById('as_enabled').checked,loss_pct:g('as_loss'),max_cost_per_prl:g('as_cost'),min_age_min:g('as_age'),persist_min:g('as_persist'),blacklist_hours:g('as_bl')};
 let r=await api('/api/auto-stop-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({data:data})});toast(r.error?('失败: '+r.error):'自动关停设置已保存, 立即生效');if(r.ok)renderConfigTab();}
 async function savePw(){let pw=document.getElementById('newpw').value;if(pw.length<4){toast('密码至少 4 位');return;}
 let r=await api('/api/dashboard-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});

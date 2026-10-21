@@ -2,6 +2,19 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [可选获币成本封顶(默认关) + QuickPod 心跳 + Clore 修复] — 2026-10-09
+
+> 动态限价和按成本关停都是**可选项,默认不启用**:不配 `max_cost_per_prl`、`AUTO_STOP_MAX_COST_PER_PRL=0` 时行为与之前一致。
+
+### Added — 新增
+- **动态限价**(`sniper.py` `effective_thresholds`):账号顶层(或平台段)新增 `max_cost_per_prl`(目标获币成本 $/PRL,未配或 ≤0 时不启用),平台段可选 `expected_hashrate_th`(按卡的期望算力,缺省用 GPU 目录的 `ref_th`)。实际出价上限 = min(静态 `thresholds`, `max_cost_per_prl` × prlscan 实时产率 × (1 − 池费) × 期望算力)。产率 10 分钟刷新,超过 30 分钟拉不到就退回静态阈值。Vast / RunPod / TensorDock / QuickPod / Clore 的扫描和下单都改走这个上限;上限变化时打一条 `dynamic price cap` 日志(每小时至少一条)。获币成本只取决于单价、算力和产率,与币价无关,难度上涨时上限会自动收紧。
+- **看板自动关停按 PRL 成本**:`.env` 新增 `AUTO_STOP_MAX_COST_PER_PRL`(默认 `0` 表示关闭),配置页「自动关停亏损机」加「PRL 成本上限 $」输入框。机器表 PRL 成本价超过上限时,和亏损一样按机龄 / 持续时长 / 每分钟最多 2 台 / 候选超过一半暂停的规则关停。关停记录新增「PRL 成本」列;利润率为正时不再标红。
+- **QuickPod 扫描心跳**:之前只在命中时打日志,进程看起来像「静默」,分不清是没货还是挂了。现在每 10 分钟打一条 `QuickPod scanned: offers=… wanted_gpu_offers=… matches=… cheapest_per_gpu=…`。
+
+### Fixed — 修复
+- **Clore 空下单**:`create_order` 返回 code 0 但 `my_orders` 里一直查不到订单(未扣费)。现在会记录 `create_order` 的原始返回(state 的 `create_response` 字段和日志),订单 5 分钟未出现就把该 server 冷却 `outbid_cooldown_seconds`,不再对它反复空下单。
+- **Clore 偶发 401**:实测 key 有效时 API 也会间歇返回 401(11 天 605 次)。`clore_request` 对 401 短重试 2 次(间隔 2s / 4s),不再整轮报 cycle error。
+
 ## [新平台 Clore.ai(spot 竞价 + Kryptex/SRBMiner)] — 2026-09-28
 
 ### Added — 新增

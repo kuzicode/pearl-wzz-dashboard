@@ -246,6 +246,75 @@ def gpu_map_value(name, mapping, default=None):
     return default
 
 
+# ---- 动态限价: 获币成本封顶(与看板 fetch_network_yield 同口径) ----
+# 每 TH/s 每小时产币 = 3600 × reward / (difficulty × 2^48 / 1e12); 上限 = max_cost_per_prl × 产率 × (1−池费) × 期望算力
+_PRLSCAN_BLOCKS = "https://api.prlscan.com/v1/blocks?limit=1"
+YIELD_TTL = 600.0
+YIELD_STALE_MAX = 1800.0   # 超过此值不再信任缓存, 退回静态阈值
+YIELD_DIFF_SCALE = float(os.environ.get("YIELD_DIFF_SCALE") or 2 ** 48)
+POOL_FEE = {"pearlhash": 0.01, "kryptex": 0.02}
+POOL_FEE_DEFAULT = 0.01
+_yield_cache = {}           # {"y": float, "ts": float(成功时间), "try": float(上次尝试)}
+_dyn_cap_log = {}           # {provider: (摘要, 上次打印时间)}
+
+
+def network_yield_prl_per_th_h():
+    """prlscan 最新区块 → 理论产率(未扣池费)。10 分钟内用缓存; 失败保留旧值, 超 30 分钟没成功返回 None。"""
+    now_ts = time.time()
+    if now_ts - float(_yield_cache.get("try") or 0) >= YIELD_TTL:
+        _yield_cache["try"] = now_ts
+        try:
+            req = urllib.request.Request(_PRLSCAN_BLOCKS, headers={"User-Agent": "gpu-sniper/1.0", "Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            b = (d.get("items") or [None])[0] or {}
+            diff = float(b.get("difficulty") or 0)
+            reward = float(b.get("reward_grains") or 0) / 1e8
+            y = 3600.0 * reward / (diff * YIELD_DIFF_SCALE / 1e12) if diff > 0 else 0.0
+            if not (1e-5 < y < 1e-1):
+                raise ValueError(f"implausible yield {y}")
+            _yield_cache["y"], _yield_cache["ts"] = y, now_ts
+        except Exception as exc:
+            log(f"Network yield fetch failed: {type(exc).__name__}: {exc}")
+    if _yield_cache.get("y") and now_ts - float(_yield_cache.get("ts") or 0) < YIELD_STALE_MAX:
+        return float(_yield_cache["y"])
+    return None
+
+
+def effective_thresholds(cfg, config, provider=None):
+    """静态 thresholds 与「max_cost_per_prl × 产率 × (1−池费) × 期望算力」取小。
+    max_cost_per_prl 取 <平台>.max_cost_per_prl, 否则账号顶层; 未配/≤0 → 原样返回静态阈值。
+    期望算力取 <平台>.expected_hashrate_th, 否则 GPU 目录 ref_th; 都没有的卡保持静态阈值。产率不可用 → 静态阈值。"""
+    static = dict(cfg.get("thresholds", {}) or {})
+    target = float(cfg.get("max_cost_per_prl", (config or {}).get("max_cost_per_prl", 0)) or 0)
+    if target <= 0 or not static:
+        return static
+    y = network_yield_prl_per_th_h()
+    if not y:
+        return static
+    per_th = target * y * (1 - POOL_FEE.get(active_pool(config), POOL_FEE_DEFAULT))
+    out, changed = {}, []
+    for key, cap in static.items():
+        th = gpu_map_value(key, cfg.get("expected_hashrate_th", {}))
+        if th is None:
+            th = (catalog_entry(key) or {}).get("ref_th")
+        if not th:
+            out[key] = cap
+            continue
+        dyn = round(per_th * float(th), 4)
+        out[key] = min(float(cap), dyn)
+        if dyn < float(cap) and key == normalize_gpu(key):
+            changed.append(f"{key} {float(cap):.3f}→{dyn:.3f}")
+    provider = provider or "account"
+    summary = ", ".join(changed) or "none"
+    last = _dyn_cap_log.get(provider)
+    if not last or last[0] != summary or time.time() - last[1] > 3600:
+        _dyn_cap_log[provider] = (summary, time.time())
+        log(f"{provider} dynamic price cap: target=${target:.2f}/PRL yield={y * 24:.5f} PRL/TH·day "
+            f"pool={active_pool(config)} lowered: {summary}")
+    return out
+
+
 # GPU 目录(配置页下拉 + 建议出价/算力)。key = normalize_gpu 输出; aliases = 写入 config 的同义 key(vast gpu_name / runpod gpuTypeId);
 # ref_th = 公开参考算力 TH/s(PearlHash 算法), 有出处才填, 未知留 None(不猜; 看板会用本池实测中位数覆盖);
 # market_ref = 公开市场参考价 $/h(RunPod 社区档 / Vast 典型成交), 仅供对照, 日期见 GPU_MARKET_REF_ASOF。
@@ -1043,14 +1112,15 @@ def find_vast_offers(config, state):
     data = request_json("POST", "https://console.vast.ai/api/v0/bundles/", headers, body, timeout=45)
     offers = data.get("offers", []) if isinstance(data, dict) else []
     matches = []
-    wanted_gpus = set(normalize_gpu(x) for x in cfg.get("thresholds", {}).keys())
+    caps = effective_thresholds(cfg, config, "vast")
+    wanted_gpus = set(normalize_gpu(x) for x in caps.keys())
     for offer in offers:
         if is_blacklisted(state, "vast", offer):
             continue
         gpu = offer.get("gpu_name") or ""
         if normalize_gpu(gpu) not in wanted_gpus:
             continue
-        max_price = threshold_for(gpu, cfg.get("thresholds", {}))
+        max_price = threshold_for(gpu, caps)
         if max_price is None:
             continue
         price = float(offer.get("dph_total") or 999)
@@ -1967,7 +2037,7 @@ query GpuTypes($id: String!, $secureCloud: Boolean!) {
     checked = 0
     observed_prices = {}
     cloud_types = cfg.get("cloud_types") or [cfg.get("cloud_type", "COMMUNITY")]
-    for gpu_type, cap in cfg.get("thresholds", {}).items():
+    for gpu_type, cap in effective_thresholds(cfg, config, "runpod").items():
         for cloud_type in cloud_types:
             secure_cloud = str(cloud_type).upper() == "SECURE"
             try:
@@ -2044,7 +2114,7 @@ def try_runpod_create(config, state, live):
         return
     cloud_types = cfg.get("cloud_types") or [cfg.get("cloud_type", "COMMUNITY")]
     unrestricted_keywords = [str(x) for x in cfg.get("unrestricted_country_gpu_keywords", [])]
-    for gpu_type, cap in cfg.get("thresholds", {}).items():
+    for gpu_type, cap in effective_thresholds(cfg, config, "runpod").items():
         country_codes = cfg.get("country_codes", [])
         if any(keyword in gpu_type for keyword in unrestricted_keywords):
             country_codes = []
@@ -2275,7 +2345,7 @@ def td_location_allowed(cfg, gpu_name, node):
 def td_offer_from_location(config, state, location, gpu):
     cfg = config.get("tensordock", {})
     name = td_gpu_name(gpu)
-    cap = threshold_for(name, cfg.get("thresholds", {}))
+    cap = threshold_for(name, effective_thresholds(cfg, config, "tensordock"))
     if cap is None:
         return None
     if not td_location_allowed(cfg, name, location):
@@ -2361,6 +2431,7 @@ def find_tensordock_hostnode_offers(config, state, headers):
     matches = []
     scanned_nodes = 0
     scanned_gpu_rows = 0
+    caps = effective_thresholds(cfg, config, "tensordock")
     gpu_slugs = cfg.get("gpu_slugs", {
         "RTX 3090": "geforcertx3090-pcie-24gb",
         "RTX 4090": "geforcertx4090-pcie-24gb",
@@ -2396,7 +2467,7 @@ def find_tensordock_hostnode_offers(config, state, headers):
             scanned_gpu_rows += len(gpus)
             for gpu in gpus:
                 name = td_gpu_name(gpu)
-                cap = threshold_for(name, cfg.get("thresholds", {}))
+                cap = threshold_for(name, caps)
                 if cap is None:
                     continue
                 if not td_location_allowed(cfg, name, node):
@@ -3015,7 +3086,7 @@ def find_quickpod_offers(config, state):
     cfg = config["quickpod"]
     req = pool_requires(active_pool(config), config)
     min_launch = max(float(cfg.get("min_reliability", 0.95)), float(req.get("min_reliability", 0)))
-    thresholds = cfg.get("thresholds", {})
+    thresholds = effective_thresholds(cfg, config, "quickpod")
     wanted_gpus = set(normalize_gpu(x) for x in thresholds.keys())
     offers = quickpod_request("GET", "/rentable", timeout=45) or []
     matches = []
@@ -3066,7 +3137,17 @@ def find_quickpod_offers(config, state):
             "machine_id": str(view["machine_id"] or ""),
             "raw": view,
         })
+    # 只在命中时打日志会让进程看起来「静默」: 每 10 分钟打一条扫描心跳, 便于区分没货和挂了
+    now_ts = time.time()
+    if now_ts - _quickpod_scan_log[0] >= 600:
+        _quickpod_scan_log[0] = now_ts
+        gpu_offers = [o for o in offers if normalize_gpu(o.get("gpu_type") or "") in wanted_gpus and not o.get("occupied")]
+        cheapest = min((float(o.get("hourly_cost") or 999) / max(1, int(o.get("num_gpus") or 1)) for o in gpu_offers), default=None)
+        log(f"QuickPod scanned: offers={len(offers)} wanted_gpu_offers={len(gpu_offers)} matches={len(matches)}"
+            + (f" cheapest_per_gpu=${cheapest:.3f}/h" if cheapest is not None else ""))
     return sorted(matches, key=lambda x: x["price"])
+
+_quickpod_scan_log = [0.0]
 
 
 def quickpod_docker_options(env):
@@ -3372,6 +3453,9 @@ def clore_request(method, path, body=None, auth=True, timeout=40):
             if exc.code == 429 and attempt < 3:
                 time.sleep(1.5 * (attempt + 1))
                 continue
+            if exc.code == 401 and auth and attempt < 2:   # 实测 key 有效时也偶发 401(上游抖动), 短重试
+                time.sleep(2.0 * (attempt + 1))
+                continue
             raise
         if isinstance(data, dict) and data.get("code") == 5 and attempt < 3:
             time.sleep(1.5 * (attempt + 1))
@@ -3410,7 +3494,7 @@ def find_clore_offers(config, state):
     currency = cfg.get("currency", "USD-Blockchain")
     req = pool_requires(active_pool(config), config)
     min_rel = max(float(cfg.get("min_reliability", 0.95)), float(req.get("min_reliability", 0)))
-    thresholds = cfg.get("thresholds", {})
+    thresholds = effective_thresholds(cfg, config, "clore")
     wanted = set(normalize_gpu(x) for x in thresholds.keys())
     servers = (clore_request("GET", "/marketplace", auth=False, timeout=60) or {}).get("servers") or []
     matches = []
@@ -3512,7 +3596,7 @@ def rent_clore(config, match, state, live):
         if top is not None:   # 有人占着: 出价须高于对方, 仍在阈值内才抢, 否则冷却
             need = max(match["day_price"], round(top * (1 + float(cfg.get("outbid_step_pct", 3)) / 100.0) + 0.01, 4))
             per_card = clore_hourly(need, match["gpus"], order_type) / match["gpus"]
-            if per_card > (threshold_for(match["gpu"], cfg.get("thresholds", {})) or 0):
+            if per_card > (threshold_for(match["gpu"], effective_thresholds(cfg, config, "clore")) or 0):
                 log(f"Clore skip (spot held by others at ${top:.2f}/day, need ${per_card:.3f}/h/gpu > threshold): server={server_id} {match['gpu']}")
                 blacklist_offer(state, "clore", server_id, "spot_held", {"top_bid_usd_day": round(top, 4)},
                                 expires_epoch=epoch_now() + int(cfg.get("outbid_cooldown_seconds", 3600)))
@@ -3540,18 +3624,19 @@ def rent_clore(config, match, state, live):
     else:
         body["required_price"] = day   # 宿主临时改价则不启动
     t0 = epoch_now()
+    create_resp = None
     try:
-        clore_request("POST", "/create_order", body, timeout=60)
+        create_resp = clore_request("POST", "/create_order", body, timeout=60)
     except Exception as exc:
         payload = getattr(exc, "payload", None) or {}
         min_price = payload.get("min_price") if isinstance(payload, dict) else None
         # 底价随币价约每 10 分钟重算: 返回的 min_price 仍在阈值内就重出一次价
         if order_type == "spot" and min_price and payload.get("error") == "too_low_price" and \
-                clore_hourly(min_price, match["gpus"], order_type) / match["gpus"] <= (threshold_for(match["gpu"], cfg.get("thresholds", {})) or 0):
+                clore_hourly(min_price, match["gpus"], order_type) / match["gpus"] <= (threshold_for(match["gpu"], effective_thresholds(cfg, config, "clore")) or 0):
             day = float(min_price)
             body["spotprice"] = day
             try:
-                clore_request("POST", "/create_order", body, timeout=60)
+                create_resp = clore_request("POST", "/create_order", body, timeout=60)
                 exc = None
             except Exception as exc2:
                 exc = exc2
@@ -3574,7 +3659,9 @@ def rent_clore(config, match, state, live):
     rented["order_type"] = order_type
     rented["owner"] = match.get("owner")
     rented["day_price"] = day
-    log(f"Clore rent result: server={server_id} order={rented.get('contract_id')} worker={env['PRL_WORKER']} ${price:.3f}/h")
+    rented["create_response"] = str(create_resp)[:300]
+    log(f"Clore rent result: server={server_id} order={rented.get('contract_id')} worker={env['PRL_WORKER']} ${price:.3f}/h"
+        + ("" if order else f" create_response={str(create_resp)[:300]}"))
     notify(config, "Clore GPU rented", f"{match['gpu']} x{match['gpus']} ${price:.3f}/h {match['location']} server={server_id}",
            priority="high", tags=["white_check_mark", "clore"])
     return True
@@ -3616,7 +3703,12 @@ def reconcile_clore_instances(config, state):
             elif epoch_now() - float(rented.get("created_epoch") or 0) > 300:
                 rented["active"] = False
                 rented["inactive_reason"] = "order_not_found"
-                log(f"Clore order never appeared: server={server_id} gpu={rented.get('gpu')}")
+                # 下单回 code 0 却不落单(未扣费): 冷却该 server, 免得下一轮又对它空下单
+                blacklist_offer(state, "clore", rented.get("external_id"), "order_not_found",
+                                {"create_response": rented.get("create_response")},
+                                expires_epoch=epoch_now() + int(cfg.get("outbid_cooldown_seconds", 3600)))
+                log(f"Clore order never appeared: server={server_id} gpu={rented.get('gpu')} "
+                    f"create_response={rented.get('create_response')} (cooldown)")
                 continue
             else:
                 continue
