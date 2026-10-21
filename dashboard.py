@@ -9,7 +9,6 @@ import time
 import threading
 import subprocess
 import sys
-import secrets
 import hmac
 import hashlib
 import datetime as dt
@@ -1914,13 +1913,10 @@ def build_summary(pool_key="merged"):
         sincere[pk] = max(0.0, round(tot - base, 4))
     if pool_key == "pearlhash":
         output, basis = ph_output, "since_reset"
-        sr_output = ph_output
     elif pool_key in non_ph:
         output, basis = sincere[pool_key], "since_reset"
-        sr_output = sincere[pool_key]
     else:  # merged
         output, basis = round(ph_output + sum(sincere.values()), 4), "since_reset"
-        sr_output = round(ph_output + sum(sincere.values()), 4)
     output_usd = round(output * cp, 2)
     # 产出拆分: 待成熟(pending, 矿池未成熟) 与 已确认(= 总额 - 待成熟, clamp≥0), 供卡片次行标注; 两者相加 = 大数字总额
     if pool_key == "pearlhash":

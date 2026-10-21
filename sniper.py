@@ -8,7 +8,6 @@ import re
 import shlex
 import socket
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -3415,7 +3414,7 @@ def clore_offer_view(server):
     return {"id": server.get("id"), "machine_id": server.get("id"), "geolocation": str(net.get("cc") or "")}
 
 
-def clore_hourly(day_price, n_gpus, order_type):
+def clore_hourly(day_price, order_type):
     """整机每天出价 → 含租方费的整机每小时价。"""
     return float(day_price) / 24.0 * (1 + CLORE_RENTER_FEE.get(order_type, 0.0125))
 
@@ -3462,7 +3461,7 @@ def find_clore_offers(config, state):
         day = ((s.get("price") or {}).get(key) or {}).get(currency)
         if not day:
             continue
-        price = clore_hourly(day, n, order_type)
+        price = clore_hourly(day, order_type)
         max_price = threshold_for(gpu, thresholds)
         if max_price is None or price / n > max_price or price / n < float(cfg.get("min_offer_price_usd", 0)):
             continue
@@ -3530,13 +3529,13 @@ def rent_clore(config, match, state, live):
             return False
         if top is not None:   # 有人占着: 出价须高于对方, 仍在阈值内才抢, 否则冷却
             need = max(match["day_price"], round(top * (1 + float(cfg.get("outbid_step_pct", 3)) / 100.0) + 0.01, 4))
-            per_card = clore_hourly(need, match["gpus"], order_type) / match["gpus"]
+            per_card = clore_hourly(need, order_type) / match["gpus"]
             if per_card > (threshold_for(match["gpu"], effective_thresholds(cfg, config, "clore")) or 0):
                 log(f"Clore skip (spot held by others at ${top:.2f}/day, need ${per_card:.3f}/h/gpu > threshold): server={server_id} {match['gpu']}")
                 blacklist_offer(state, "clore", server_id, "spot_held", {"top_bid_usd_day": round(top, 4)},
                                 expires_epoch=epoch_now() + int(cfg.get("outbid_cooldown_seconds", 3600)))
                 return False
-            match = dict(match, day_price=need, price=clore_hourly(need, match["gpus"], order_type))
+            match = dict(match, day_price=need, price=clore_hourly(need, order_type))
     log(f"Clore hit: {match['gpu']} x{match['gpus']} ${match['price']:.3f}/h ({order_type} ${match['day_price']}/day) {match['location']} server={server_id}")
     if not live:
         log("Dry run: not renting Clore server")
@@ -3567,7 +3566,7 @@ def rent_clore(config, match, state, live):
         min_price = payload.get("min_price") if isinstance(payload, dict) else None
         # 底价随币价约每 10 分钟重算: 返回的 min_price 仍在阈值内就重出一次价
         if order_type == "spot" and min_price and payload.get("error") == "too_low_price" and \
-                clore_hourly(min_price, match["gpus"], order_type) / match["gpus"] <= (threshold_for(match["gpu"], effective_thresholds(cfg, config, "clore")) or 0):
+                clore_hourly(min_price, order_type) / match["gpus"] <= (threshold_for(match["gpu"], effective_thresholds(cfg, config, "clore")) or 0):
             day = float(min_price)
             body["spotprice"] = day
             try:
@@ -3580,7 +3579,7 @@ def rent_clore(config, match, state, live):
             blacklist_offer(state, "clore", server_id, "create_failed", {"gpu": match["gpu"], "price": match["price"]},
                             expires_epoch=epoch_now() + 3600)
             return False
-    price = clore_hourly(day, match["gpus"], order_type)
+    price = clore_hourly(day, order_type)
     order = None
     try:
         order = _clore_find_order(server_id, t0)
@@ -3664,7 +3663,7 @@ def reconcile_clore_instances(config, state):
             _clore_cancel(config, rented, pending.get("reason") or "pending_destroy")
             continue
         if order.get("price"):   # 订单价(每天, 出价)→ 含费每小时
-            rented["price"] = round(clore_hourly(order["price"], 1, "spot" if order.get("spot") else "on-demand"), 5)
+            rented["price"] = round(clore_hourly(order["price"], "spot" if order.get("spot") else "on-demand"), 5)
         # spot 出价没生效(排在别人后面)时 my_orders 照样列出, 但 spend 不涨 → 以 spend 增长判定「在跑」
         now_ts = epoch_now()
         spend = float(order.get("spend") or 0)

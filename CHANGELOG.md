@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [死代码清理] — 2026-10-21
+
+### Changed — 变更(重构, 不改行为)
+- 删掉未用导入 `dashboard.secrets` / `sniper.sys`、`build_summary` 里只写不读的 `sr_output`;`clore_hourly` 去掉没用到的 `n_gpus` 参数(价格本就是整机价)。`health.sh` 死代码 / 未用导入变量 4 → 0。
+
 ## [Kryptex 产出少算修复] — 2026-10-21
 
 ### Fixed — 修复
