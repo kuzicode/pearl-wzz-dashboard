@@ -637,6 +637,11 @@ def f2pool_worker_hashrates(config):
         return None
     url = f"https://api.f2pool.com/pearl/{urllib.parse.quote(account)}"
     data = request_json("GET", url, {"F2P-API-SECRET": token}, timeout=20)
+    # v1 业务错误也是 HTTP 200 + {"error": {...}}(如 token 失效 / IP 不在白名单); 必须当查询失败抛出,
+    # 否则会被解析成"查询成功但没有矿工", 机器被按 0 算力回收
+    if not isinstance(data, dict) or "error" in data or not isinstance(data.get("workers"), list):
+        err = data.get("error") if isinstance(data, dict) else None
+        raise RuntimeError(f"f2pool v1 invalid response: {err if err is not None else type(data).__name__}")
     return {name: {"hashrate_th": hashrate_to_th(hs), "gpu_info": []} for name, hs in f2pool_v1_rows(data)}
 
 
@@ -664,13 +669,14 @@ def monitored_pools(config, state=None):
 
 
 def merged_worker_hashrates_ex(config, state=None):
-    """同 merged_worker_hashrates, 另返回 pool_ok: 是否"至少一个被监控池查询成功(未抛异常)"。
+    """同 merged_worker_hashrates, 另返回 ok_pools: 本轮查询成功(未抛异常、非 None)的池集合。
     单池函数在 API 失败时会抛异常(见 request_json), 故"未抛异常"即该池查询成功(空结果=真的没 worker)。
-    pool_ok=False 表示全部被监控池查询都失败 → "worker 不在池" 应视为未知(不回收), 防矿池 API 抖动误杀。
-    返回 (merged, pool_ok)。"""
+    回收判定必须按机器所属池看 `rental_pool(r) in ok_pools`(见 pool_ok_for): 只要别的池成功就当全局成功,
+    会把查不了的池(F2Pool 无 token / 失败)上的机器判成 0 算力误杀。集合非空即真, 旧的 `not pool_ok` 写法语义不变。
+    返回 (merged, ok_pools)。"""
     pools = monitored_pools(config, state)
     merged = {}
-    pool_ok = False
+    ok_pools = set()
     for pool in pools:
         fn = _POOL_HASHRATE_FN.get(pool)
         if not fn:
@@ -682,12 +688,17 @@ def merged_worker_hashrates_ex(config, state=None):
             continue
         if wh is None:   # 该池不可查(如 F2Pool 未配 token): 不算查询成功, 免得 "worker 不在池" 被当成 0 算力
             continue
-        pool_ok = True
+        ok_pools.add(pool)
         for w, info in wh.items():
             cur = merged.get(w)
             if cur is None or float(info.get("hashrate_th") or 0) > float(cur.get("hashrate_th") or 0):
                 merged[w] = info
-    return merged, pool_ok
+    return merged, ok_pools
+
+
+def pool_ok_for(ok_pools, entry):
+    """这台机器所属池本轮是否查询成功(决定"worker 不在池"能否按 0 算力计)。"""
+    return rental_pool(entry) in (ok_pools or ())
 
 
 def merged_worker_hashrates(config):
@@ -959,7 +970,7 @@ POOLS = {
     # min_reliability→Vast 可靠度下限, grace_seconds_min→回收宽限下限, 矿池只给 30m 均值时防误杀); note: 配置页提示。
     "pearlhash": {"label": "PearlHash",
                   "image": "docker.io/kuzigmgm/pearl-miner:v13-wildrig",
-                  "reads_prl_host": True,
+                  "reads_prl_host": True, "default_host": "pool.pearlhash.xyz:9000",
                   "platforms": ["vast", "runpod", "tensordock", "salad", "quickpod", "clore"], "requires": {},
                   "note": "WildRig(OpenCL), 对宿主驱动容错好; 池 0% 抽水; API 给实时算力"},
     "twpool":    {"label": "TW Pool (小幣礦池)",
@@ -973,7 +984,7 @@ POOLS = {
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
                   "image": "docker.io/kuzigmgm/pearl-miner:srb-3.7.9-r1",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
-                  "reads_prl_host": True,
+                  "reads_prl_host": True, "default_host": "stratum+ssl://prl.kryptex.network:8048",
                   "platforms": ["vast", "salad", "runpod", "quickpod", "clore"],
                   "requires": {"min_reliability": 0.98, "grace_seconds_min": 1800},   # 池级要求; 矿机相关(min_cuda)在 miners[*].requires
                   # 同一池可选矿机变体(账号 config 顶层 "miner"), 记账/基线仍按 kryptex 一个池; 变体 requires 与池级合并
@@ -991,7 +1002,7 @@ POOLS = {
     # 镜像 = docker-srb 以 --build-arg PRL_POOL=f2pool 构建, tag 含 f2pool(pool_of_image 靠它识别)。
     "f2pool":    {"label": "F2Pool",
                   "image": "docker.io/kuzigmgm/pearl-miner:srb-f2pool-3.7.9-r1",
-                  "reads_prl_host": True,
+                  "reads_prl_host": True, "default_host": "stratum+tcp://pearl.f2pool.com:5500",
                   "platforms": ["vast", "salad", "runpod", "quickpod", "clore"],
                   "requires": {"min_reliability": 0.98},
                   "note": "账户名挖矿(需填 f2pool_account), 明文 5500 入口; 池费 3% 为推算待核实; 矿池算力/余额需 .env F2POOL_API_TOKEN(v1), 未配时 RunPod 无法判低效"},
@@ -1116,7 +1127,7 @@ def make_env(config, provider, gpu, external_id):
     min_hashrate = gpu_map_value(gpu, provider_cfg.get("min_hashrate_th", {}), 0) or 0
     env = {
         "PRL_ADDRESS": config["prl_address"],
-        "PRL_HOST": config["prl_host"],
+        "PRL_HOST": pool_host(config, active_pool(config)),
         "PRL_WORKER": worker[:63],
         "ALERT_URL": str(config.get("alert_url") or ""),
         "RENTAL_PRICE_USD_HOUR": str(price),
@@ -1128,6 +1139,26 @@ def make_env(config, provider, gpu, external_id):
     }
     env.update(pool_env_extra(config, active_pool(config)))
     return env
+
+
+def pool_of_host(host):
+    """矿池入口地址归属: 按域名关键字认 f2pool / kryptex / pearlhash; 认不出(自定义代理等) → None。"""
+    h = str(host or "").lower()
+    for k in ("f2pool", "kryptex", "pearlhash"):
+        if k in h:
+            return k
+    return None
+
+
+def pool_host(config, pool_id):
+    """容器 PRL_HOST: 账号 prl_host 属于该池(或认不出归属)时照用, 属于别的池时改用该池 default_host。
+    看板切池只改 config['pool'], prl_host 仍是旧池地址; 不纠正会拿 F2Pool 账户名去登 Kryptex 入口, 矿机挖不了还一直计费。"""
+    host = str((config or {}).get("prl_host") or "").strip()
+    owner = pool_of_host(host)
+    default = (POOLS.get(pool_id) or {}).get("default_host")
+    if default and (not host or (owner and owner != pool_id)):
+        return default
+    return host
 
 
 def pool_env_extra(config, pool_id):
@@ -1382,10 +1413,11 @@ def reconcile_vast_hashrate(config, state, rented, inst, contract_id, age):
         # 用租用时真正注入的 worker 名(env.PRL_WORKER); 按当前 config 重算会在切池后得到另一种命名(如 kx-va-… vs auto-vast-…)而查不到
         worker = ((rented.get("env") or {}).get("PRL_WORKER")) or make_worker(config, "vast", rented.get("gpu"), rented.get("external_id"))
         try:
-            merged, pool_ok = merged_worker_hashrates_ex(config, state)
+            merged, ok_pools = merged_worker_hashrates_ex(config, state)
         except Exception as exc:
             log(f"Vast pool worker check failed: contract={contract_id} worker={worker} error={type(exc).__name__}: {exc}")
-            merged, pool_ok = {}, False
+            merged, ok_pools = {}, set()
+        pool_ok = pool_ok_for(ok_pools, rented)
         info = lookup_worker(merged, worker)
         if info:
             rented["last_hashrate_lookup"] = {"worker": worker, "found": True, "ip": info.get("ip"), "version": info.get("version")}
@@ -1533,7 +1565,7 @@ def migrate_account(config, state, account_id, target_pool, live=True):
             worker = ((pod.get("env") or {}).get("PRL_WORKER")) or pod.get("name")
             env = {"PRL_ADDRESS": config["prl_address"], "PRL_WORKER": worker, **pool_env_extra(config, target_pool)}
             if reads_host:
-                env["PRL_HOST"] = config["prl_host"]
+                env["PRL_HOST"] = pool_host(config, target_pool)
             try:
                 if live:
                     migrate_runpod_pod(pid, image, env)
@@ -1569,7 +1601,7 @@ def migrate_account(config, state, account_id, target_pool, live=True):
             worker = salad_group_worker_name(g) or gname
             env = {"PRL_ADDRESS": config["prl_address"], "PRL_WORKER": worker, **pool_env_extra(config, target_pool)}
             if reads_host:
-                env["PRL_HOST"] = config["prl_host"]
+                env["PRL_HOST"] = pool_host(config, target_pool)
             try:
                 if live:
                     migrate_salad_group(config, gname, image, env)
@@ -1950,7 +1982,7 @@ def reconcile_runpod_instances(config, state):
             except Exception as exc:
                 log(f"RunPod untracked terminal delete failed: pod={pod_id} status={status} error={exc}")
     worker_hashrates = None
-    worker_api_failed = False
+    ok_pools = set()
     now_ts = epoch_now()
     interval = int(cfg.get("hashrate_watch_interval_seconds", 30))
     for rented in state.get("rented", []):
@@ -2015,13 +2047,12 @@ def reconcile_runpod_instances(config, state):
         rented["hashrate_last_check_epoch"] = now_ts
         if worker_hashrates is None:
             try:
-                # pool_ok=False 表示全部被监控池查询都失败 → worker_api_failed, 跳过不按 0 杀(防 API 抖动误杀全体)。
-                worker_hashrates, pool_ok = merged_worker_hashrates_ex(config, state)
-                worker_api_failed = not pool_ok
+                worker_hashrates, ok_pools = merged_worker_hashrates_ex(config, state)
             except Exception as exc:
                 log(f"RunPod pool worker check failed: {type(exc).__name__}: {exc}")
-                worker_hashrates = {}
-                worker_api_failed = True
+                worker_hashrates, ok_pools = {}, set()
+        # 本机所属池本轮查询失败 / 不可查 → worker_api_failed, 跳过不按 0 杀(防 API 抖动或无 token 误杀)
+        worker_api_failed = not pool_ok_for(ok_pools, rented)
         worker = ((rented.get("result") or {}).get("env") or {}).get("PRL_WORKER") or (pod.get("env") or {}).get("PRL_WORKER") or rented.get("result", {}).get("name") or pod.get("name")
         info = lookup_worker(worker_hashrates, worker)
         if not info:
@@ -2602,7 +2633,7 @@ def find_tensordock_offers(config, state):
 def tensordock_cloud_init(config, match):
     worker = make_worker(config, "td", match["gpu"], str(match["id"]).split(":")[0])
     prl_address = config["prl_address"]
-    prl_host = config["prl_host"]
+    prl_host = pool_host(config, active_pool(config))
     cfg = config.get("tensordock", {})
     driver_packages = gpu_map_value(match["gpu"], cfg.get("nvidia_driver_packages_by_gpu", {}))
     if not driver_packages:
@@ -3419,10 +3450,11 @@ def reconcile_quickpod_instances(config, state):
         if hashrate_th is None:
             worker = (rented.get("env") or {}).get("PRL_WORKER") or make_worker(config, "quickpod", rented.get("gpu"), rented.get("external_id"))
             try:
-                merged, pool_ok = merged_worker_hashrates_ex(config, state)
+                merged, ok_pools = merged_worker_hashrates_ex(config, state)
             except Exception as exc:
                 log(f"QuickPod pool worker check failed: pod={pod_uuid} worker={worker} {type(exc).__name__}: {exc}")
-                merged, pool_ok = {}, False
+                merged, ok_pools = {}, set()
+            pool_ok = pool_ok_for(ok_pools, rented)
             info = lookup_worker(merged, worker)
             rented["last_hashrate_lookup"] = {"worker": worker, "found": bool(info)}
             hashrate_th = resolve_hashrate_from_pool(info, pool_ok, bool(cfg.get("missing_worker_as_zero", True)))
@@ -3821,10 +3853,11 @@ def reconcile_clore_instances(config, state):
         in_grace = age < effective_grace(cfg, rental_pool(rented), 1800)
         worker = (rented.get("env") or {}).get("PRL_WORKER") or make_worker(config, "clore", rented.get("gpu"), rented.get("external_id"))
         try:
-            merged, pool_ok = merged_worker_hashrates_ex(config, state)
+            merged, ok_pools = merged_worker_hashrates_ex(config, state)
         except Exception as exc:
             log(f"Clore pool worker check failed: order={order_id} worker={worker} {type(exc).__name__}: {exc}")
-            merged, pool_ok = {}, False
+            merged, ok_pools = {}, set()
+        pool_ok = pool_ok_for(ok_pools, rented)
         info = lookup_worker(merged, worker)
         rented["last_hashrate_lookup"] = {"worker": worker, "found": bool(info)}
         hashrate_th = resolve_hashrate_from_pool(info, pool_ok, bool(cfg.get("missing_worker_as_zero", True)))

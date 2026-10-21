@@ -19,22 +19,24 @@ S._POOL_HASHRATE_FN = {
     "twpool":    lambda cfg: {"wB": {"hashrate_th": 50.0}},
 }
 m, ok = S.merged_worker_hashrates_ex({"monitor_pools": ["pearlhash", "twpool"]})
-ck("两池都成功 → pool_ok=True", ok is True and set(m) == {"wA", "wB"})
+ck("两池都成功 → ok_pools 含两池", ok == {"pearlhash", "twpool"} and set(m) == {"wA", "wB"})
 
-# 一池成功一池抛错 → 仍 pool_ok=True(至少一个成功)
+# 一池成功一池抛错 → 只有成功的池在 ok_pools; 按机器所属池判断(失败池上的机器不能按 0 算力计)
 S._POOL_HASHRATE_FN = {"pearlhash": lambda cfg: {"wA": {"hashrate_th": 100.0}}, "twpool": raiser}
 m, ok = S.merged_worker_hashrates_ex({"monitor_pools": ["pearlhash", "twpool"]})
-ck("一池成功即 pool_ok=True", ok is True and "wA" in m and "wB" not in m)
+ck("一池失败 → ok_pools 只含成功池", ok == {"pearlhash"} and "wA" in m and "wB" not in m)
+ck("成功池上的机器: pool_ok_for=True", S.pool_ok_for(ok, {"pool": "pearlhash"}) is True)
+ck("失败池上的机器: pool_ok_for=False(不误杀)", S.pool_ok_for(ok, {"pool": "twpool"}) is False)
 
 # 全池抛错 → pool_ok=False, merged 空
 S._POOL_HASHRATE_FN = {"pearlhash": raiser, "twpool": raiser}
 m, ok = S.merged_worker_hashrates_ex({"monitor_pools": ["pearlhash", "twpool"]})
-ck("全池失败 → pool_ok=False", ok is False and m == {})
+ck("全池失败 → ok_pools 空且为假", ok == set() and not ok and m == {})
 
 # 池返回空(成功但无 worker) → pool_ok=True
 S._POOL_HASHRATE_FN = {"pearlhash": lambda cfg: {}}
 m, ok = S.merged_worker_hashrates_ex({"monitor_pools": ["pearlhash"]})
-ck("成功但空结果 → pool_ok=True", ok is True and m == {})
+ck("成功但空结果 → 该池算成功", ok == {"pearlhash"} and m == {})
 
 # merged_worker_hashrates 兼容包装仍只返回字典
 S._POOL_HASHRATE_FN = {"pearlhash": lambda cfg: {"wA": {"hashrate_th": 7.0}}}

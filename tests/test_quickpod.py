@@ -130,7 +130,7 @@ S.record_rent(state6, "quickpod", 6, "NVIDIA GeForce RTX 3060 Ti", 0.05, {"pod_u
 r6 = state6["rented"][-1]; r6["created_epoch"] = S.epoch_now() - 4000; r6["env"] = {"PRL_WORKER": "auto-qu-6"}
 PODS[:] = [{"Names": "pod-6", "State": "running", "hourly_cost": 0.05, "machines_id": 6006, "logs": f"{ts(3600)} hashrate_th_s=100.0"}]
 pool_calls = []
-S.merged_worker_hashrates_ex = lambda c, s: (pool_calls.append(1) or ({}, True))
+S.merged_worker_hashrates_ex = lambda c, s: (pool_calls.append(1) or ({}, set(S.POOLS)))
 S.reconcile_quickpod_instances(config, state6)
 ck("日志 1 小时前的 100 TH/s 不采信 → 查了矿池; worker 不在池 → 按 0 进低效计时",
    len(pool_calls) == 1 and r6.get("low_efficiency_since_epoch") and r6.get("last_hashrate_th") == 0.0)

@@ -33,7 +33,7 @@ ck("f2pool_v1_rows: 数组/dict 都认, 空名跳过", rows==[("auto-va-12345678
 os.environ.pop("F2POOL_API_TOKEN", None)
 ck("无 token → f2pool_worker_hashrates 返回 None", S.f2pool_worker_hashrates(cfg) is None)
 merged, ok = S.merged_worker_hashrates_ex({**cfg,"monitor_pools":["f2pool"]}, {"rented":[]})
-ck("仅监控 f2pool 且无 token → pool_ok=False(不误杀)", ok is False and merged=={})
+ck("仅监控 f2pool 且无 token → ok_pools 空(不误杀)", ok == set() and merged=={})
 os.environ["F2POOL_API_TOKEN"]="tok"
 seen={}
 def _req(method,url,headers=None,body=None,timeout=30,retries=None):
@@ -66,6 +66,40 @@ BODY["v"]={"error":{"code":403,"message":"bad token"}}
 D._f2pool.update({"data":None,"ts":0})
 v=D._f2pool_view()
 ck("v1 错误体 → pool_error", "403" in str(v.get("pool_error")))
+
+# ---- review P1-1: 切池后 PRL_HOST 跟随目标池 ----
+KX="stratum+ssl://prl.kryptex.network:8048"; F2="stratum+tcp://pearl.f2pool.com:5500"
+sw={**cfg,"prl_host":KX}   # 看板切到 f2pool 只改 pool, prl_host 仍是 Kryptex
+ck("P1-1 f2pool + Kryptex 旧地址 → PRL_HOST 用 F2Pool 入口", S.make_env(sw,"vast","RTX 4090",1)["PRL_HOST"]==F2)
+ck("P1-1 迁移路径同口径(pool_host)", S.pool_host(sw,"f2pool")==F2)
+ck("P1-1 kryptex 池 + Kryptex 地址 → 不变", S.pool_host({**sw,"pool":"kryptex"},"kryptex")==KX)
+ck("P1-1 pearlhash 池 + Kryptex 地址 → PearlHash 默认入口", S.pool_host(sw,"pearlhash")==S.POOLS["pearlhash"]["default_host"])
+ck("P1-1 认不出归属的自定义地址(代理) → 照用", S.pool_host({**sw,"prl_host":"stratum+tcp://10.0.0.5:3333"},"f2pool")=="stratum+tcp://10.0.0.5:3333")
+ck("P1-1 rental_pool 按修正后的 PRL_HOST 认回 f2pool", S.rental_pool({"env":{"PRL_HOST":S.make_env(sw,"vast","RTX 4090",1)["PRL_HOST"]}})=="f2pool")
+
+# ---- review P1-2: 别的池成功不能让 F2Pool 机器按 0 算力回收 ----
+S.request_json=_req
+S._POOL_HASHRATE_FN={**S._POOL_HASHRATE_FN, "kryptex": lambda c: {}}
+os.environ.pop("F2POOL_API_TOKEN", None)
+mm, okp = S.merged_worker_hashrates_ex({**cfg,"monitor_pools":["kryptex","f2pool"]}, {"rented":[]})
+f2_machine={"pool":"f2pool","env":{"PRL_WORKER":"auto-va-1"}}
+ck("P1-2 Kryptex 成功 + F2Pool 无 token → ok_pools 只含 kryptex", okp=={"kryptex"})
+ck("P1-2 F2Pool 机器找不到 worker → 不按 0 算力(None, 跳过)", S.resolve_hashrate_from_pool(S.lookup_worker(mm,"auto-va-1"), S.pool_ok_for(okp,f2_machine), True) is None)
+ck("P1-2 Kryptex 机器找不到 worker → 仍按 0 算力回收", S.resolve_hashrate_from_pool(None, S.pool_ok_for(okp,{"pool":"kryptex"}), True)==0.0)
+
+# ---- review P1-3: F2Pool 业务错误体 = 查询失败 ----
+os.environ["F2POOL_API_TOKEN"]="tok"
+for bad in ({"error":{"code":403,"message":"bad token"}}, {"balance":1.0}, ["not","a","dict"]):
+    S.request_json=lambda *a, _b=bad, **k: _b
+    try:
+        S.f2pool_worker_hashrates(cfg); raised=False
+    except RuntimeError:
+        raised=True
+    ck(f"P1-3 无效响应 {str(bad)[:30]} → 抛出(查询失败)", raised)
+S.request_json=lambda *a, **k: {"error":{"code":403,"message":"bad token"}}
+mm, okp = S.merged_worker_hashrates_ex({**cfg,"monitor_pools":["f2pool"]}, {"rented":[]})
+ck("P1-3 只监控 F2Pool 且返回错误 → ok_pools 空, 不进零算力回收", okp==set() and S.resolve_hashrate_from_pool(None, S.pool_ok_for(okp,f2_machine), True) is None)
+os.environ.pop("F2POOL_API_TOKEN", None)
 
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")

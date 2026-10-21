@@ -52,7 +52,7 @@ def fake(method, path, body=None, auth=True, timeout=40):
         return {"code": 0}
     raise AssertionError(path)
 S.clore_request = fake
-S.merged_worker_hashrates_ex = lambda config, state=None: ({}, True)
+S.merged_worker_hashrates_ex = lambda config, state=None: ({}, set(S.POOLS))
 
 state = {"seen": {}, "rented": []}
 ids = [m["id"] for m in S.find_clore_offers(config, state)]

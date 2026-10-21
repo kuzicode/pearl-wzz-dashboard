@@ -2,6 +2,14 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [多池回收误杀 + 切池地址修复(review)] — 2026-10-21
+
+### Fixed — 修复
+- **切池后矿池地址不跟着换**:看板切池只改 `config.pool`,建机 / 迁移仍注入旧池的 `prl_host`(默认模板是 Kryptex TLS 入口),切到 F2Pool 后矿机拿 F2Pool 账户名登 Kryptex,挖不了还一直计费;Kryptex ↔ PearlHash 互切同样有此问题。新增 `pool_host()`:`prl_host` 属于目标池(或是认不出归属的自定义地址)时照用,属于别的池时改用 `POOLS[pool].default_host`;建机、两条迁移路径、TensorDock 统一走它。
+- **多池监控时误回收查不了的池上的机器**:`merged_worker_hashrates_ex` 的「查询成功」原是全局的,任一池成功即为真——切池后同时监控 Kryptex + F2Pool、F2Pool 无 token 或失败时,F2Pool 机器找不到 worker 会被按 0 算力回收拉黑。改为返回查询成功的池集合,Vast / RunPod / QuickPod / Clore 回收按机器所属池(`pool_ok_for`)判断。
+- **F2Pool 业务错误被当成空矿工列表**:v1 的 `{"error": …}`(token 失效 / IP 不在白名单)及缺 `workers` 的响应现在抛出,按查询失败处理,不再进零算力回收。
+- **health.sh 工具失败时显示「共 0」**:按各工具退出码区分「检查失败」与「零问题」(ruff 退出码 1 还要求输出非空),失败项单独标出并在末尾汇总;仍恒 exit 0。
+
 ## [代码健康报告脚本] — 2026-10-21
 
 ### Added — 新增
