@@ -713,7 +713,8 @@ def _salad_compute(account_id):
             mid8 = str(mid)[:8]
             for w in pool_workers:
                 nm = str(w.get("name") or "")
-                if mid in nm or (len(mid8) == 8 and f"-{mid8}" in nm):   # salad worker 名含 machine_id(KRig 镜像只带前 8 位)
+                # salad worker 名含 machine_id(KRig 镜像只带前 8 位); F2Pool 去掉 "-"(f2-27a96c30 → f227a96c30, ISS-032)
+                if mid in nm or (len(mid8) == 8 and (f"-{mid8}" in nm or re.sub(r"[^a-z0-9]", "", nm.lower()).endswith(mid8.lower()))):
                     return w
             return None
         def pgpu(w):

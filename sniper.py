@@ -262,6 +262,8 @@ _COINGECKO_PRICE = "https://api.coingecko.com/api/v3/simple/price?ids=pearl-2&vs
 PRICE_TTL = 300.0
 PRICE_STALE_MAX = 1800.0   # 超过此值不再信任缓存, 按利润率出价退回静态阈值
 _price_cache = {}           # {"p": float, "ts": float(成功时间), "try": float(上次尝试)}
+# 各账号进程共用的最近一次成功币价: 重启后内存缓存为空, 7 个进程同时拉币价常被限流(2026-10-30 CoinGecko 429 + SafeTrade 404)
+PRICE_PATH = Path(os.environ.get("SNIPER_PRICE_PATH") or (ROOT / "state.coin_price.json"))
 
 
 def network_yield_prl_per_th_h():
@@ -288,8 +290,16 @@ def network_yield_prl_per_th_h():
 
 
 def coin_price_usd():
-    """PRL 实时币价。5 分钟内用缓存; 两源都失败保留旧值, 超 30 分钟没成功返回 None(不用默认价, 免得按假币价出价)。"""
+    """PRL 实时币价。5 分钟内用缓存; 两源都失败保留旧值, 超 30 分钟没成功返回 None(不用默认价, 免得按假币价出价)。
+    成功值同时写 PRICE_PATH, 进程重启后先用它(仍受 30 分钟时效约束)。"""
     now_ts = time.time()
+    if not _price_cache.get("p"):
+        try:
+            saved = load_json(PRICE_PATH, {}) or {}
+            if float(saved.get("p") or 0) > 0:
+                _price_cache["p"], _price_cache["ts"] = float(saved["p"]), float(saved.get("ts") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
     if now_ts - float(_price_cache.get("try") or 0) >= PRICE_TTL:
         _price_cache["try"] = now_ts
         errors = []
@@ -301,6 +311,10 @@ def coin_price_usd():
                     p = float(pick(json.loads(r.read().decode("utf-8"))))
                 if p > 0:
                     _price_cache["p"], _price_cache["ts"] = p, now_ts
+                    try:
+                        save_json(PRICE_PATH, {"p": p, "ts": now_ts})
+                    except OSError as exc:
+                        log(f"Coin price save failed: {exc}")
                     break
                 errors.append(f"{url.split('/')[2]}: price={p}")
             except Exception as exc:
@@ -333,7 +347,7 @@ def expected_th(key, cfg):
 def effective_thresholds(cfg, config, provider=None):
     """按动态口径调整静态 thresholds(期望算力见 expected_th; 没有期望算力的卡保持静态值):
     - target_margin_pct: 上限 = 期望算力 × 产率 × 币价 × (1−池费) ÷ (1+利润率), 随币价/难度可升可降, 取代静态值
-      (thresholds 的 key 仍决定要哪些卡; 值只在产率或币价不可用时兜底)。
+      (thresholds 的 key 仍决定要哪些卡; 值只在产率不可用时兜底; 币价不可用 → 上限全 0, 暂停抢租)。
     - max_cost_per_prl(<平台> 优先, 否则账号顶层): 再与「max_cost_per_prl × 产率 × (1−池费) × 期望算力」取小。
     两者都未配 → 原样返回静态阈值; 产率不可用 → 静态阈值。"""
     static = dict(cfg.get("thresholds", {}) or {})
@@ -346,6 +360,10 @@ def effective_thresholds(cfg, config, provider=None):
         return static
     keep = 1 - POOL_FEE.get(active_pool(config), POOL_FEE_DEFAULT)
     price = coin_price_usd() if margin is not None else None
+    if margin is not None and not price:
+        # 按利润率出价却没有币价: 暂停抢租(上限全 0)。静态 thresholds 远高于利润率价, 兜底会高价抢机(2026-10-30 重启时实测)
+        _log_dyn_caps(provider or "account", config, y, margin, price, target, ["paused (no coin price)"])
+        return {k: 0.0 for k in static}
     out, changed = {}, []
     for key, cap in static.items():
         th = expected_th(key, cfg)
@@ -368,7 +386,7 @@ def _log_dyn_caps(provider, config, y, margin, price, target, changed):
     """动态上限日志: 调整结果变化时或每小时打一条。"""
     mode = []
     if margin is not None:
-        mode.append(f"margin={margin:g}% price=" + (f"${price:.3f}" if price else "unavailable(static)"))
+        mode.append(f"margin={margin:g}% price=" + (f"${price:.3f}" if price else "unavailable"))
     if target > 0:
         mode.append(f"target=${target:.2f}/PRL")
     summary = ", ".join(changed) or "none"
@@ -595,7 +613,21 @@ def lookup_worker(worker_hashrates, worker_name):
     # 前缀匹配: 找所有以 worker_name + '-' 开头的条目
     prefix = str(worker_name) + "-"
     matches = [v for k, v in worker_hashrates.items() if k.startswith(prefix)]
+    if matches:
+        return matches[0] if len(matches) == 1 else None
+    # F2Pool 会去掉 worker 名里的非字母数字并截到 15 位(auto-va-54341796-9… → autova543417969): 按归一化名互为前缀再匹配一次
+    want = worker_key(worker_name)
+    matches = [v for k, v in worker_hashrates.items()
+               if (kk := worker_key(k)) and (kk.startswith(want) or (len(kk) >= F2POOL_WORKER_MAXLEN and want.startswith(kk)))]
     return matches[0] if len(matches) == 1 else None
+
+
+F2POOL_WORKER_MAXLEN = 15   # 2026-10-30 实测: F2Pool v1 workers 名最多 15 位
+
+
+def worker_key(name):
+    """worker 名归一化(小写、只留字母数字), 用于匹配被矿池改写过的 worker 名。"""
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
 
 
 def alphapool_worker_hashrates(config):
@@ -4084,7 +4116,8 @@ def run_salad_cycle(config, state, live):
             return "", None
         mid8 = str(mid)[:8]   # KRig 镜像 rig 名只带 machine id 前 8 位(Kryptex 拒绝过长 rig 名), 也要能命中
         for wname, winfo in _pool_workers_for(pool_id).items():
-            if str(mid) in str(wname) or (len(mid8) == 8 and f"-{mid8}" in str(wname)):
+            # F2Pool 去掉 "-"(f2-5384e0ec → f25384e0ec), 故再按归一化名以 mid8 结尾匹配
+            if str(mid) in str(wname) or (len(mid8) == 8 and (f"-{mid8}" in str(wname) or worker_key(wname).endswith(worker_key(mid8)))):
                 gi = (winfo or {}).get("gpu_info") or []
                 gpu = str((gi[0] if gi else {}).get("name") or "").replace("NVIDIA GeForce ", "").strip()
                 return gpu, float((winfo or {}).get("hashrate_th") or 0)

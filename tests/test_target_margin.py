@@ -4,6 +4,7 @@
 import os, sys, json, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("SNIPER_LOG_PATH", os.path.join(tempfile.mkdtemp(), "t.log"))
+os.environ["SNIPER_PRICE_PATH"] = os.path.join(tempfile.mkdtemp(), "coin_price.json")
 import sniper as S
 
 fails = 0
@@ -39,7 +40,7 @@ check("币价减半 → 上限减半", abs(low - want / 2) < 1e-4)
 
 PRICE[0] = None
 out = S.effective_thresholds(cfg(target_margin_pct=20), CONFIG, "t")
-check("币价不可用 → 退回静态值", out["RTX 4090"] == 0.30)
+check("币价不可用 → 上限全 0(暂停抢租, 不退回静态值)", out["RTX 4090"] == 0 and out["RTX 9999"] == 0 and set(out) == set(cfg()["thresholds"]))
 PRICE[0] = 2.0
 
 out = S.effective_thresholds(cfg(target_margin_pct=0), CONFIG, "t")
@@ -99,6 +100,18 @@ check("旧值超 30 分钟 → None(不用默认价)", S2.coin_price_usd() is No
 S2._price_cache.clear()
 RESP[S2._SAFETRADE_TICKER] = {"ticker": {"last": "0"}}; RESP[S2._COINGECKO_PRICE] = {"pearl-2": {"usd": 2.05}}
 check("价格 0 视为无效 → 下一源", S2.coin_price_usd() == 2.05)
+
+print("== 币价落盘(重启后先用)")
+check("成功币价已写文件", json.load(open(S2.PRICE_PATH))["p"] == 2.05)
+S2._price_cache.clear()
+RESP[S2._SAFETRADE_TICKER] = RuntimeError("404"); RESP[S2._COINGECKO_PRICE] = RuntimeError("429")
+check("重启(内存空) + 两源都失败 → 用文件里的币价", S2.coin_price_usd() == 2.05)
+S2._price_cache.clear()
+json.dump({"p": 2.05, "ts": 0}, open(S2.PRICE_PATH, "w"))
+check("文件币价超 30 分钟 → None", S2.coin_price_usd() is None)
+S2._price_cache.clear()
+open(S2.PRICE_PATH, "w").write("{bad")
+check("文件损坏不抛异常 → None", S2.coin_price_usd() is None)
 
 print()
 print("全部通过" if fails == 0 else f"{fails} 个断言失败")

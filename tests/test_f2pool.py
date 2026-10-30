@@ -101,5 +101,13 @@ mm, okp = S.merged_worker_hashrates_ex({**cfg,"monitor_pools":["f2pool"]}, {"ren
 ck("P1-3 只监控 F2Pool 且返回错误 → ok_pools 空, 不进零算力回收", okp==set() and S.resolve_hashrate_from_pool(None, S.pool_ok_for(okp,f2_machine), True) is None)
 os.environ.pop("F2POOL_API_TOKEN", None)
 
+
+# F2Pool 去掉 worker 名里的 "-" 并截到 15 位(2026-10-30 生产实测 auto-va-54341796-9… → autova543417969)
+f2w = {"autova543417969": {"hashrate_th": 32.2}, "f25384e0ec": {"hashrate_th": 60.0}}
+ck("lookup_worker 认 F2Pool 去横杠+截断的名字", (S.lookup_worker(f2w, "auto-va-54341796") or {}).get("hashrate_th") == 32.2)
+ck("lookup_worker 认 F2Pool 去横杠的短名", (S.lookup_worker(f2w, "f2-5384e0ec") or {}).get("hashrate_th") == 60.0)
+ck("lookup_worker 不误配别的 worker", S.lookup_worker(f2w, "auto-va-99999999") is None)
+ck("截断名有歧义 → None", S.lookup_worker({"autova12345678a": {}, "autova12345678b": {}}, "auto-va-12345678") is None)
+
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")
