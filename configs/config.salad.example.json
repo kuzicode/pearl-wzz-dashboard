@@ -1,5 +1,5 @@
 {
-  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.7.9-r1",
+  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.8.2-r1",
   "prl_address": "prl1REPLACE_WITH_YOUR_OWN_WALLET_ADDRESS",
   "f2pool_account": "",
   "prl_host": "stratum+ssl://prl.kryptex.network:8048",

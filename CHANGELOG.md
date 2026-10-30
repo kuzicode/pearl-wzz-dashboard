@@ -2,6 +2,11 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [SRBMiner 升级 3.8.2] — 2026-10-30
+
+### Changed — 变更
+- Kryptex / F2Pool 默认矿机 SRBMiner-MULTI 3.7.9 → **3.8.2**:镜像 `srb-3.8.2-r1`、`srb-f2pool-3.8.2-r1`。只影响新租机器,在跑机器不迁移。
+
 ## [出价按目标利润率自动调整] — 2026-10-21
 
 ### Added — 新增
