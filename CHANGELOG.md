@@ -2,6 +2,12 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [代码精简 + 去除公开仓库里的组织名] — 2026-11-02
+
+### Changed — 变更
+- `salad_autologin.py` 不再写死 Salad 组织名,改从 `configs/config.<账号>.json` 的 `salad.organization_name` 读取(用法 `python salad_autologin.py [账号]`)。
+- 内部重构(行为不变):看板汇总里「池读数沿用上次有效值」与钱包流水翻页 / 汇总拆成独立函数,`build_summary` 复杂度回到基线以下。
+
 ## [新租切回 Kryptex + SRBMiner 3.8.3 + RunPod 限流退避] — 2026-11-02
 
 ### Changed — 变更
