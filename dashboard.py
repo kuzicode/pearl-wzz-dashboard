@@ -95,15 +95,14 @@ def list_accounts():
     return sorted(out, key=_ord)
 
 def account_label(account_id):
-    """卡片/侧栏标签: 平台-标识(标识 = 自定义 account_label / salad 的 org / 账号序号)。"""
+    """卡片/侧栏标签: 平台-标识(标识 = 自定义 account_label / salad 的 org / 账号序号); 无后缀且无标识 → 只显示平台名。"""
     plat = platform_of(account_id)
     cfg = read_config(account_id)
     custom = cfg.get("account_label")
     org = (cfg.get(plat, {}) or {}).get("organization_name")
     m = re.search(r"-(\d+)$", account_id)
-    n = m.group(1) if m else "1"
-    ident = custom or org or f"账号{n}"
-    return f"{plat}-{ident}"
+    ident = custom or org or (f"账号{m.group(1)}" if m else "")
+    return f"{plat}-{ident}" if ident else plat
 
 def key_var_for(account_id):
     """该账号 API key 的 .env 变量名: config.api_key_env 优先, 否则平台标准名。"""
@@ -827,6 +826,7 @@ def _http_json(method, url, headers, body=None):
         return json.loads(r.read().decode("utf-8"))
 
 _bal = {}  # plat -> (value|None, ts)
+_acct_email = {}  # account_id -> 登录邮箱(platform_balance 顺带解析)
 BAL_STALE_MAX = 300.0  # serve-stale: 后台刷新余额; 超此值才在请求线程兜底重拉(余额变动慢, 上限放宽)
 
 def estimate_manual_balance(balance_usd, asof_epoch, burn_hourly, now):
@@ -843,7 +843,7 @@ def platform_balance(account_id, force=False):
     c = _bal.get(account_id)
     if c and not force and (now - c[1] < BAL_STALE_MAX):
         return c[0]
-    val = None
+    val = email = None
     plat = platform_of(account_id)
     env = read_env()
     kv = key_var_for(account_id)
@@ -853,18 +853,22 @@ def platform_balance(account_id, force=False):
             if k:
                 d = _http_json("GET", "https://console.vast.ai/api/v0/users/current/", {"Authorization": "Bearer " + k})
                 val = d.get("credit")
+                email = d.get("email")
         elif plat == "runpod":
             k = env.get(kv) or os.environ.get(kv, "")
             if k:
                 d = _http_json("POST", "https://api.runpod.io/graphql",
                                {"Authorization": "Bearer " + k, "Content-Type": "application/json"},
-                               body={"query": "query{myself{clientBalance}}"})
-                val = ((d.get("data") or {}).get("myself") or {}).get("clientBalance")
+                               body={"query": "query{myself{clientBalance email}}"})
+                me = (d.get("data") or {}).get("myself") or {}
+                val = me.get("clientBalance")
+                email = me.get("email")
         elif plat == "quickpod":
             k = env.get(kv) or os.environ.get(kv, "")
             if k:
                 d = _http_json("GET", "https://api.quickpod.org/auth/me", {"X-API-Key": k, "Authorization": "ApiKey " + k})
                 val = d.get("credit")   # 实时扣费后的余额(实测每分钟递减)
+                email = d.get("email")
         elif plat == "clore":
             k = env.get(kv) or os.environ.get(kv, "")
             if k:   # Cloudflare 拦默认 Python UA(error 1010), 需带 UA
@@ -875,7 +879,14 @@ def platform_balance(account_id, force=False):
     except Exception:
         val = None
     _bal[account_id] = (val, now)
+    if email:
+        _acct_email[account_id] = str(email)
     return val
+
+def account_email(account_id):
+    """登录账号: config 顶层手填 account_email 优先, 否则余额接口顺带拿到的邮箱(Vast/RunPod/QuickPod); 都没有 → ""。
+    Clore / TensorDock / Salad 用 API key 拿不到用户信息, 只能手填。"""
+    return str(read_config(account_id).get("account_email") or _acct_email.get(account_id) or "")
 
 def active_rentals(account_id):
     st = read_state(account_id)
@@ -2282,6 +2293,8 @@ def build_rentals():
             "account_id": acct,
             "label": account_label(acct),
             "label_custom": full_cfg.get("account_label") or "",
+            "login": account_email(acct),                       # 登录账号(邮箱); 访客接口会剔除
+            "login_custom": full_cfg.get("account_email") or "",
             "console_url": account_console_url(acct),
             "enabled": cfg.get("enabled"),
             "create_enabled": cfg.get("create_enabled"),
@@ -2528,19 +2541,32 @@ def save_platform_cfg(acct, patch):
     backup_and_write(p, cfg)
     return {"ok": True, "platform": acct}
 
-def save_account_label(acct, label):
-    """改账号备注(config 顶层 account_label): 侧栏 / 总览 / 卡片 / 配置页标题统一显示 平台-备注; 空 = 恢复默认(账号N / salad 组织名)。"""
+def _save_account_field(acct, key, value, maxlen):
+    """写 config 顶层字符串字段(空白折叠、截断); 空 = 删除该键。"""
     if acct not in list_accounts():
-        return {"error": "账号无效"}
-    label = re.sub(r"\s+", " ", str(label or "")).strip()[:40]
+        return None
+    value = re.sub(r"\s+", " ", str(value or "")).strip()[:maxlen]
     p = cfg_path(acct)
     cfg = read_json(p, {})
-    if label:
-        cfg["account_label"] = label
+    if value:
+        cfg[key] = value
     else:
-        cfg.pop("account_label", None)
+        cfg.pop(key, None)
     backup_and_write(p, cfg)
+    return value
+
+def save_account_label(acct, label):
+    """改账号备注(config 顶层 account_label): 侧栏 / 总览 / 卡片 / 配置页标题统一显示 平台-备注;
+    空 = 恢复默认(salad 组织名 / 多账号 账号N / 单账号只显示平台名)。"""
+    if _save_account_field(acct, "account_label", label, 40) is None:
+        return {"error": "账号无效"}
     return {"ok": True, "platform": acct, "label": account_label(acct)}
+
+def save_account_email(acct, email):
+    """手填登录账号(config 顶层 account_email), 覆盖 API 拿到的邮箱; 空 = 恢复 API 值(拿不到的平台显示 —)。"""
+    if _save_account_field(acct, "account_email", email, 80) is None:
+        return {"error": "账号无效"}
+    return {"ok": True, "platform": acct, "login": account_email(acct)}
 
 def save_pool_cfg(acct, pool):
     """切换某账号'新抢机器用哪个矿池'(顶层 config['pool'], 只影响新 create, 不迁移老机器)。"""
@@ -2934,7 +2960,10 @@ class H(BaseHTTPRequestHandler):
                 pk = (qs.get("pool") or ["merged"])[0]
                 return self._send(200, build_summary(pk))
             if path == "/api/rentals":
-                return self._send(200, build_rentals())
+                r = build_rentals()
+                if role != "admin":   # 登录邮箱不给访客看
+                    r = {a: {k: v for k, v in info.items() if k not in ("login", "login_custom")} for a, info in r.items()}
+                return self._send(200, r)
             # ↓ 以下仅管理员;访客(guest)只能看总览数据与工具集
             if role != "admin":
                 return self._send(403, {"error": "forbidden"})
@@ -3007,6 +3036,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, restart_platform(str(data.get("platform", ""))))
         if path == "/api/account-label":
             return self._send(200, save_account_label(str(data.get("platform", "")), data.get("label", "")))
+        if path == "/api/account-email":
+            return self._send(200, save_account_email(str(data.get("platform", "")), data.get("email", "")))
         if path == "/api/guest-mode":
             return self._send(200, set_guest_enabled(bool(data.get("enabled"))))
         if path == "/api/dashboard-password":
