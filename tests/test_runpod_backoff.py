@@ -43,5 +43,34 @@ def _list(): raise e429('{"retryAfter":200}')
 S2.list_runpod_pods=_list
 st={}; S2.reconcile_runpod_instances({"runpod":{"create_enabled":True}}, st)
 ck("reconcile 列 pod 遇 429 → 退避 200", st.get("runpod_backoff_until")==NOW[0]+200)
+# 审查 P2: 本轮中途遇 429 必须立即收手(完整调用链, 只在最底层 request_json 打桩记录每个请求)
+S3=importlib.reload(S); S3.epoch_now=lambda: NOW[0]; S3.log=lambda m: None
+S3.renting_paused=lambda plat: False
+S3.effective_thresholds=lambda cfg, config, plat=None: {"NVIDIA GeForce RTX 4090": 0.3}
+FULL={"runpod":{"enabled":True,"create_enabled":True,"observe_enabled":True,"create_observed_price_factor":1},"max_active_instances":5,"max_total_hourly_usd":10,
+      "pool":"kryptex","prl_address":"prl1pX"}
+def run_chain(fail_on):
+    sent=[]
+    def _rj(method, url, headers=None, body=None, timeout=30):
+        kind="graphql" if "graphql" in url else ("list_pods" if method=="GET" and url.endswith("/pods") else f"{method} {url}")
+        sent.append(kind)
+        if kind==fail_on: raise e429('{"retryAfter":300}')
+        if kind=="list_pods": return []
+        return {"data":{"gpuTypes":[{"id":"NVIDIA GeForce RTX 4090","displayName":"RTX 4090",
+                "lowestPrice":{"stockStatus":"High","uninterruptablePrice":0.1,"availableGpuCounts":[1]}}]}}
+    S3.request_json=_rj
+    # 预置一条新鲜可用观测(低于上限): 否则建机循环会因"无观测命中"保守跳过, 测不出 observe 429 后仍建机
+    st={"runpod_observed_prices":{"COMMUNITY:NVIDIA GeForce RTX 4090":{"price":0.1,"status":"AVAILABLE","epoch":NOW[0]}}}
+    try:
+        S3.run_runpod_cycle(FULL, st, True)
+    except Exception:
+        pass   # 桩返回值不是真实建机响应, 只关心发出了哪些请求
+    return sent, st
+sent, st = run_chain("list_pods")
+ck("reconcile 列 pod 遇 429 → 本轮只发这 1 个请求, 不再列 pod / observe / 建机", sent==["list_pods"] and st.get("runpod_backoff_until")==NOW[0]+300)
+sent, st = run_chain("graphql")
+ck("observe 遇 429 → 之后不再发任何请求(无建机 POST)", sent and sent[-1]=="graphql" and st.get("runpod_backoff_until"))
+sent, st = run_chain(None)
+ck("对照: 不限流时同样的状态会发出建机 POST(证明上一条测得到建机路径)", any(k.startswith("POST") and "graphql" not in k for k in sent))
 if fails: print(f"\n{fails} 失败"); sys.exit(1)
 print("\n全部通过")

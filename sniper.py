@@ -2076,6 +2076,11 @@ def _runpod_backoff(body_text, state):
         log(f"RunPod 429 限流: 暂停 RunPod 请求 {int(wait)}s")
 
 
+def _runpod_backing_off(state):
+    """是否处于 RunPod 429 退避期(入口、reconcile 后、observe 后都要查, 本轮中途触发也立即收手)。"""
+    return epoch_now() < float(state.get("runpod_backoff_until") or 0)
+
+
 def runpod_observe(config, state):
     cfg = config["runpod"]
     if not cfg.get("observe_enabled", False):
@@ -2168,6 +2173,8 @@ def try_runpod_create(config, state, live):
     count, hourly = runpod_existing_count(config)
     log(f"RunPod existing pods: count={count} hourly=${hourly:.3f}")
     runpod_observe(config, state)
+    if _runpod_backing_off(state):
+        return   # observe 刚遇 429: 本轮不再建机
     if not cfg.get("create_enabled", False):
         log("RunPod create disabled in config; not attempting Pod creation")
         return
@@ -2307,7 +2314,7 @@ def try_runpod_create(config, state, live):
 def run_runpod_cycle(config, state, live):
     if not config.get("runpod", {}).get("enabled", False):
         return
-    if epoch_now() < float(state.get("runpod_backoff_until") or 0):
+    if _runpod_backing_off(state):
         return   # 429 退避期: 请求必被拒, 整轮跳过(含 reconcile 与列 pod), 到期自动恢复
     # 监控/回收(reconcile: 零算力/低效/短命拉黑)必须始终跑, 不受「暂停租用」与 create_enabled 影响;
     # 之前它挂在 try_runpod_create 的暂停/create 检查之后 → 暂停租用期间死机不回收(ISS-018)。
@@ -2316,6 +2323,8 @@ def run_runpod_cycle(config, state, live):
             reconcile_runpod_instances(config, state)
         except Exception as exc:
             log(f"RunPod reconcile error: {type(exc).__name__}: {exc}")
+        if _runpod_backing_off(state):
+            return   # reconcile 刚遇 429: 本轮不再列 pod / observe / 建机
     try_runpod_create(config, state, live)
 
 
