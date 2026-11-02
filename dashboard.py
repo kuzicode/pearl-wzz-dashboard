@@ -1854,6 +1854,54 @@ def _iso_epoch(s):
     except Exception:
         return None
 
+class _WalletPageCap(Exception):
+    """翻页超过 WALLET_LEDGER_MAX_PAGES 仍未到重置时刻。"""
+
+
+def _wallet_fetch_rows(addr, since):
+    """游标翻 prlscan txs(新→旧)到早于 since 为止, 按 txid 去重返回各条; 任一页异常 / 超页数上限直接抛出(调用方保留旧值)。"""
+    base = _PRLSCAN_ADDR_TXS.format(addr=urllib.parse.quote(addr))
+    seen, rows, cursor = set(), [], None
+    for _ in range(WALLET_LEDGER_MAX_PAGES):
+        url = base + (f"&cursor={urllib.parse.quote(cursor)}" if cursor else "")
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "sniper-dashboard/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        items = d.get("items")
+        if not isinstance(items, list):
+            raise ValueError(f"prlscan txs 无 items: {str(d)[:120]}")
+        done = False
+        for it in items:
+            t = _iso_epoch(it.get("time"))
+            if t is None:
+                raise ValueError(f"prlscan txs 时间无法解析: {it.get('time')}")
+            if t < since:
+                done = True
+            elif it.get("txid") not in seen:
+                seen.add(it.get("txid"))
+                rows.append(it)
+        cursor = d.get("next_cursor")
+        if done or not cursor or not items:
+            return rows
+    raise _WalletPageCap()
+
+
+def _wallet_summarize(rows):
+    """只算 canonical + confirmed: 收入按 type_label 分来源, 转出单列(不抵收入)。返回 (in_total, out_total, by_source)。"""
+    by_source = {"kryptex": 0.0, "f2pool": 0.0, "pearlhash": 0.0, "other": 0.0}
+    tin = tout = 0.0
+    for it in rows:
+        if it.get("canonical") is False or str(it.get("status") or "confirmed") != "confirmed":
+            continue
+        amt = float(it.get("delta_grains") or 0) / 1e8
+        if amt > 0:
+            tin += amt
+            by_source[_WALLET_SOURCE.get(str(it.get("type_label") or "").lower(), "other")] += amt
+        else:
+            tout += -amt
+    return round(tin, 4), round(tout, 4), {k: round(v, 4) for k, v in by_source.items()}
+
+
 def wallet_ledger(force=False):
     """重置以来钱包链上收支: {addr, since, in_total, out_total, by_source{kryptex,f2pool,pearlhash,other}, count, ts}。
     游标翻到早于 reset_epoch 为止; 任一页失败 / 超页数上限 → 保留旧值, 绝不写部分和(ISS-020 经验)。"""
@@ -1866,51 +1914,17 @@ def wallet_ledger(force=False):
         return old
     if not addr or not since:
         return None
-    base = _PRLSCAN_ADDR_TXS.format(addr=urllib.parse.quote(addr))
-    seen, rows, cursor, pages, done = set(), [], None, 0, False
     try:
-        while not done:
-            if pages >= WALLET_LEDGER_MAX_PAGES:
-                print(f"[wallet] txs 超过 {WALLET_LEDGER_MAX_PAGES} 页仍未翻到重置时刻, 保留旧值", flush=True)
-                return old if fresh else None
-            url = base + (f"&cursor={urllib.parse.quote(cursor)}" if cursor else "")
-            req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "sniper-dashboard/1.0"})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                d = json.loads(r.read().decode("utf-8"))
-            pages += 1
-            items = d.get("items")
-            if not isinstance(items, list):
-                raise ValueError(f"prlscan txs 无 items: {str(d)[:120]}")
-            for it in items:
-                t = _iso_epoch(it.get("time"))
-                if t is None:
-                    raise ValueError(f"prlscan txs 时间无法解析: {it.get('time')}")
-                if t < since:
-                    done = True
-                    continue
-                if it.get("txid") in seen:
-                    continue
-                seen.add(it.get("txid"))
-                rows.append(it)
-            cursor = d.get("next_cursor")
-            if not cursor or not items:
-                done = True
+        rows = _wallet_fetch_rows(addr, since)
+    except _WalletPageCap:
+        print(f"[wallet] txs 超过 {WALLET_LEDGER_MAX_PAGES} 页仍未翻到重置时刻, 保留旧值", flush=True)
+        return old if fresh else None
     except Exception as e:
         print(f"[wallet] prlscan txs 失败, 保留旧值: {type(e).__name__}: {e}", flush=True)
         return old if fresh else None
-    by_source = {"kryptex": 0.0, "f2pool": 0.0, "pearlhash": 0.0, "other": 0.0}
-    tin = tout = 0.0
-    for it in rows:
-        if it.get("canonical") is False or str(it.get("status") or "confirmed") != "confirmed":
-            continue
-        amt = float(it.get("delta_grains") or 0) / 1e8
-        if amt > 0:
-            tin += amt
-            by_source[_WALLET_SOURCE.get(str(it.get("type_label") or "").lower(), "other")] += amt
-        else:
-            tout += -amt
-    data = {"addr": addr, "since": since, "in_total": round(tin, 4), "out_total": round(tout, 4),
-            "by_source": {k: round(v, 4) for k, v in by_source.items()}, "count": len(rows), "ts": int(now)}
+    tin, tout, by_source = _wallet_summarize(rows)
+    data = {"addr": addr, "since": since, "in_total": tin, "out_total": tout,
+            "by_source": by_source, "count": len(rows), "ts": int(now)}
     _wallet_ledger.update({"data": data, "ts": now})
     return data
 
@@ -1997,6 +2011,52 @@ def _default_pool_key(S):
             c[pk] += 1
     return c.most_common(1)[0][0] if c else "pearlfortune"
 
+def _settle_pool_reading(pk, v, lg, now):
+    """单池全期读数 → ((tot, unpaid, pending), 新 last_good 项, 是否 stale)(ISS-034)。
+    视图有效(无错、balance/paid 都有值、paid 未过期)才采用; 无效且有 last_good → 沿用并标 stale。
+    全期只该上涨: 有效但低于 last_good(付款后余额已降、paid 还是旧值)静默沿用, 持续超过 OUTPUT_DIP_ACCEPT_S 才接受。"""
+    pend = float(v.get("pending_balance") or 0)
+    bal = float(v.get("pool_balance") or 0)
+    cur = (round(bal + float(v.get("pool_paid") or 0) + pend, 4), round(bal + pend, 4), pend)
+    pts = v.get("pool_paid_ts")
+    valid = not (v.get("pool_error") or v.get("pool_unconfigured")) and \
+        v.get("pool_balance") is not None and v.get("pool_paid") is not None and \
+        (pts is None or now - float(pts) <= POOL_PAID_STALE_S)
+    lg = lg if isinstance(lg, dict) else None
+    held = (float(lg["tot"]), float(lg["unpaid"]), float(lg["pending"])) if lg else None
+    fresh = {"tot": cur[0], "unpaid": cur[1], "pending": cur[2]}
+    if not valid:
+        return (held, lg, True) if lg else (cur, None, False)
+    if lg and cur[0] < held[0] - 1e-4:
+        dip = float(lg.get("dip_since") or now)
+        if now - dip <= OUTPUT_DIP_ACCEPT_S:
+            return held, {**lg, "dip_since": dip}, False
+        print(f"[output] {pk} 全期产出持续回落 {lg['tot']} -> {cur[0]}, 接受新值", flush=True)
+    return cur, fresh, False
+
+
+def _pool_alltime_readings(stats, pools):
+    """各非-PearlHash 池全期读数 {pool: (tot, unpaid, pending)} 与 stale 池列表; last_good 有变化时回写 stats。"""
+    last_good = dict(stats.get("output_last_good") or {})
+    readings, stale, now = {}, [], time.time()
+    for pk in pools:
+        readings[pk], lg, is_stale = _settle_pool_reading(pk, POOL_MONITORS[pk]["view"](), last_good.get(pk), now)
+        if lg is not None:
+            last_good[pk] = lg
+        if is_stale:
+            stale.append(pk)
+    if last_good != (stats.get("output_last_good") or {}):
+        with _lock:
+            _s = read_json(STATS_PATH, {})
+            if _s.get("reset_epoch") == stats.get("reset_epoch"):   # 期间被重置过则不回写旧值
+                _s["output_last_good"] = last_good
+                try:
+                    json.dump(_s, open(STATS_PATH, "w"))
+                except Exception:
+                    pass
+    return readings, stale
+
+
 def build_summary(pool_key="merged"):
     import sniper as S
     valid = set(S.POOLS) | {"merged"}
@@ -2030,50 +2090,12 @@ def build_summary(pool_key="merged"):
     sincere = {}     # pool -> 自重置增量
     np_pending = {}  # pool -> 当前待成熟(pending_balance)
     np_unpaid = {}   # pool -> 当前池内未付(balance + pending), 钱包对账用
-    # 池 API 出错 / paid 未取到(如重启后 Kryptex payouts 未翻完)时 balance+paid 会按 0 → 产出瞬间掉一截(ISS-034)。
-    # 视图有效(无错、balance/paid 都有值、paid 未过期)才刷新 last_good; 无效且有 last_good 时沿用并标 stale。
-    # 全期 balance+paid+pending 只该上涨: 读数低于 last_good(付款后余额已降、paid 还是旧值)静默沿用,
-    # 持续低于超过 OUTPUT_DIP_ACCEPT_S 才接受新值(真实回落不至于永久冻结)。
-    last_good = dict(stats.get("output_last_good") or {})
-    stale_pools = []
-    _now = time.time()
+    readings, stale_pools = _pool_alltime_readings(stats, non_ph)
     for pk in non_ph:
-        v = POOL_MONITORS[pk]["view"]()
-        _pend = float(v.get("pending_balance") or 0)
-        tot = round(float(v.get("pool_balance") or 0) + float(v.get("pool_paid") or 0) + _pend, 4)
-        unpaid = round(float(v.get("pool_balance") or 0) + _pend, 4)
-        _pts = v.get("pool_paid_ts")
-        valid = not (v.get("pool_error") or v.get("pool_unconfigured")) and \
-            v.get("pool_balance") is not None and v.get("pool_paid") is not None and \
-            (_pts is None or _now - float(_pts) <= POOL_PAID_STALE_S)
-        _lg = last_good.get(pk) if isinstance(last_good.get(pk), dict) else None
-        if valid and _lg and tot < float(_lg["tot"]) - 1e-4:
-            _dip = float(_lg.get("dip_since") or _now)
-            if _now - _dip > OUTPUT_DIP_ACCEPT_S:
-                print(f"[output] {pk} 全期产出持续回落 {_lg['tot']} -> {tot}, 接受新值", flush=True)
-                last_good[pk] = {"tot": tot, "unpaid": unpaid, "pending": _pend}
-            else:
-                last_good[pk] = {**_lg, "dip_since": _dip}
-                tot, unpaid, _pend = float(_lg["tot"]), float(_lg["unpaid"]), float(_lg["pending"])
-        elif valid:
-            last_good[pk] = {"tot": tot, "unpaid": unpaid, "pending": _pend}
-        elif _lg:
-            tot, unpaid, _pend = float(_lg["tot"]), float(_lg["unpaid"]), float(_lg["pending"])
-            stale_pools.append(pk)
-        np_pending[pk] = _pend
-        np_unpaid[pk] = unpaid
+        tot, np_unpaid[pk], np_pending[pk] = readings[pk]
         alltime[pk] = tot
         base = float(stats.get(_baseline_key(pk)) or 0.0)
         sincere[pk] = max(0.0, round(tot - base, 4))
-    if last_good != (stats.get("output_last_good") or {}):
-        with _lock:
-            _s = read_json(STATS_PATH, {})
-            if _s.get("reset_epoch") == stats.get("reset_epoch"):   # 期间被重置过则不回写旧值
-                _s["output_last_good"] = last_good
-                try:
-                    json.dump(_s, open(STATS_PATH, "w"))
-                except Exception:
-                    pass
     if pool_key == "pearlhash":
         output, basis = ph_output, "since_reset"
     elif pool_key in non_ph:
