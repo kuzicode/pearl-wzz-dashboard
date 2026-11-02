@@ -28,6 +28,9 @@ D.twpool_data = lambda force=False: {"balance": 50.0, "paid": 50.0}  # tw_total=
 D.herominers_data=lambda force=False: {"error":"Not found"}
 D.pearlfortune_data=lambda force=False: {"miner":{"data":{"balances":None}},"connections":{"data":{"workers":[]}},"ledger":{"data":{}}}
 D.pearlfortune_pool_fee=lambda force=False: None       # 不打网络
+D.kryptex_data=lambda force=False: {"_error":"offline"}   # 不打网络(原先会拉到真实 Kryptex 余额, merged 断言随行情失败)
+D.kryptex_payouts_total=lambda force=False: None
+D.f2pool_data=lambda force=False: {"_unconfigured": True}
 D.build_rentals = lambda: {}                           # 无机器 → burn 0
 D.pool_view = lambda which: {"total_hashrate_th": 0.0, "workers": [], "pool_balance": None, "pool_error": None}
 D.prl_address = lambda: "prl1x"

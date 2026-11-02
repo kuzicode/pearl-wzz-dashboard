@@ -1083,6 +1083,10 @@ def _refresh_once():
         fetch_network_yield(force=True)
     except Exception:
         pass
+    try:
+        wallet_ledger()               # TTL 10 分钟, 未到期直接返回缓存
+    except Exception:
+        pass
     for acct in list_accounts():
         try:
             if platform_of(acct) == "salad":
@@ -1719,6 +1723,7 @@ def _kryptex_view():
     paid = kryptex_payouts_total()   # serve-stale(后台预热), 未取到过为 None
     return {"workers": wlist, "total_hashrate_th": round(total, 2),
             "pool_balance": pb, "pool_paid": paid, "pool_paid_items": list(_kryptex_paid.get("items") or []),
+            "pool_paid_ts": (_kryptex_paid["ts"] if paid is not None else None),   # 翻页失败时 ts 不更新, build_summary 据此判 paid 过期
             "pool_error": err}
 
 
@@ -1819,6 +1824,115 @@ def pool_view(which):
             "pool_error": (errs[0] if errs else None)}
 
 
+# ---------- 钱包链上对账(prlscan, 只读参考, 不替换产出口径) ----------
+# GET /v1/addresses/<addr>/txs?limit=100&cursor=<next_cursor>, 新→旧; 每条 time / delta_grains / canonical / status / type_label。
+# type_label 实测: "Kryptex payout" / "F2Pool payout" / "PearlHash payout" / "Batch payout" / null(后两类归 other)。
+_PRLSCAN_ADDR_TXS = "https://api.prlscan.com/v1/addresses/{addr}/txs?limit=100"
+_WALLET_SOURCE = {"kryptex payout": "kryptex", "f2pool payout": "f2pool", "pearlhash payout": "pearlhash"}
+WALLET_LEDGER_TTL = 600.0
+WALLET_LEDGER_MAX_PAGES = 100     # 每页 100 笔; 2026-11-02 实测重置 12 天约 200 笔
+WALLET_RECONCILE_WARN = 3.0       # |对账差| 超过这么多 PRL 前端标黄
+WALLET_RECONCILE_WARN_HOLD = 1800.0   # 差额需持续这么久才报警: 矿池先记已付、链上确认在后, F2Pool 日付一笔就 5–14 PRL
+_wallet_ledger = {"data": None, "ts": 0.0, "over_since": None}
+OUTPUT_DIP_ACCEPT_S = 3600.0      # 全期产出读数持续低于 last_good 超过这么久才接受(ISS-034)
+POOL_PAID_STALE_S = 1800.0        # 视图带 pool_paid_ts 时, 已付总额超过这么久没刷新成功 → 视图无效(沿用 last_good 并标 stale)
+
+def _iso_epoch(s):
+    try:
+        return dt.datetime.strptime(str(s), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc).timestamp()
+    except Exception:
+        return None
+
+def wallet_ledger(force=False):
+    """重置以来钱包链上收支: {addr, since, in_total, out_total, by_source{kryptex,f2pool,pearlhash,other}, count, ts}。
+    游标翻到早于 reset_epoch 为止; 任一页失败 / 超页数上限 → 保留旧值, 绝不写部分和(ISS-020 经验)。"""
+    now = time.time()
+    addr = prl_address()
+    since = float(read_json(STATS_PATH, {}).get("reset_epoch") or 0)
+    old = _wallet_ledger["data"]
+    fresh = isinstance(old, dict) and old.get("addr") == addr and old.get("since") == since
+    if fresh and not force and (now - _wallet_ledger["ts"] < WALLET_LEDGER_TTL):
+        return old
+    if not addr or not since:
+        return None
+    base = _PRLSCAN_ADDR_TXS.format(addr=urllib.parse.quote(addr))
+    seen, rows, cursor, pages, done = set(), [], None, 0, False
+    try:
+        while not done:
+            if pages >= WALLET_LEDGER_MAX_PAGES:
+                print(f"[wallet] txs 超过 {WALLET_LEDGER_MAX_PAGES} 页仍未翻到重置时刻, 保留旧值", flush=True)
+                return old if fresh else None
+            url = base + (f"&cursor={urllib.parse.quote(cursor)}" if cursor else "")
+            req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "sniper-dashboard/1.0"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            pages += 1
+            items = d.get("items")
+            if not isinstance(items, list):
+                raise ValueError(f"prlscan txs 无 items: {str(d)[:120]}")
+            for it in items:
+                t = _iso_epoch(it.get("time"))
+                if t is None:
+                    raise ValueError(f"prlscan txs 时间无法解析: {it.get('time')}")
+                if t < since:
+                    done = True
+                    continue
+                if it.get("txid") in seen:
+                    continue
+                seen.add(it.get("txid"))
+                rows.append(it)
+            cursor = d.get("next_cursor")
+            if not cursor or not items:
+                done = True
+    except Exception as e:
+        print(f"[wallet] prlscan txs 失败, 保留旧值: {type(e).__name__}: {e}", flush=True)
+        return old if fresh else None
+    by_source = {"kryptex": 0.0, "f2pool": 0.0, "pearlhash": 0.0, "other": 0.0}
+    tin = tout = 0.0
+    for it in rows:
+        if it.get("canonical") is False or str(it.get("status") or "confirmed") != "confirmed":
+            continue
+        amt = float(it.get("delta_grains") or 0) / 1e8
+        if amt > 0:
+            tin += amt
+            by_source[_WALLET_SOURCE.get(str(it.get("type_label") or "").lower(), "other")] += amt
+        else:
+            tout += -amt
+    data = {"addr": addr, "since": since, "in_total": round(tin, 4), "out_total": round(tout, 4),
+            "by_source": {k: round(v, 4) for k, v in by_source.items()}, "count": len(rows), "ts": int(now)}
+    _wallet_ledger.update({"data": data, "ts": now})
+    return data
+
+
+def _wallet_reconcile(stats, sincere, np_unpaid):
+    """链上已到账 vs 按矿池推算应到账(非-PearlHash 池): 每池应到账 = 自重置产出 − 当前未付 + 重置时池内未付(基线 − 基线时已付)。
+    PearlHash 产出口径不同(epoch credit), 不参与比较, 链上 PearlHash 收入从两侧剔除。无钱包数据 → None。"""
+    w = _wallet_ledger["data"]
+    if not (isinstance(w, dict) and w.get("addr") == prl_address()
+            and w.get("since") == float(stats.get("reset_epoch") or 0)):
+        return None
+    expected = 0.0
+    for pk, out in sincere.items():
+        base = stats.get(_baseline_key(pk))
+        pbase = stats.get(_paid_baseline_key(pk))
+        pre_unpaid = float(base) - float(pbase) if (base is not None and pbase is not None) else 0.0
+        expected += out - float(np_unpaid.get(pk) or 0.0) + max(0.0, pre_unpaid)
+    received = float(w["in_total"]) - float(w["by_source"].get("pearlhash") or 0.0)
+    diff = round(received - expected, 4)
+    now = time.time()
+    age = now - float(w["ts"])
+    stale = age > 2 * WALLET_LEDGER_TTL          # prlscan 连续失败: 旧到账额与最新矿池数据不同时点, 不报警
+    if abs(diff) > WALLET_RECONCILE_WARN and not stale:
+        _wallet_ledger["over_since"] = _wallet_ledger.get("over_since") or now
+    else:
+        _wallet_ledger["over_since"] = None
+    _over = _wallet_ledger["over_since"]
+    return {"wallet_in": w["in_total"], "wallet_out": w["out_total"], "by_source": w["by_source"], "count": w["count"],
+            "received_ex_pearlhash": round(received, 4), "expected": round(expected, 4), "diff": diff,
+            "warn": bool(_over and now - _over >= WALLET_RECONCILE_WARN_HOLD),
+            "stale": stale, "age_s": int(age), "ts": w["ts"]}
+
+
 # ---------- 总览数据 ----------
 def _is_running(machine):
     """是否算"在跑": 非 salad 的活跃租约无 state(None)直接算; salad 按实例 state,
@@ -1904,14 +2018,51 @@ def build_summary(pool_key="merged"):
     alltime = {}     # pool -> balance+paid(全期)
     sincere = {}     # pool -> 自重置增量
     np_pending = {}  # pool -> 当前待成熟(pending_balance)
+    np_unpaid = {}   # pool -> 当前池内未付(balance + pending), 钱包对账用
+    # 池 API 出错 / paid 未取到(如重启后 Kryptex payouts 未翻完)时 balance+paid 会按 0 → 产出瞬间掉一截(ISS-034)。
+    # 视图有效(无错、balance/paid 都有值、paid 未过期)才刷新 last_good; 无效且有 last_good 时沿用并标 stale。
+    # 全期 balance+paid+pending 只该上涨: 读数低于 last_good(付款后余额已降、paid 还是旧值)静默沿用,
+    # 持续低于超过 OUTPUT_DIP_ACCEPT_S 才接受新值(真实回落不至于永久冻结)。
+    last_good = dict(stats.get("output_last_good") or {})
+    stale_pools = []
+    _now = time.time()
     for pk in non_ph:
         v = POOL_MONITORS[pk]["view"]()
         _pend = float(v.get("pending_balance") or 0)
-        np_pending[pk] = _pend
         tot = round(float(v.get("pool_balance") or 0) + float(v.get("pool_paid") or 0) + _pend, 4)
+        unpaid = round(float(v.get("pool_balance") or 0) + _pend, 4)
+        _pts = v.get("pool_paid_ts")
+        valid = not (v.get("pool_error") or v.get("pool_unconfigured")) and \
+            v.get("pool_balance") is not None and v.get("pool_paid") is not None and \
+            (_pts is None or _now - float(_pts) <= POOL_PAID_STALE_S)
+        _lg = last_good.get(pk) if isinstance(last_good.get(pk), dict) else None
+        if valid and _lg and tot < float(_lg["tot"]) - 1e-4:
+            _dip = float(_lg.get("dip_since") or _now)
+            if _now - _dip > OUTPUT_DIP_ACCEPT_S:
+                print(f"[output] {pk} 全期产出持续回落 {_lg['tot']} -> {tot}, 接受新值", flush=True)
+                last_good[pk] = {"tot": tot, "unpaid": unpaid, "pending": _pend}
+            else:
+                last_good[pk] = {**_lg, "dip_since": _dip}
+                tot, unpaid, _pend = float(_lg["tot"]), float(_lg["unpaid"]), float(_lg["pending"])
+        elif valid:
+            last_good[pk] = {"tot": tot, "unpaid": unpaid, "pending": _pend}
+        elif _lg:
+            tot, unpaid, _pend = float(_lg["tot"]), float(_lg["unpaid"]), float(_lg["pending"])
+            stale_pools.append(pk)
+        np_pending[pk] = _pend
+        np_unpaid[pk] = unpaid
         alltime[pk] = tot
         base = float(stats.get(_baseline_key(pk)) or 0.0)
         sincere[pk] = max(0.0, round(tot - base, 4))
+    if last_good != (stats.get("output_last_good") or {}):
+        with _lock:
+            _s = read_json(STATS_PATH, {})
+            if _s.get("reset_epoch") == stats.get("reset_epoch"):   # 期间被重置过则不回写旧值
+                _s["output_last_good"] = last_good
+                try:
+                    json.dump(_s, open(STATS_PATH, "w"))
+                except Exception:
+                    pass
     if pool_key == "pearlhash":
         output, basis = ph_output, "since_reset"
     elif pool_key in non_ph:
@@ -2091,6 +2242,8 @@ def build_summary(pool_key="merged"):
         "pools": [{"id": k, "label": v["label"]} for k, v in available_pools(S)],
         "stats_since": int(float(stats.get("reset_epoch") or stats.get("last_epoch") or 0)),
         "pool_error": pv["pool_error"],
+        "output_stale_pools": stale_pools,          # 池 API 暂不可用、产出沿用上次有效值的池(ISS-034)
+        "wallet_reconcile": _wallet_reconcile(stats, sincere, np_unpaid),
         "ts": int(time.time()),
     }
 
