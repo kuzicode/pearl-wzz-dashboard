@@ -22,7 +22,7 @@ POOLS = {
                      "image": "docker.io/mrkidbk/pearl-miner-pearlfortune:latest",
                      "reads_prl_host": False},  # 默认 global.pearlfortune.org:443; PRL_PROXY 可覆盖(v1 不接)
     "kryptex":   {"label": "Kryptex",
-                  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.8.2-r1",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
+                  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.8.3-r1",   # = 默认矿机变体(default_miner)的镜像, 向后兼容
                   "reads_prl_host": True, "default_host": "stratum+ssl://prl.kryptex.network:8048",
                   "platforms": ["vast", "salad", "runpod", "quickpod", "clore"],
                   "requires": {"min_reliability": 0.98, "grace_seconds_min": 1800},   # 池级要求; 矿机相关(min_cuda)在 miners[*].requires
@@ -31,7 +31,7 @@ POOLS = {
                       "krig":     {"label": "KRig 1.5.2", "image": "docker.io/kuzigmgm/pearl-miner:krig-1.5.2",
                                    "requires": {"min_cuda": 13.0},
                                    "note": "Kryptex 官方 miner, 0% dev fee; 宿主驱动需支持 CUDA ≥ 13(≥580)且显存独占, RunPod 社区机约半数 cuInit 失败"},
-                      "srbminer": {"label": "SRBMiner-MULTI 3.8.2", "image": "docker.io/kuzigmgm/pearl-miner:srb-3.8.2-r1",
+                      "srbminer": {"label": "SRBMiner-MULTI 3.8.3", "image": "docker.io/kuzigmgm/pearl-miner:srb-3.8.3-r1",
                                    "requires": {},
                                    "note": "pearlhash 不硬性要求 CUDA 13, 旧驱动宿主可跑(5000 系建议 ≥580); dev fee 2%; 无 TTY 不输出故镜像用 script 伪终端包裹, 每分钟打 hashrate_th_s= 行"},
                   },
@@ -40,7 +40,7 @@ POOLS = {
     # F2Pool: 账户名挖矿(登录 "账户名.矿工名", 账号 config 顶层 f2pool_account), 官方教程只给明文 pearl.f2pool.com:5500。
     # 镜像 = docker-srb 以 --build-arg PRL_POOL=f2pool 构建, tag 含 f2pool(pool_of_image 靠它识别)。
     "f2pool":    {"label": "F2Pool",
-                  "image": "docker.io/kuzigmgm/pearl-miner:srb-f2pool-3.8.2-r1",
+                  "image": "docker.io/kuzigmgm/pearl-miner:srb-f2pool-3.8.3-r1",
                   "reads_prl_host": True, "default_host": "stratum+tcp://pearl.f2pool.com:5500",
                   "platforms": ["vast", "salad", "runpod", "quickpod", "clore"],
                   "requires": {"min_reliability": 0.98},

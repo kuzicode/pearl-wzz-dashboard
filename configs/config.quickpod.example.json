@@ -1,5 +1,5 @@
 {
-  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.8.2-r1",
+  "image": "docker.io/kuzigmgm/pearl-miner:srb-3.8.3-r1",
   "max_active_instances": 1,
   "max_total_hourly_usd": 1.0,
   "poll_seconds": 10,

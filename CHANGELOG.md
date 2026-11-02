@@ -2,6 +2,14 @@
 
 本文件记录「今晚挖珍珠 · Pearl Sniper Dashboard」的重要变更。
 
+## [新租切回 Kryptex + SRBMiner 3.8.3 + RunPod 限流退避] — 2026-11-02
+
+### Changed — 变更
+- Kryptex / F2Pool 默认矿机 SRBMiner-MULTI 3.8.2 → **3.8.3**(修 pearlhash 算力 / 功耗波动):镜像 `srb-3.8.3-r1`、`srb-f2pool-3.8.3-r1`。只影响新租机器,在跑机器不迁移。QuickPod 模板与 Salad 容器组镜像需在平台后台同步改。
+
+### Fixed — 修复
+- **RunPod 长期 429 限流**:收到 429 时按响应里的 `retryAfter` 暂停 RunPod 请求(缺省 2 分钟、最长 15 分钟),期间整轮跳过,到期自动恢复;此前只是下一轮照常重试。建议 `provider_intervals_seconds.runpod` 不低于 30 秒(每轮按 `thresholds` 型号数各查一次)。
+
 ## [单账号改名 + 登录账号列] — 2026-11-02
 
 ### Changed — 变更

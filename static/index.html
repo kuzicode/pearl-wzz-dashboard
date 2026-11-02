@@ -938,7 +938,7 @@ function docGuide(){return `<div class=doc>
 <p>你<b>不用</b>手动登录每台租来的机器装环境。流程全自动:</p>
 <ol>
 <li>sniper 调用各平台 API <b>租到一块 GPU</b>。</li>
-<li>下单时把一个 <b>docker 矿机镜像</b>(随所选矿池 / 矿机自动决定: <b>Kryptex → SRBMiner-MULTI</b> <b>kuzigmgm/pearl-miner:srb-3.8.2-r1</b>(推荐, 旧驱动宿主也能跑); F2Pool → <b>srb-f2pool-3.8.2-r1</b>(账户名挖矿, 另注入 F2POOL_ACCOUNT); PearlHash → WildRig <b>v13-wildrig</b>)+ 一组<b>环境变量</b>(你的钱包 PRL_ADDRESS、矿池 PRL_HOST、worker 名等)一起下发给平台。</li>
+<li>下单时把一个 <b>docker 矿机镜像</b>(随所选矿池 / 矿机自动决定: <b>Kryptex → SRBMiner-MULTI</b> <b>kuzigmgm/pearl-miner:srb-3.8.3-r1</b>(推荐, 旧驱动宿主也能跑); F2Pool → <b>srb-f2pool-3.8.3-r1</b>(账户名挖矿, 另注入 F2POOL_ACCOUNT); PearlHash → WildRig <b>v13-wildrig</b>)+ 一组<b>环境变量</b>(你的钱包 PRL_ADDRESS、矿池 PRL_HOST、worker 名等)一起下发给平台。</li>
 <li>平台自动 <b>docker pull 拉取镜像</b> → 在租来的 GPU 上跑起容器 → 容器里的矿机<b>连上矿池开始挖 PRL</b>(Kryptex 为 PPS+ 稳定结算, 每满 1 PRL 自动付到钱包; PearlHash 按小时 epoch 分配), 收益直接进你的钱包地址。</li>
 <li>镜像内矿机会自报算力;面板通过矿池 API <b>盯着每台</b>,算力低于门槛(坏卡 / 老驱动 / 虚标)就让它停、再换一台。</li>
 </ol>

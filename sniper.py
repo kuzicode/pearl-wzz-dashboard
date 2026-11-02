@@ -1912,6 +1912,12 @@ def reconcile_runpod_instances(config, state):
     cfg = config.get("runpod", {})
     try:
         pods = list_runpod_pods()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            _runpod_backoff(exc.read().decode("utf-8", errors="replace"), state)
+        else:
+            log(f"RunPod reconcile failed: {exc}")
+        return
     except Exception as exc:
         log(f"RunPod reconcile failed: {exc}")
         return
@@ -2052,6 +2058,24 @@ def reconcile_runpod_instances(config, state):
             })
 
 
+RUNPOD_BACKOFF_DEFAULT = 120   # 429 无 retryAfter 时的退避秒数
+RUNPOD_BACKOFF_MAX = 900       # retryAfter 上限(实测见过 297 / 497 / 606)
+
+
+def _runpod_backoff(body_text, state):
+    """RunPod 429: 按响应体 retryAfter 退避(缺省 RUNPOD_BACKOFF_DEFAULT, 上限 RUNPOD_BACKOFF_MAX),
+    写 state['runpod_backoff_until']; 退避期内 run_runpod_cycle 整轮跳过(ISS-035)。"""
+    try:
+        wait = float(json.loads(body_text or "{}").get("retryAfter"))
+    except (TypeError, ValueError, AttributeError):
+        wait = RUNPOD_BACKOFF_DEFAULT
+    wait = max(1.0, min(wait, RUNPOD_BACKOFF_MAX))
+    until = epoch_now() + wait
+    if until > float(state.get("runpod_backoff_until") or 0):
+        state["runpod_backoff_until"] = until
+        log(f"RunPod 429 限流: 暂停 RunPod 请求 {int(wait)}s")
+
+
 def runpod_observe(config, state):
     cfg = config["runpod"]
     if not cfg.get("observe_enabled", False):
@@ -2086,6 +2110,9 @@ query GpuTypes($id: String!, $secureCloud: Boolean!) {
                 data = request_graphql("https://api.runpod.io/graphql", api_key, query, {"id": gpu_type, "secureCloud": secure_cloud}, timeout=15)
             except urllib.error.HTTPError as exc:
                 body_text = exc.read().decode("utf-8", errors="replace")
+                if exc.code == 429:
+                    _runpod_backoff(body_text, state)
+                    return
                 if now_ts - last_error > int(cfg.get("observe_error_log_interval_seconds", 300)):
                     log(f"RunPod observe failed: HTTP {exc.code} {body_text[:200]}")
                     state["runpod_observe_last_error_epoch"] = now_ts
@@ -2280,6 +2307,8 @@ def try_runpod_create(config, state, live):
 def run_runpod_cycle(config, state, live):
     if not config.get("runpod", {}).get("enabled", False):
         return
+    if epoch_now() < float(state.get("runpod_backoff_until") or 0):
+        return   # 429 退避期: 请求必被拒, 整轮跳过(含 reconcile 与列 pod), 到期自动恢复
     # 监控/回收(reconcile: 零算力/低效/短命拉黑)必须始终跑, 不受「暂停租用」与 create_enabled 影响;
     # 之前它挂在 try_runpod_create 的暂停/create 检查之后 → 暂停租用期间死机不回收(ISS-018)。
     if live and os.environ.get("RUNPOD_API_KEY"):

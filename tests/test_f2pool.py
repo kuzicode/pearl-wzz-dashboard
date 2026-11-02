@@ -11,8 +11,8 @@ def ck(n,c):
 
 # 镜像识别: srb-f2pool 必须在 srb→kryptex 之前命中
 for name, fn in (("sniper", S.pool_of_image), ("dashboard", D.pool_of_image)):
-    ck(f"{name}: srb-f2pool 镜像 → f2pool", fn("docker.io/kuzigmgm/pearl-miner:srb-f2pool-3.8.2-r1")=="f2pool")
-    ck(f"{name}: 普通 srb 镜像仍 → kryptex", fn("docker.io/kuzigmgm/pearl-miner:srb-3.8.2-r1")=="kryptex")
+    ck(f"{name}: srb-f2pool 镜像 → f2pool", fn("docker.io/kuzigmgm/pearl-miner:srb-f2pool-3.8.3-r1")=="f2pool")
+    ck(f"{name}: 普通 srb 镜像仍 → kryptex", fn("docker.io/kuzigmgm/pearl-miner:srb-3.8.3-r1")=="kryptex")
 ck("POOLS.f2pool 镜像能被识别回 f2pool", S.pool_of_image(S.POOLS["f2pool"]["image"])=="f2pool")
 ck("两份池费一致且 f2pool=3%", S.POOL_FEE["f2pool"]==D.POOL_FEE["f2pool"]==0.03)
 
