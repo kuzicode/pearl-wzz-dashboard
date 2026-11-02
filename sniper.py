@@ -883,9 +883,18 @@ def active_hourly_excluding(state, provider):
     return sum(float(x.get("price", 0)) for x in state.get("rented", []) if x.get("active", True) and x.get("provider") != provider)
 
 
-def already_seen(state, provider, external_id):
-    key = f"{provider}:{external_id}"
-    return key in state.get("seen", {})
+def already_seen(state, provider, external_id, max_age_seconds=None):
+    """该 offer 是否试过; max_age_seconds 给定时超过这么久的记录视为过期(可再试), 时间解析不了按未过期。"""
+    entry = state.get("seen", {}).get(f"{provider}:{external_id}")
+    if entry is None:
+        return False
+    if not max_age_seconds:
+        return True
+    try:
+        seen_epoch = dt.datetime.fromisoformat(str(entry.get("time"))).timestamp()
+    except Exception:
+        return True
+    return epoch_now() - seen_epoch < float(max_age_seconds)
 
 
 def offer_machine_ids(offer):
@@ -3660,7 +3669,8 @@ def rent_clore(config, match, state, live):
     server_id = match["id"]
     cfg = config["clore"]
     order_type = cfg.get("order_type", "spot")
-    if renting_paused("clore") or already_seen(state, "clore", server_id):
+    # 试过的服务器 24h 后可再试(此前永久跳过, 竞价没赢 / 余额不足的也再租不到); 坏机器另有 blacklist_offer / blacklist_machine 拦截
+    if renting_paused("clore") or already_seen(state, "clore", server_id, int(cfg.get("seen_ttl_seconds", 86400))):
         return False
     if active_count(state) >= int(config.get("max_active_instances", 1)):
         log(f"Clore hit but max_active_instances reached: {match['gpu']} ${match['price']:.3f}/h server={server_id}")
